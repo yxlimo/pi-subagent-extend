@@ -7,7 +7,7 @@
 //   node test/extension.test.mjs
 
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -166,6 +166,25 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(grep.reason, /任务范围/, "block reason teaches the scope")
   h.restore()
   console.log("  ok   缺省 path 视为 cwd 并按范围判定")
+}
+
+// 10. The bundled usage skill ships with the extension via resources_discover.
+{
+  const handlers = {}
+  activate({
+    on(event, fn) {
+      handlers[event] = fn
+    },
+    registerCommand() {},
+  })
+  assert.equal(typeof handlers.resources_discover, "function", "the extension registers resources_discover")
+  const result = await handlers.resources_discover({ type: "resources_discover", cwd: workdir, reason: "startup" })
+  const skillDir = result?.skillPaths?.[0]
+  assert.ok(skillDir, "resources_discover returns a skill path")
+  assert.equal(existsSync(join(skillDir, "SKILL.md")), true, "the skill path holds a SKILL.md")
+  const frontmatter = readFileSync(join(skillDir, "SKILL.md"), "utf8").slice(0, 200)
+  assert.match(frontmatter, /name: pi-allow-reads/, "the skill is named pi-allow-reads")
+  console.log("  ok   用法 skill 随扩展经 resources_discover 注册")
 }
 
 rmSync(workdir, { recursive: true, force: true })

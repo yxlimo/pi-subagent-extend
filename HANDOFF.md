@@ -7,7 +7,7 @@
 | 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
 | 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
 | 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
-| 状态 | 已实现、离线测试通过（9 例）、typecheck 通过；未做活体验证 |
+| 状态 | 已实现、离线测试通过（10 例）、typecheck 通过；未做活体验证 |
 
 ## 1. 仓库结构
 
@@ -18,6 +18,7 @@ pi-allow-reads/
 │   ├── test/extension.test.mjs 离线测试
 │   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-allow-reads）
 │   ├── package.json            pi 清单（"pi.extensions": ["src/index.ts"]）
+│   ├── skills/pi-allow-reads/SKILL.md  用法 skill，随扩展注册
 │   └── tsconfig.json
 ├── README.md
 └── HANDOFF.md                  本文件
@@ -42,6 +43,12 @@ pi-allow-reads/
   靠全局自动发现。README 推荐前者。
 - **文件来源已删除**：早先按会话 cwd 惰性解析 `.pi/allowed-reads.txt` 的路径
   随旧通道一起移除，策略在激活时一次定格。
+- **用法 skill 随扩展加载**：`skills/pi-allow-reads/SKILL.md`（调用模板、字段表、
+  注意事项）经 `resources_discover` 事件的 `skillPaths` 注册给会话（pi 1.4 的
+  `ResourcesDiscoverResult`；目录会被递归扫描找 `SKILL.md`）。扩展被加载到哪个
+  会话，该会话就看到 skill——父代理靠它知道 namespace 与传法，不需要写 `AGENTS.md`。
+  该事件在 `session_start` 之后触发，本扩展无条件注册（父会话扩展是空操作时也要
+  注册，skill 才能到达父代理）。
 - **语义变化（相对前身）**：前身把 edit/write/grep/find/ls 一律拒绝；现在范围内
   的 edit/write/grep/find/ls 放行（读写模式），只读场景用 bindings 的 `readOnly`。
   `bash`/`powershell`/`codemode` 与未知工具仍然一律拒绝。
@@ -54,24 +61,27 @@ pi-allow-reads/
 | A2 | 范围内放行 / 范围外拒绝 / 执行器与未知工具拒绝 | ✅ | 第 2 例 |
 | A3 | readOnly、显式空范围、损坏 bindings fail closed | ✅ | 第 3–5 例 |
 | A4 | maxReads 预算、allowTools、缺省 path | ✅ | 第 7–9 例 |
-| A5 | typecheck | ✅ | `pnpm run typecheck` |
-| A6 | 活体验证（真 pi 会话里 spawn 一次验证拦截） | ❌ 未做 | 见第 4 节遗留 |
+| A5 | 用法 skill 经 resources_discover 注册 | ✅ | 第 10 例 |
+| A6 | typecheck | ✅ | `pnpm run typecheck` |
+| A7 | 活体验证（真 pi 会话里 spawn 一次验证拦截） | ❌ 未做 | 见第 4 节遗留 |
 
 ## 4. 遗留
 
 1. **活体验证未做**：需要一次真实 pi 会话——agent 定义带 `subagentOnlyExtensions`，
    父代理传 bindings spawn，确认范围内外行为与拒绝文案。bindings 环境变量的实际
    传递路径（前台/后台子代理各一遍）未在真机上验证过。
-2. **父代理模型的约定**：模型不会自发知道 namespace `pi-allow-reads/1`，使用方需要
-   在项目 `AGENTS.md` 或父代理提示里写明（README 有现成片段）。
+2. **skill 与活体加载未真机验证**：`resources_discover` 的 skill 注册与 bindings
+   环境变量的传递路径都只在离线测试里覆盖，需要一次真实 pi 会话确认（skill 出现在
+   父会话可用列表、spawn 后拦截生效）。
 3. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
 
 ## 5. 源码地图
 
 ```
-packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截）
-packages/pi-plugin/test/extension.test.mjs 离线测试（9 例）
+packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
+packages/pi-plugin/test/extension.test.mjs 离线测试（10 例）
 packages/pi-plugin/install.sh              装/卸
+packages/pi-plugin/skills/pi-allow-reads/SKILL.md  用法 skill
 ```
 
 ## 6. 相关材料

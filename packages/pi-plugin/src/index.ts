@@ -12,6 +12,10 @@
  *
  * 没有 bindings 时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
+ * 扩展还随包带一个用法 skill（../skills/pi-allow-reads），经 resources_discover
+ * 注册给会话：扩展加载到哪个会话，父代理侧就能看到「委派时如何传 bindings」的约定，
+ * 不需要往 AGENTS.md 里写。
+ *
  * 生效时的规则：
  * - read / edit / write / grep / find / ls：解析 path（缺省为 cwd），命中范围
  *   放行，否则拒绝；readOnly 时 edit / write 一律拒绝
@@ -25,9 +29,12 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-allow-reads";
+/** 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。 */
+const SKILL_DIR = fileURLToPath(new URL("../skills/pi-allow-reads", import.meta.url));
 
 const READ_TOOL = "read";
 const PATH_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
@@ -155,6 +162,10 @@ export default function (pi: ExtensionAPI) {
 	// tool_call 里读不到，必须在这里取。
 	const policy = bindingsPolicy(process.env[BINDINGS_ENV]) ?? INACTIVE;
 	let allowedReads = 0;
+
+	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
+	// 可用列表；父代理据此知道委派时传 extensionBindings。
+	pi.on("resources_discover", async () => ({ skillPaths: [SKILL_DIR] }));
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (!policy.active) return;

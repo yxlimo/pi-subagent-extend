@@ -9,7 +9,7 @@ pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任�
 ## 布局
 
 ```
-packages/pi-plugin       pi 扩展   (src/index.ts, test/extension.test.mjs, install.sh)
+packages/pi-plugin       pi 扩展   (src/index.ts, test/extension.test.mjs, install.sh, skills/pi-allow-reads/SKILL.md)
 ```
 
 ## 行为
@@ -68,13 +68,7 @@ bindings 字段：
 
 namespace 是 `pi-allow-reads/1`。pi-subagents 把 bindings 编码进 `PI_SUBAGENT_EXTENSION_BINDINGS` 传给子代理，本扩展在激活时一次性读取（前台子代理的该环境变量只在会话启动前存在，之后恢复，不能懒读）。bindings 损坏或 `scope` 非法时 fail closed：会话保持运行但所有文件访问被拒绝，拒绝理由写明原因。
 
-父代理模型需要知道这个约定，在项目 `AGENTS.md`（或父代理系统提示）里加一条即可：
-
-```markdown
-委派给 worker 的子代理必须传 extensionBindings 指定任务范围：
-extensionBindings: { "pi-allow-reads/1": { "scope": ["<本任务涉及的文件/目录 glob>"] } }
-子代理范围外的所有 tool_call 会被拒绝。
-```
+父代理模型需要知道的约定打包成 skill，随扩展发布（`packages/pi-plugin/skills/pi-allow-reads/SKILL.md`）。扩展用 `resources_discover` 把 skill 目录注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到调用模板、字段表和注意事项。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-allow-reads` 可手动加载。
 
 ## 不经 pi-subagents 使用
 
