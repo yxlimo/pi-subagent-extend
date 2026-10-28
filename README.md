@@ -70,6 +70,8 @@ namespace 是 `pi-allow-reads/1`。pi-subagents 把 bindings 编码进 `PI_SUBAG
 
 父代理模型需要知道的约定打包成 skill，随扩展发布（`packages/pi-plugin/skills/pi-allow-reads/SKILL.md`）。扩展用 `resources_discover` 把 skill 目录注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到调用模板、字段表和注意事项。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-allow-reads` 可手动加载。
 
+前提：父会话也要加载本扩展，skill 才能到达父代理。`./install.sh` 全局软链即可——父会话没有 bindings，扩展是空操作，无副作用；子代理那一侧的加载用 `subagentOnlyExtensions`（前台生效）或全局自动发现（仅后台子代理）覆盖。
+
 ## 不经 pi-subagents 使用
 
 配置通道只有 bindings 一个。没有父代理时，手工导出同一环境变量即可（内容是 bindings 的 JSON）：
