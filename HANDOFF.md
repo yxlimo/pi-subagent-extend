@@ -1,0 +1,81 @@
+# HANDOFF — pi-allow-reads
+
+交接文档。后续独立 agent 接手时读这一份 + `README.md` 即可，不必翻本机历史。
+
+| | |
+| --- | --- |
+| 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
+| 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
+| 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
+| 状态 | 已实现、离线测试通过（11 例）、typecheck 通过；未做活体验证 |
+
+## 1. 仓库结构
+
+```
+pi-allow-reads/
+├── packages/pi-plugin/
+│   ├── src/index.ts            扩展本体
+│   ├── test/extension.test.mjs 离线测试
+│   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-allow-reads）
+│   ├── package.json            pi 清单（"pi.extensions": ["src/index.ts"]）
+│   └── tsconfig.json
+├── README.md
+└── HANDOFF.md                  本文件
+```
+
+只有 pi 一个宿主；`packages/` 那一层是为了跟 `~/extensions/` 下其他仓库布局一致。
+
+## 2. 机制要点
+
+- **配置通道**：pi-subagents 0.83 的 `subagent` 工具有 `extensionBindings` 参数
+  （`src/extension/schemas.js`），父代理按次传 JSON，namespace 形如 `包名/版本`。
+  pi-subagents 经 `src/runs/shared/child-launch.js` 把它编码进
+  `PI_SUBAGENT_EXTENSION_BINDINGS` 环境变量传给子代理。本扩展的 namespace 是
+  `pi-allow-reads/1`，在 `src/index.ts` 的 `BINDING_NAMESPACE`。
+- **读取时机**：bindings 与 `PI_ALLOWED_FILES` 在扩展激活（factory）时定格。文档
+  （pi-subagents `docs/tool-reference.md` 的 extensionBindings 行）明确：前台子代理
+  的该环境变量只在会话启动前存在，之后父进程环境恢复，tool_call 里读不到。
+- **前台子代理不加载 ambient extensions**：要让扩展在子代理里可用，agent 定义必须
+  写 `subagentOnlyExtensions`（前台后台都生效）或 `extensions`，或只跑后台子代理
+  靠全局自动发现。README 推荐前者。
+- **文件来源（`.pi/allowed-reads.txt`）依赖会话 cwd**，在首次 tool_call 时按
+  `ctx.cwd` 解析并缓存；bindings/env 优先时不读文件。
+- **语义变化（相对前身）**：前身把 edit/write/grep/find/ls 一律拒绝；现在范围内
+  的 edit/write/grep/find/ls 放行（读写模式），env/file 兜底来源保持只读语义。
+  `bash`/`powershell`/`codemode` 与未知工具仍然一律拒绝。
+
+## 3. 验收状态
+
+| 编号 | 项 | 状态 | 依据 |
+| --- | --- | --- | --- |
+| A1 | 无配置时不生效 | ✅ | `node test/extension.test.mjs` 第 1 例 |
+| A2 | 范围内放行 / 范围外拒绝 / 执行器与未知工具拒绝 | ✅ | 第 2 例 |
+| A3 | readOnly、显式空范围、损坏 bindings fail closed | ✅ | 第 3–5 例 |
+| A4 | maxReads 预算、allowTools、env/file 兜底、缺省 path | ✅ | 第 7–11 例 |
+| A5 | typecheck | ✅ | `pnpm run typecheck` |
+| A6 | 活体验证（真 pi 会话里 spawn 一次验证拦截） | ❌ 未做 | 见第 4 节遗留 |
+
+## 4. 遗留
+
+1. **活体验证未做**：需要一次真实 pi 会话——agent 定义带 `subagentOnlyExtensions`，
+   父代理传 bindings spawn，确认范围内外行为与拒绝文案。bindings 环境变量的实际
+   传递路径（前台/后台子代理各一遍）未在真机上验证过。
+2. **父代理模型的约定**：模型不会自发知道 namespace `pi-allow-reads/1`，使用方需要
+   在项目 `AGENTS.md` 或父代理提示里写明（README 有现成片段）。
+3. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
+
+## 5. 源码地图
+
+```
+packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截）
+packages/pi-plugin/test/extension.test.mjs 离线测试（11 例）
+packages/pi-plugin/install.sh              装/卸
+```
+
+## 6. 相关材料
+
+- pi-subagents bindings 规则：`~/.pi/agent/npm/node_modules/pi-subagents/src/runs/shared/extension-bindings.js`
+  （namespace 正则、16 KiB/深度/属性数上限）、`docs/tool-reference.md` 搜 extensionBindings
+- pi 扩展 API 类型：`~/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts`
+  （`ToolCallEvent` 联合类型、`ToolCallEventResult.block/reason`）
+- 同类仓库：`~/extensions/subagent-only-skills/`（布局与测试模板来源）
