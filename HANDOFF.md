@@ -7,7 +7,7 @@
 | 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
 | 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
 | 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
-| 状态 | 已实现、离线测试通过（11 例）、typecheck 通过；未做活体验证 |
+| 状态 | 已实现、离线测试通过（9 例）、typecheck 通过；未做活体验证 |
 
 ## 1. 仓库结构
 
@@ -32,16 +32,18 @@ pi-allow-reads/
   pi-subagents 经 `src/runs/shared/child-launch.js` 把它编码进
   `PI_SUBAGENT_EXTENSION_BINDINGS` 环境变量传给子代理。本扩展的 namespace 是
   `pi-allow-reads/1`，在 `src/index.ts` 的 `BINDING_NAMESPACE`。
-- **读取时机**：bindings 与 `PI_ALLOWED_FILES` 在扩展激活（factory）时定格。文档
+- **读取时机**：bindings 在扩展激活（factory）时定格。文档
   （pi-subagents `docs/tool-reference.md` 的 extensionBindings 行）明确：前台子代理
   的该环境变量只在会话启动前存在，之后父进程环境恢复，tool_call 里读不到。
+  配置通道只有这一个；早先的 `PI_ALLOWED_FILES` / `.pi/allowed-reads.txt` 兜底
+  通道已删除。
 - **前台子代理不加载 ambient extensions**：要让扩展在子代理里可用，agent 定义必须
   写 `subagentOnlyExtensions`（前台后台都生效）或 `extensions`，或只跑后台子代理
   靠全局自动发现。README 推荐前者。
-- **文件来源（`.pi/allowed-reads.txt`）依赖会话 cwd**，在首次 tool_call 时按
-  `ctx.cwd` 解析并缓存；bindings/env 优先时不读文件。
+- **文件来源已删除**：早先按会话 cwd 惰性解析 `.pi/allowed-reads.txt` 的路径
+  随旧通道一起移除，策略在激活时一次定格。
 - **语义变化（相对前身）**：前身把 edit/write/grep/find/ls 一律拒绝；现在范围内
-  的 edit/write/grep/find/ls 放行（读写模式），env/file 兜底来源保持只读语义。
+  的 edit/write/grep/find/ls 放行（读写模式），只读场景用 bindings 的 `readOnly`。
   `bash`/`powershell`/`codemode` 与未知工具仍然一律拒绝。
 
 ## 3. 验收状态
@@ -51,7 +53,7 @@ pi-allow-reads/
 | A1 | 无配置时不生效 | ✅ | `node test/extension.test.mjs` 第 1 例 |
 | A2 | 范围内放行 / 范围外拒绝 / 执行器与未知工具拒绝 | ✅ | 第 2 例 |
 | A3 | readOnly、显式空范围、损坏 bindings fail closed | ✅ | 第 3–5 例 |
-| A4 | maxReads 预算、allowTools、env/file 兜底、缺省 path | ✅ | 第 7–11 例 |
+| A4 | maxReads 预算、allowTools、缺省 path | ✅ | 第 7–9 例 |
 | A5 | typecheck | ✅ | `pnpm run typecheck` |
 | A6 | 活体验证（真 pi 会话里 spawn 一次验证拦截） | ❌ 未做 | 见第 4 节遗留 |
 
@@ -68,7 +70,7 @@ pi-allow-reads/
 
 ```
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截）
-packages/pi-plugin/test/extension.test.mjs 离线测试（11 例）
+packages/pi-plugin/test/extension.test.mjs 离线测试（9 例）
 packages/pi-plugin/install.sh              装/卸
 ```
 

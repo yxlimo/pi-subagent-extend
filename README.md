@@ -29,11 +29,7 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 
 ## 配置来源
 
-优先级从高到低，命中即停；三者都未配置时扩展不生效，父会话与未绑定范围的子代理不受影响：
-
-1. **pi-subagents `extensionBindings`**（推荐，按次指定）——见下节。
-2. `PI_ALLOWED_FILES` 环境变量——逗号分隔 glob；此来源是只读语义。可选 `PI_MAX_READS` 限制成功 read 次数。
-3. `<cwd>/.pi/allowed-reads.txt`——每行一个 glob，`#` 后为注释；只读语义。
+只有一条：pi-subagents 的 `extensionBindings`。没有 bindings 时扩展不生效，父会话与未绑定范围的子代理不受影响。
 
 通配符：`**` 任意层目录、`*` 单层内任意字符、`?` 单字符。纯路径 glob 额外匹配该目录自身与其下所有内容：范围写 `src` 或 `src/**` 都覆盖 `src` 全目录。
 
@@ -80,10 +76,12 @@ extensionBindings: { "pi-allow-reads/1": { "scope": ["<本任务涉及的文件/
 子代理范围外的所有 tool_call 会被拒绝。
 ```
 
-## 独立用法
+## 不经 pi-subagents 使用
+
+配置通道只有 bindings 一个。没有父代理时，手工导出同一环境变量即可（内容是 bindings 的 JSON）：
 
 ```bash
-PI_ALLOWED_FILES="src/auth.ts,src/config/**" \
+PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-allow-reads/1":{"scope":["src/**"],"readOnly":true}}' \
 pi -e ~/extensions/pi-allow-reads/packages/pi-plugin/src/index.ts --tools read --no-session -p "<task>"
 ```
 

@@ -7,7 +7,7 @@
 //   node test/extension.test.mjs
 
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -17,14 +17,11 @@ const repo = join(here, "..")
 
 const { default: activate } = await import(join(repo, "src", "index.ts"))
 
-/** Activate the extension with the given env and return its tool_call handler. */
-async function handler({ env = {}, cwd }) {
-  const previous = {}
-  for (const key of ["PI_SUBAGENT_EXTENSION_BINDINGS", "PI_ALLOWED_FILES", "PI_MAX_READS"]) {
-    previous[key] = process.env[key]
-    delete process.env[key]
-  }
-  Object.assign(process.env, env)
+/** Activate the extension with the given bindings env and return its tool_call handler. */
+async function handler({ bindings, cwd = workdir }) {
+  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
 
   const handlers = {}
   const ui = []
@@ -45,33 +42,29 @@ async function handler({ env = {}, cwd }) {
     call: async (toolName, input) => handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx),
     ui,
     restore: () => {
-      for (const key of Object.keys(previous)) {
-        if (previous[key] === undefined) delete process.env[key]
-        else process.env[key] = previous[key]
-      }
+      if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+      else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous
     },
   }
 }
 
 const workdir = mkdtempSync(join(tmpdir(), "pi-allow-reads-test-"))
 mkdirSync(join(workdir, "src/auth"), { recursive: true })
-mkdirSync(join(workdir, "docs"), { recursive: true })
 
-// 1. Nothing configured: the extension is inert, every call passes.
+// 1. No bindings: the extension is inert, every call passes.
 {
-  const h = await handler({ cwd: workdir })
+  const h = await handler({ bindings: undefined })
   assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "unconfigured read passes")
   assert.equal(await h.call("bash", { command: "ls" }), undefined, "unconfigured bash passes")
   assert.equal(h.ui.length, 0, "unconfigured session_start stays silent")
   h.restore()
-  console.log("  ok   无配置时不生效，父会话不受影响")
+  console.log("  ok   无 bindings 时不生效，父会话不受影响")
 }
 
 // 2. Bindings scope: reads and in-scope writes pass, everything else is denied.
 {
   const h = await handler({
-    cwd: workdir,
-    env: { PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/auth/**", "src/**", "README.md"] } }) },
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/auth/**", "src/**", "README.md"] } }),
   })
   assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "in-scope read passes")
   assert.equal(await h.call("edit", { path: "src/auth/login.ts" }), undefined, "in-scope edit passes")
@@ -102,10 +95,7 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
 // 3. readOnly bindings block edit/write even inside the scope.
 {
   const h = await handler({
-    cwd: workdir,
-    env: {
-      PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], readOnly: true } }),
-    },
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], readOnly: true } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read-only read passes")
   const edit = await h.call("edit", { path: "src/a.ts" })
@@ -117,10 +107,7 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
 
 // 4. Explicit empty scope denies every file access.
 {
-  const h = await handler({
-    cwd: workdir,
-    env: { PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "pi-allow-reads/1": { scope: [] } }) },
-  })
+  const h = await handler({ bindings: JSON.stringify({ "pi-allow-reads/1": { scope: [] } }) })
   const read = await h.call("read", { path: "src/a.ts" })
   assert.equal(read?.block, true, "an explicit empty scope denies reads")
   h.restore()
@@ -129,7 +116,7 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
 
 // 5. Malformed bindings fail closed with a diagnosable reason.
 {
-  const h = await handler({ cwd: workdir, env: { PI_SUBAGENT_EXTENSION_BINDINGS: "{not json" } })
+  const h = await handler({ bindings: "{not json" })
   const read = await h.call("read", { path: "src/a.ts" })
   assert.equal(read?.block, true, "malformed bindings deny reads")
   assert.match(read.reason, /不是合法 JSON/, "block reason names the parse error")
@@ -139,10 +126,7 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
 
 // 6. Bindings for another namespace leave this extension inert.
 {
-  const h = await handler({
-    cwd: workdir,
-    env: { PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "some-other-ext/1": { data: 1 } }) },
-  })
+  const h = await handler({ bindings: JSON.stringify({ "some-other-ext/1": { data: 1 } }) })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "foreign bindings do not engage the scope")
   h.restore()
   console.log("  ok   别的扩展的绑定不触发本扩展")
@@ -151,10 +135,7 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
 // 7. maxReads caps successful reads.
 {
   const h = await handler({
-    cwd: workdir,
-    env: {
-      PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], maxReads: 2 } }),
-    },
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], maxReads: 2 } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read 1 passes")
   assert.equal(await h.call("read", { path: "src/b.ts" }), undefined, "read 2 passes")
@@ -169,12 +150,7 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
 // 8. allowTools opens holes for named non-executor tools.
 {
   const h = await handler({
-    cwd: workdir,
-    env: {
-      PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({
-        "pi-allow-reads/1": { scope: ["src/**"], allowTools: ["todo_write"] },
-      }),
-    },
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], allowTools: ["todo_write"] } }),
   })
   assert.equal(await h.call("todo_write", { items: [] }), undefined, "allowTools entry passes")
   assert.equal((await h.call("bash", { command: "ls" }))?.block, true, "allowTools cannot re-enable executors")
@@ -182,41 +158,9 @@ mkdirSync(join(workdir, "docs"), { recursive: true })
   console.log("  ok   allowTools 放行点名工具，但执行器类仍拒绝")
 }
 
-// 9. PI_ALLOWED_FILES fallback keeps the legacy read-only semantics.
+// 9. Search tools without an explicit path default to cwd and get judged on it.
 {
-  const h = await handler({ cwd: workdir, env: { PI_ALLOWED_FILES: "src/auth.ts,docs/**" } })
-  assert.equal(await h.call("read", { path: "docs/x.md" }), undefined, "env allowlist read passes")
-  const edit = await h.call("edit", { path: "docs/x.md" })
-  assert.equal(edit?.block, true, "env allowlist is read-only")
-  const outside = await h.call("read", { path: "src/other.ts" })
-  assert.equal(outside?.block, true, "env allowlist blocks outside reads")
-  h.restore()
-  console.log("  ok   PI_ALLOWED_FILES 兜底，保持只读语义")
-}
-
-// 10. .pi/allowed-reads.txt fallback, resolved against the session cwd.
-{
-  const h = await handler({ cwd: workdir, env: {} })
-  // First activation without env: the file is still missing at this point, so
-  // write it and re-activate for the actual assertions.
-  h.restore()
-  mkdirSync(join(workdir, ".pi"), { recursive: true })
-  writeFileSync(join(workdir, ".pi/allowed-reads.txt"), "src/** # scope\n")
-  const h2 = await handler({ cwd: workdir, env: {} })
-  assert.equal(await h2.call("read", { path: "src/a.ts" }), undefined, "file allowlist read passes")
-  const edit = await h2.call("edit", { path: "src/a.ts" })
-  assert.equal(edit?.block, true, "file allowlist is read-only")
-  assert.match(h2.ui[0] ?? "", /任务范围生效/, "session_start reports the active scope")
-  h2.restore()
-  console.log("  ok   .pi/allowed-reads.txt 兜底，只读语义，session_start 有提示")
-}
-
-// 11. Search tools without an explicit path default to cwd and get judged on it.
-{
-  const h = await handler({
-    cwd: workdir,
-    env: { PI_SUBAGENT_EXTENSION_BINDINGS: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"] } }) },
-  })
+  const h = await handler({ bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"] } }) })
   const grep = await h.call("grep", { pattern: "x" })
   assert.equal(grep?.block, true, "pathless grep (cwd) is out of scope here")
   assert.match(grep.reason, /任务范围/, "block reason teaches the scope")

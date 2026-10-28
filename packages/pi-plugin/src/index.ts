@@ -4,17 +4,13 @@
  * 设计目标：父代理委派子代理时指定本次任务的文件/目录范围，子代理会话里
  * 范围之外的 tool_call 一律拒绝（fail closed），防止子代理漫无目的地扫仓库。
  *
- * 配置来源（优先级从高到低，命中即停）：
- * 1. pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
+ * 配置只来自 pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
  *      extensionBindings: { "pi-allow-reads/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
- *    pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
- *    激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
- *    之后父进程环境被恢复，所以不能在 tool_call 里懒读。
- * 2. 环境变量 PI_ALLOWED_FILES（逗号分隔 glob），可选 PI_MAX_READS。独立运行
- *    （pi -e）时用；此来源是只读语义。
- * 3. <cwd>/.pi/allowed-reads.txt（每行一个 glob，# 后为注释）。只读语义。
+ * pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
+ * 激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
+ * 之后父进程环境被恢复，所以不能在 tool_call 里懒读。
  *
- * 三者都未配置时扩展不生效：父会话和未绑定范围的子代理不受影响。
+ * 没有 bindings 时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
  * 生效时的规则：
  * - read / edit / write / grep / find / ls：解析 path（缺省为 cwd），命中范围
@@ -28,14 +24,10 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-allow-reads";
-const ENVALLOWS = "PI_ALLOWED_FILES";
-const ENVMAXREADS = "PI_MAX_READS";
-const CONFIGFILE = ".pi/allowed-reads.txt";
 
 const READ_TOOL = "read";
 const PATH_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
@@ -64,7 +56,7 @@ const INACTIVE: Policy = {
 	active: false,
 };
 
-/** 配置存在但无法使用时的策略：会话保持活跃，但什么都拿不到。 */
+/** bindings 存在但无法使用时的策略：会话保持活跃，但什么都拿不到。 */
 function denyAll(source: string): Policy {
 	return { globs: [], regexps: [], source, readOnly: true, maxReads: 0, allowTools: [], active: true };
 }
@@ -142,44 +134,6 @@ function bindingsPolicy(raw: string | undefined): Policy | undefined {
 	};
 }
 
-/** 环境变量来源，只读语义。 */
-function envPolicy(): Policy | undefined {
-	const env = process.env[ENVALLOWS]?.trim();
-	if (!env) return undefined;
-	const globs = env.split(",").map((s) => s.trim()).filter(Boolean);
-	return {
-		globs,
-		regexps: compile(globs),
-		source: `${ENVALLOWS} 环境变量`,
-		readOnly: true,
-		maxReads: positiveInt(process.env[ENVMAXREADS]),
-		allowTools: [],
-		active: true,
-	};
-}
-
-/** <cwd>/.pi/allowed-reads.txt 来源，只读语义；文件不存在则不生效。 */
-function loadFilePolicy(cwd: string): Policy {
-	try {
-		const text = readFileSync(resolve(cwd, CONFIGFILE), "utf-8");
-		const globs = text
-			.split(/\r?\n/)
-			.map((l) => l.replace(/#.*$/, "").trim())
-			.filter(Boolean);
-		return {
-			globs,
-			regexps: compile(globs),
-			source: CONFIGFILE,
-			readOnly: true,
-			maxReads: positiveInt(process.env[ENVMAXREADS]),
-			allowTools: [],
-			active: true,
-		};
-	} catch {
-		return INACTIVE;
-	}
-}
-
 function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 	if (policy.globs.length === 0) return false;
 	const abs = resolve(cwd, target);
@@ -197,24 +151,12 @@ function preview(globs: string[]): string {
 }
 
 export default function (pi: ExtensionAPI) {
-	// 绑定与环境变量在激活时定格：前台子代理的 bindings 环境变量只在会话启动前
-	// 存在，tool_call 里读不到，必须在这里取。
-	const staticPolicy = bindingsPolicy(process.env[BINDINGS_ENV]) ?? envPolicy();
-	// 文件来源依赖会话 cwd，首次用到时再解析并缓存。
-	let file: Policy | undefined;
-	let fileResolved = false;
-	const currentPolicy = (cwd: string): Policy => {
-		if (staticPolicy) return staticPolicy;
-		if (!fileResolved) {
-			fileResolved = true;
-			file = loadFilePolicy(cwd);
-		}
-		return file ?? INACTIVE;
-	};
+	// bindings 在激活时定格：前台子代理的 bindings 环境变量只在会话启动前存在，
+	// tool_call 里读不到，必须在这里取。
+	const policy = bindingsPolicy(process.env[BINDINGS_ENV]) ?? INACTIVE;
 	let allowedReads = 0;
 
 	pi.on("session_start", async (_event, ctx) => {
-		const policy = currentPolicy(ctx.cwd ?? process.cwd());
 		if (!policy.active) return;
 		const budget = policy.maxReads > 0 ? `，read 预算 ${policy.maxReads} 次` : "";
 		const mode = policy.readOnly ? "只读" : "读写";
@@ -225,9 +167,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const cwd = ctx.cwd ?? process.cwd();
-		const policy = currentPolicy(cwd);
 		if (!policy.active) return;
+		const cwd = ctx.cwd ?? process.cwd();
 		const deny = (reason: string) => ({ block: true, reason } as const);
 
 		if (EXEC_TOOLS.includes(event.toolName)) {
@@ -266,7 +207,6 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("allowed-reads", {
 		description: "查看当前任务范围与 read 计数",
 		handler: async (_args, ctx) => {
-			const policy = currentPolicy(ctx.cwd ?? process.cwd());
 			const lines = policy.active
 				? [
 					`来源: ${policy.source}`,
@@ -274,7 +214,7 @@ export default function (pi: ExtensionAPI) {
 					`已读 ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""} 次`,
 					...policy.globs.map((g) => `  ${g}`),
 				]
-				: ["未生效（没有 extensionBindings、PI_ALLOWED_FILES 或 .pi/allowed-reads.txt）"];
+				: ["未生效（本会话没有 pi-allow-reads 的 extensionBindings）"];
 			ctx.ui.notify(`pi-allow-reads:\n${lines.join("\n")}`, "info");
 		},
 	});
