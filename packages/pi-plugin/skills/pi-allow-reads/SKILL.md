@@ -1,6 +1,6 @@
 ---
 name: pi-allow-reads
-description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-allow-reads/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝。
+description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-allow-reads/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝；需要子代理自己跑测试/typecheck 时用 bash.allow 点名命令，在 bwrap 沙箱里执行。
 ---
 
 # pi-allow-reads：给子代理限定任务范围
@@ -16,13 +16,32 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 
 扩展没加载时 bindings 传了也没用，拦截不会发生。
 
+`bash.allow` 里的命令靠 bwrap 跑；机器上没有 bwrap 时 bash 保持关闭（其余功能不受影响）。
+
 ## 调用模板
+
+只读/读写文件、不需要跑命令：
 
 ```
 subagent(
   agent: "<agent-name>",
   task: "<任务描述>",
   extensionBindings: { "pi-allow-reads/1": { "scope": ["<文件/目录 glob>", "..."] } }
+)
+```
+
+需要子代理自己跑测试或 typecheck：
+
+```
+subagent(
+  agent: "<agent-name>",
+  task: "<任务描述>，完成后跑 typecheck 并报告结果",
+  extensionBindings: {
+    "pi-allow-reads/1": {
+      "scope": ["<文件/目录 glob>"],
+      "bash": { "allow": ["pnpm run typecheck", "pnpm test"] }
+    }
+  }
 )
 ```
 
@@ -57,5 +76,7 @@ glob：`**` 任意层目录、`*` 单层内任意字符、`?` 单字符。范围
 - 子代理报「某路径不在任务范围内」时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。
 - 不要为绕开拒绝而反复重试范围外的路径。
 - 需要子代理自己跑测试/typecheck 时，把命令写进 `bash.allow`（逐条前缀，别写 `*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。
+- 沙箱挡越界写与联网，不挡读：跑测试要读整棵树，所以白名单命令在沙箱里仍可 `cat` 范围外文件。不要把 `bash.allow` 当成「连读也锁住」的手段。
+- 子代理报「bash 命令不在白名单内」时，先判断这条命令是否本任务必需：必需就把它加进 `bash.allow` 重派；不必要就改任务描述，别让它反复试。
 - 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
 - bindings 总量上限 16 KiB，scope 用简洁 glob 即可。
