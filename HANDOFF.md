@@ -7,7 +7,7 @@
 | 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
 | 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
 | 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
-| 状态 | 已实现、离线测试通过（11 例）、typecheck 通过；未做活体验证 |
+| 状态 | 已实现、离线测试通过（11 例）、typecheck 通过；活体验证通过（前台子代理拦截 + 父会话 skill 可见） |
 
 ## 1. 仓库结构
 
@@ -63,17 +63,17 @@ pi-allow-reads/
 | A4 | maxReads 预算、allowTools、缺省 path | ✅ | 第 7–9 例 |
 | A5 | 用法 skill 经 resources_discover 注册；已上锁会话不注册 | ✅ | 第 10–11 例 |
 | A6 | typecheck | ✅ | `pnpm run typecheck` |
-| A7 | 活体验证（真 pi 会话里 spawn 一次验证拦截） | ❌ 未做 | 见第 4 节遗留 |
+| A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-allow-reads` |
+| A8 | 活体验证：带 bindings 的前台子代理被拦截 | ✅ | 同日 `be-core` + scope `package.json` 委派，子代理读 `README.md` 被拒，文案含范围与来源 |
+
+实测记下来的坑：`pi -p -nt`（`noTools: "all"`）不会把 skills 段放进提示词，模型会回答
+「没有可用 skill」。验证 skill 是否注册不要加 `-nt`。
 
 ## 4. 遗留
 
-1. **活体验证未做**：需要一次真实 pi 会话——agent 定义带 `subagentOnlyExtensions`，
-   父代理传 bindings spawn，确认范围内外行为与拒绝文案。bindings 环境变量的实际
-   传递路径（前台/后台子代理各一遍）未在真机上验证过。
-2. **skill 与活体加载未真机验证**：`resources_discover` 的 skill 注册与 bindings
-   环境变量的传递路径都只在离线测试里覆盖，需要一次真实 pi 会话确认（skill 出现在
-   父会话可用列表、spawn 后拦截生效）。
-3. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
+1. **后台子代理路径未实测**：前台（async: false，in-process）已验证；后台子代理走
+   ambient discovery，需要全局安装扩展才加载，未单独跑过。
+2. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
 
 ## 5. 源码地图
 
