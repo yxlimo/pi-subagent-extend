@@ -164,8 +164,9 @@ export default function (pi: ExtensionAPI) {
 	let allowedReads = 0;
 
 	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
-	// 可用列表；父代理据此知道委派时传 extensionBindings。
-	pi.on("resources_discover", async () => ({ skillPaths: [SKILL_DIR] }));
+	// 可用列表；父代理据此知道委派时传 extensionBindings。已上锁的会话不注册——
+	// 它不委派，也不该去读一个自己被范围拦住的文件。
+	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: [SKILL_DIR] }));
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (!policy.active) return;

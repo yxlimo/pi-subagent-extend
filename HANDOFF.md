@@ -7,7 +7,7 @@
 | 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
 | 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
 | 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
-| 状态 | 已实现、离线测试通过（10 例）、typecheck 通过；未做活体验证 |
+| 状态 | 已实现、离线测试通过（11 例）、typecheck 通过；未做活体验证 |
 
 ## 1. 仓库结构
 
@@ -47,8 +47,8 @@ pi-allow-reads/
   注意事项）经 `resources_discover` 事件的 `skillPaths` 注册给会话（pi 1.4 的
   `ResourcesDiscoverResult`；目录会被递归扫描找 `SKILL.md`）。扩展被加载到哪个
   会话，该会话就看到 skill——父代理靠它知道 namespace 与传法，不需要写 `AGENTS.md`。
-  该事件在 `session_start` 之后触发，本扩展无条件注册（父会话扩展是空操作时也要
-  注册，skill 才能到达父代理）。
+  该事件在 `session_start` 之后触发；绑定生效的会话（已上锁的子代理）不注册 skill，
+  父代理与未上锁会话照常注册。
 - **语义变化（相对前身）**：前身把 edit/write/grep/find/ls 一律拒绝；现在范围内
   的 edit/write/grep/find/ls 放行（读写模式），只读场景用 bindings 的 `readOnly`。
   `bash`/`powershell`/`codemode` 与未知工具仍然一律拒绝。
@@ -61,7 +61,7 @@ pi-allow-reads/
 | A2 | 范围内放行 / 范围外拒绝 / 执行器与未知工具拒绝 | ✅ | 第 2 例 |
 | A3 | readOnly、显式空范围、损坏 bindings fail closed | ✅ | 第 3–5 例 |
 | A4 | maxReads 预算、allowTools、缺省 path | ✅ | 第 7–9 例 |
-| A5 | 用法 skill 经 resources_discover 注册 | ✅ | 第 10 例 |
+| A5 | 用法 skill 经 resources_discover 注册；已上锁会话不注册 | ✅ | 第 10–11 例 |
 | A6 | typecheck | ✅ | `pnpm run typecheck` |
 | A7 | 活体验证（真 pi 会话里 spawn 一次验证拦截） | ❌ 未做 | 见第 4 节遗留 |
 
@@ -79,7 +79,7 @@ pi-allow-reads/
 
 ```
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
-packages/pi-plugin/test/extension.test.mjs 离线测试（10 例）
+packages/pi-plugin/test/extension.test.mjs 离线测试（11 例）
 packages/pi-plugin/install.sh              装/卸
 packages/pi-plugin/skills/pi-allow-reads/SKILL.md  用法 skill
 ```

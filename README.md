@@ -29,7 +29,7 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 
 ## 配置来源
 
-只有一条：pi-subagents 的 `extensionBindings`。没有 bindings 时扩展不生效，父会话与未绑定范围的子代理不受影响。
+只有一条：pi-subagents 的 `extensionBindings`。没有 bindings 时扩展不生效，父会话与未绑定范围的子代理不受影响。已上锁的会话也不再注册下面的用法 skill。
 
 通配符：`**` 任意层目录、`*` 单层内任意字符、`?` 单字符。纯路径 glob 额外匹配该目录自身与其下所有内容：范围写 `src` 或 `src/**` 都覆盖 `src` 全目录。
 

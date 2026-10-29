@@ -187,5 +187,23 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   用法 skill 随扩展经 resources_discover 注册")
 }
 
+// 11. A scoped session does not advertise the delegation skill.
+{
+  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"] } })
+  const handlers = {}
+  activate({
+    on(event, fn) {
+      handlers[event] = fn
+    },
+    registerCommand() {},
+  })
+  const result = await handlers.resources_discover({ type: "resources_discover", cwd: workdir, reason: "startup" })
+  assert.equal(result?.skillPaths, undefined, "a scoped session gets no skill path")
+  if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous
+  console.log("  ok   已上锁的会话不注册委派 skill")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-allow-reads 测试通过")
