@@ -205,5 +205,74 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   已上锁的会话不注册委派 skill")
 }
 
+// 12. bash allowlist: a listed command runs wrapped in bwrap, everything else is denied.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": { scope: ["src/**"], bash: { allow: ["pnpm run typecheck", "pnpm test"] } },
+    }),
+  })
+  const input = { command: "pnpm run typecheck" }
+  assert.equal(await h.call("bash", input), undefined, "listed command passes")
+  assert.match(input.command, /^'\/[^']*bwrap' '--ro-bind' '\/' '\/'/, "command is rewritten to run under bwrap")
+  assert.match(input.command, /'--unshare-net'/, "network is off by default")
+  assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
+  assert.ok(!/--bind/.test(input.command), "nothing is writable by default")
+
+  const other = { command: "pnpm publish" }
+  const denied = await h.call("bash", other)
+  assert.equal(denied?.block, true, "unlisted command is denied")
+  assert.match(denied.reason, /不在白名单内/)
+  assert.equal(other.command, "pnpm publish", "denied command is left untouched")
+
+  const inject = { command: "pnpm test; cat /etc/passwd" }
+  const meta = await h.call("bash", inject)
+  assert.equal(meta?.block, true, "shell metacharacters are rejected even behind a listed prefix")
+
+  assert.equal((await h.call("powershell", { command: "dir" }))?.block, true, "powershell stays denied")
+  h.restore()
+  console.log("  ok   bash 白名单命中即放行并改写为 bwrap 沙箱，其余拒绝")
+}
+
+// 13. bash without an allowlist stays closed, with a hint about bash.allow.
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"] } }) })
+  const denied = await h.call("bash", { command: "pnpm test" })
+  assert.equal(denied?.block, true, "bash is denied when no allowlist is configured")
+  assert.match(denied.reason, /bash\.allow/, "denial explains how to open it")
+  h.restore()
+  console.log("  ok   没配 bash.allow 时 bash 仍然关闭，拒绝文案给出开法")
+}
+
+// 14. writable + network options, and a missing bwrap fails closed.
+{
+  mkdirSync(join(workdir, "src/auth"), { recursive: true })
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        bash: { allow: ["node harness.mjs"], writable: true, network: true },
+      },
+    }),
+  })
+  const input = { command: "node harness.mjs" }
+  assert.equal(await h.call("bash", input), undefined, "listed command passes")
+  assert.match(input.command, /'--bind' '[^']*\/src' '[^']*\/src'/, "scope dir is bound writable")
+  assert.ok(!/--unshare-net/.test(input.command), "network stays on when requested")
+  h.restore()
+
+  const previous = process.env.PI_ALLOW_READS_BWRAP
+  process.env.PI_ALLOW_READS_BWRAP = "/nonexistent/bwrap"
+  const h2 = await handler({
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], bash: { allow: ["node harness.mjs"] } } }),
+  })
+  const missing = await h2.call("bash", { command: "node harness.mjs" })
+  assert.equal(missing?.block, true, "no bwrap means no bash, even for a listed command")
+  h2.restore()
+  if (previous === undefined) delete process.env.PI_ALLOW_READS_BWRAP
+  else process.env.PI_ALLOW_READS_BWRAP = previous
+  console.log("  ok   writable/network 选项生效；找不到 bwrap 时 fail closed")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-allow-reads 测试通过")

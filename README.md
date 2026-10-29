@@ -21,11 +21,32 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 | `read` | 解析 path（缺省视为 cwd），命中范围放行，否则拒绝；受 `maxReads` 预算约束 |
 | `edit` / `write` | 同上；`readOnly` 时即使范围内也拒绝 |
 | `grep` / `find` / `ls` | 同上（path 缺省为 cwd） |
-| `bash` / `powershell` / `codemode` | 一律拒绝（没有路径可判，能绕过范围） |
+| `bash` | 没配 `bash.allow` 时一律拒绝；配了则只放行命中白名单的命令，并改写为 bwrap 沙箱里执行（根只读、默认断网、scope 可写需 `writable`）；命令含 shell 元字符直接拒绝 |
+| `powershell` / `codemode` | 一律拒绝（没有路径可判，能绕过范围） |
 | `structured_output` | 放行（会话级运行时工具，不碰文件系统） |
 | 其余未知工具 | 拒绝；`allowTools` 里点名的工具放行（执行器类仍拒绝） |
 
-范围生效时会话开始有提示；`/allowed-reads` 查看当前范围、模式与 read 计数。
+范围生效时会话开始有提示；`/allowed-reads` 查看当前范围、模式、bash 白名单与 read 计数。
+
+### bash 白名单与沙箱
+
+子代理要跑测试/typecheck 时，父代理在 bindings 里点名命令：
+
+```json
+{ "pi-allow-reads/1": { "scope": ["lib/router/**"], "bash": { "allow": ["pnpm run typecheck", "pnpm test"] } } }
+```
+
+放行的命令会改写成：
+
+```
+bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net --die-with-parent --chdir <cwd> -- bash -lc '<命令>'
+```
+
+- 前缀按空白切词逐 token 比配：`pnpm test` 匹配 `pnpm test -t foo`，不匹配 `pnpm publish`。
+- 命令里出现 `; & | < > \` $ \` 等元字符直接拒绝，白名单前缀拼不进别的命令。
+- 默认只读根、断网：写仓库外被拒、联网被拒。`"writable": true` 把 scope 命中的目录绑成可写（测试产物落地）；`"network": true` 放开网络。
+- 找不到 `bwrap` 时 fail closed：白名单命令也不执行，拒绝理由说明原因。`PI_ALLOW_READS_BWRAP` 可指定二进制路径。
+- 上限明确：沙箱防的是**越界写和联网**，不是读。跑测试本身就要读整棵树（`node_modules`、配置），所以 `cat` 仓库里范围外的文件在沙箱内仍可读——读的约束仍由 `read`/`grep` 等工具层负责。
 
 ## 配置来源
 

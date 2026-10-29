@@ -7,7 +7,7 @@
 | 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
 | 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
 | 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
-| 状态 | 已实现、离线测试通过（11 例）、typecheck 通过；活体验证通过（前台子代理拦截 + 父会话 skill 可见） |
+| 状态 | 已实现、离线测试通过（14 例）、typecheck 通过；活体验证通过（前台子代理拦截 + 父会话 skill 可见） |
 
 ## 1. 仓库结构
 
@@ -51,7 +51,15 @@ pi-allow-reads/
   父代理与未上锁会话照常注册。
 - **语义变化（相对前身）**：前身把 edit/write/grep/find/ls 一律拒绝；现在范围内
   的 edit/write/grep/find/ls 放行（读写模式），只读场景用 bindings 的 `readOnly`。
-  `bash`/`powershell`/`codemode` 与未知工具仍然一律拒绝。
+  `powershell`/`codemode` 与未知工具仍然一律拒绝。
+- **bash 白名单 + bwrap 沙箱**：binding 的 `bash.allow` 给出命令前缀（按空白切词
+  逐 token 匹配），命中的命令在 tool_call 里被原地改写成
+  `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--unshare-net]
+  [--bind <scope dir> <scope dir>] --die-with-parent --chdir <cwd> -- bash -lc '<cmd>'`
+  （pi 的 `ToolCallEventResult` 只能 block，改参数得改 `event.input`）。命令含
+  `; & | < > \` $ \\` 等元字符一律拒，白名单前缀拼不进别的命令。找不到 bwrap
+  时 fail closed。沙箱挡的是越界写与联网，不挡读：跑测试要读整棵树，读的约束仍在
+  `read`/`grep` 这些工具层。
 
 ## 3. 验收状态
 
@@ -65,6 +73,9 @@ pi-allow-reads/
 | A6 | typecheck | ✅ | `pnpm run typecheck` |
 | A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-allow-reads` |
 | A8 | 活体验证：带 bindings 的前台子代理被拦截 | ✅ | 同日 `be-core` + scope `package.json` 委派，子代理读 `README.md` 被拒，文案含范围与来源 |
+| A9 | bash 白名单 / 元字符拒绝 / writable / 缺 bwrap 时 fail closed | ✅ | 第 12–14 例 |
+| A10 | 活体验证：子代理在沙箱里跑通 typecheck | ✅ | 2026-10-28 buddy-proxy 内 `be-core` + `bash.allow: ["pnpm run typecheck"]`，子代理回报 tsc 通过 |
+| A11 | bwrap 隔离属性 | ✅ | 同参数手跑：写 `~/escape-probe` 被拒（Read-only file system）、`curl` 连不上 |
 
 实测记下来的坑：`pi -p -nt`（`noTools: "all"`）不会把 skills 段放进提示词，模型会回答
 「没有可用 skill」。验证 skill 是否注册不要加 `-nt`。
@@ -73,13 +84,17 @@ pi-allow-reads/
 
 1. **后台子代理路径未实测**：前台（async: false，in-process）已验证；后台子代理走
    ambient discovery，需要全局安装扩展才加载，未单独跑过。
-2. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
+2. **bash 沙箱不约束读**：白名单命令在沙箱里仍能读整棵树（测试要 node_modules 与
+   配置）。要连读一起管，只能把命令收得更窄或上更重的方案（per-command seccomp、
+   预置测试脚本），当前没做。
+3. **bwrap 是外部依赖**：Linux 才有；没装时 bash 关闭但其余功能不受影响。
+4. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
 
 ## 5. 源码地图
 
 ```
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
-packages/pi-plugin/test/extension.test.mjs 离线测试（11 例）
+packages/pi-plugin/test/extension.test.mjs 离线测试（14 例）
 packages/pi-plugin/install.sh              装/卸
 packages/pi-plugin/skills/pi-allow-reads/SKILL.md  用法 skill
 ```

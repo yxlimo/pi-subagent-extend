@@ -19,7 +19,11 @@
  * 生效时的规则：
  * - read / edit / write / grep / find / ls：解析 path（缺省为 cwd），命中范围
  *   放行，否则拒绝；readOnly 时 edit / write 一律拒绝
- * - bash / powershell / codemode：一律拒绝（没有路径可判，能绕过范围）
+ * - bash：默认拒绝。bindings 里写 bash.allow（命令前缀白名单，如 "pnpm run typecheck"）
+ *   后，只有命中白名单的命令放行，并且改写成在 bwrap 沙箱里执行：只读根、断网
+ *   （bash.network 可开）、可写目录只有 scope（bash.writable 时），防止用 shell
+ *   绕过范围去改文件
+ * - powershell / codemode：一律拒绝（没有路径可判，能绕过范围）
  * - structured_output 与 allowTools 里列出的工具：放行（执行器类不可放行）
  * - 其余未知工具：拒绝
  *
@@ -28,6 +32,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +48,18 @@ const EXEC_TOOLS = ["bash", "powershell", "codemode"];
 /** 不碰文件系统的会话级运行时工具，范围生效时照常放行。 */
 const SAFE_TOOLS = ["structured_output"];
 
+/** shell 元字符：出现就不放行，否则白名单前缀可以被拼进任意命令。 */
+const SHELL_META = /[;&|<>()`$\n\r\\]/;
+
+interface BashRule {
+	/** 允许执行的命令前缀（按空白切词后逐 token 匹配）。 */
+	allow: string[];
+	/** 允许网络（默认关闭，沙箱里 --unshare-net）。 */
+	network: boolean;
+	/** scope 命中的目录在沙箱里可写（默认只读）。 */
+	writable: boolean;
+}
+
 interface Policy {
 	globs: string[];
 	regexps: RegExp[];
@@ -50,6 +67,7 @@ interface Policy {
 	readOnly: boolean;
 	maxReads: number;
 	allowTools: string[];
+	bash?: BashRule;
 	active: boolean;
 }
 
@@ -97,6 +115,18 @@ function positiveInt(value: unknown): number {
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/** 解析 bindings 里的 bash 字段；没写或写坏都返回 undefined（= 拒绝 bash）。 */
+function parseBashRule(raw: unknown): BashRule | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const cfg = raw as Record<string, unknown>;
+	if (!Array.isArray(cfg.allow)) return undefined;
+	const allow = (cfg.allow as unknown[])
+		.filter((c): c is string => typeof c === "string" && c.trim() !== "")
+		.map((c) => c.trim());
+	if (allow.length === 0) return undefined;
+	return { allow, network: cfg.network === true, writable: cfg.writable === true };
+}
+
 /** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace；没有则返回 undefined。 */
 function bindingsPolicy(raw: string | undefined): Policy | undefined {
 	if (!raw?.trim()) return undefined;
@@ -137,6 +167,7 @@ function bindingsPolicy(raw: string | undefined): Policy | undefined {
 		readOnly: config.readOnly === true,
 		maxReads: positiveInt(config.maxReads),
 		allowTools,
+		bash: parseBashRule(config.bash),
 		active: true,
 	};
 }
@@ -149,6 +180,52 @@ function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 		if (re.test(rel) || re.test(abs)) return true;
 	}
 	return false;
+}
+
+/** 命中白名单：命令按空白切词后，必须以某条子命令的前缀开头。 */
+function bashAllowed(rule: BashRule, command: string): boolean {
+	const tokens = command.trim().split(/\s+/);
+	return rule.allow.some((entry) => {
+		const want = entry.trim().split(/\s+/);
+		return want.every((token, i) => tokens[i] === token);
+	});
+}
+
+/** 找 bwrap：环境变量优先，否则常见路径。 */
+function bwrapPath(): string | undefined {
+	const fromEnv = process.env.PI_ALLOW_READS_BWRAP?.trim();
+	if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
+	for (const candidate of ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]) {
+		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/** scope 里可写的那几个目录：取每条 glob 的静态前缀，存在才 bind。 */
+function writableDirs(policy: Policy, cwd: string): string[] {
+	const dirs = new Set<string>();
+	for (const glob of policy.globs) {
+		const literal = glob.split(/[*?]/)[0].replace(/\/+$/, "");
+		if (!literal) continue;
+		const abs = resolve(cwd, literal);
+		if (abs !== "/" && existsSync(abs)) dirs.add(abs);
+	}
+	return [...dirs];
+}
+
+function shellQuote(text: string): string {
+	return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+/** 把命令包进 bwrap：只读根、私有 /tmp、可选断网、可选把 scope 绑成可写。 */
+function wrapInSandbox(command: string, cwd: string, rule: BashRule, policy: Policy, bwrap: string): string {
+	const parts = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"];
+	if (!rule.network) parts.push("--unshare-net");
+	if (rule.writable) {
+		for (const dir of writableDirs(policy, cwd)) parts.push("--bind", dir, dir);
+	}
+	parts.push("--die-with-parent", "--chdir", cwd, "--", "bash", "-lc", command);
+	return parts.map(shellQuote).join(" ");
 }
 
 function preview(globs: string[]): string {
@@ -171,10 +248,11 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		if (!policy.active) return;
 		const budget = policy.maxReads > 0 ? `，read 预算 ${policy.maxReads} 次` : "";
+		const bash = policy.bash ? `，bash 白名单 ${policy.bash.allow.length} 条` : "，bash 关闭";
 		const mode = policy.readOnly ? "只读" : "读写";
 		const msg = policy.globs.length
-			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}）`
-			: `任务范围为空，所有文件访问都被拒绝${budget}`;
+			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}）`
+			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}`;
 		ctx.ui.notify(`pi-allow-reads: ${msg}`, "info");
 	});
 
@@ -183,6 +261,32 @@ export default function (pi: ExtensionAPI) {
 		const cwd = ctx.cwd ?? process.cwd();
 		const deny = (reason: string) => ({ block: true, reason } as const);
 
+		if (event.toolName === "bash") {
+			const command = String((event.input as { command?: unknown })?.command ?? "").trim();
+			const rule = policy.bash;
+			if (!rule) {
+				return deny(
+					`pi-allow-reads: 本会话不允许执行 bash（来源：${policy.source}）。需要跑测试/typecheck 时由父代理在 bindings 里给 bash.allow 点名命令`,
+				);
+			}
+			if (!command) return deny("pi-allow-reads: 空的 bash 命令");
+			if (SHELL_META.test(command)) {
+				return deny(
+					`pi-allow-reads: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(rule.allow)}`,
+				);
+			}
+			if (!bashAllowed(rule, command)) {
+				return deny(
+					`pi-allow-reads: bash 命令不在白名单内：${preview(rule.allow)}（来源：${policy.source}）`,
+				);
+			}
+			const bwrap = bwrapPath();
+			if (!bwrap) {
+				return deny("pi-allow-reads: 找不到 bwrap，无法在沙箱内执行 bash（白名单命令也不会在没有沙箱的情况下放行）");
+			}
+			(event.input as { command?: string }).command = wrapInSandbox(command, cwd, rule, policy, bwrap);
+			return undefined;
+		}
 		if (EXEC_TOOLS.includes(event.toolName)) {
 			return deny(
 				`pi-allow-reads: 本会话被限定在任务范围内（${preview(policy.globs)}），不允许执行 ${event.toolName}`,
@@ -223,6 +327,9 @@ export default function (pi: ExtensionAPI) {
 				? [
 					`来源: ${policy.source}`,
 					`模式: ${policy.readOnly ? "只读" : "读写"}`,
+					policy.bash
+						? `bash: 白名单 ${policy.bash.allow.join(" | ")}（${policy.bash.network ? "有网" : "断网"}，${policy.bash.writable ? "scope 可写" : "只读根"}）`
+						: "bash: 关闭",
 					`已读 ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""} 次`,
 					...policy.globs.map((g) => `  ${g}`),
 				]

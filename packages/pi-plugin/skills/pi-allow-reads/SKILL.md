@@ -35,20 +35,27 @@ namespace 固定为 `pi-allow-reads/1`。每次委派都要传，scope 按本任
 | `scope` | `string[]` | 必填。任务范围的 glob 列表；空数组 = 拒绝一切文件访问 |
 | `readOnly` | `boolean` | 默认 `false`；`true` 时范围内也禁止 `edit`/`write`，适合只读的调研、评审代理 |
 | `maxReads` | `number` | 可选。成功 `read` 次数上限，超限后所有 read 被拒绝 |
-| `allowTools` | `string[]` | 可选。额外放行的工具名；`bash` 等执行器类无法放行 |
+| `allowTools` | `string[]` | 可选。额外放行的工具名；`bash` 等执行器类不能用它放行 |
+| `bash` | `object` | 可选。不给就完全禁止 bash；给了才按下面的规则放行 |
+| `bash.allow` | `string[]` | 必填（`bash` 在场时）。允许执行的命令前缀，如 `["pnpm run typecheck", "pnpm test"]`；按空白切词逐 token 匹配 |
+| `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
+| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照） |
 
 glob：`**` 任意层目录、`*` 单层内任意字符、`?` 单字符。范围写 `src` 或 `src/**` 都覆盖该目录本身及其下所有内容。
 
 ## 生效后的规则
 
 - 范围内：`read`/`edit`/`write`/`grep`/`find`/`ls` 放行（`readOnly` 时 `edit`/`write` 拒绝）。
-- 一律拒绝：`bash`/`powershell`/`codemode`（没有路径可判）；`scope`/`allowTools` 之外的未知工具。
-- 范围内会话可用 `/allowed-reads` 查看当前范围与 read 计数。
+- 一律拒绝：`powershell`/`codemode`；`scope`/`allowTools` 之外的未知工具。
+- `bash`：没配 `bash.allow` 时一律拒绝；配了则只有命中白名单的命令执行，并且自动改写为
+  bwrap 沙箱里运行——根只读、默认断网、可写目录只有 scope（`writable` 时）。命令里出现
+  `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
+- 范围内会话可用 `/allowed-reads` 查看当前范围、bash 白名单与 read 计数。
 
 ## 作为父代理的注意事项
 
 - 子代理报「某路径不在任务范围内」时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。
 - 不要为绕开拒绝而反复重试范围外的路径。
-- `bash` 在范围内也被拒绝，所以需要跑构建、测试的子代理不适合上锁，或者接受它改用其他工具。
+- 需要子代理自己跑测试/typecheck 时，把命令写进 `bash.allow`（逐条前缀，别写 `*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。
 - 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
 - bindings 总量上限 16 KiB，scope 用简洁 glob 即可。
