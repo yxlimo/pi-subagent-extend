@@ -123,9 +123,11 @@ function globToRegExp(glob: string): RegExp {
 function compile(globs: string[]): RegExp[] {
 	const expanded = new Set<string>();
 	for (const glob of globs) {
-		expanded.add(glob);
-		if (glob.endsWith("/**")) expanded.add(glob.slice(0, -3));
-		else if (!/[*?]/.test(glob)) expanded.add(`${glob}/**`);
+		// 尾斜杠只是目录写法，去掉后再展开，否则 "dir/" 会变成 "dir//**"。
+		const g = glob.length > 1 ? glob.replace(/\/+$/, "") || "/" : glob;
+		expanded.add(g);
+		if (g.endsWith("/**")) expanded.add(g.slice(0, -3) || "/");
+		else if (!/[*?]/.test(g)) expanded.add(`${g}/**`);
 	}
 	return [...expanded].map(globToRegExp);
 }

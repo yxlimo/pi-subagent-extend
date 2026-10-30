@@ -73,7 +73,7 @@ pi-allow-reads/
 | A6 | typecheck | ✅ | `pnpm run typecheck` |
 | A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-allow-reads` |
 | A8 | 活体验证：带 bindings 的前台子代理被拦截 | ✅ | 同日 `be-core` + scope `package.json` 委派，子代理读 `README.md` 被拒，文案含范围与来源 |
-| A9 | glob 语义回归（`**` 不被 `*` 规则二次改写） | ✅ | 第 15 例；活体：`be-core`/`fe` + scope `web/src/features/balance/**` 放行整目录 |
+| A9 | glob 语义回归（`**` 不被 `*` 规则二次改写；`dir/` 与 `dir`、`dir/**` 等价） | ✅ | 第 15 例；活体：`be-core`/`fe` + scope `web/src/features/balance/**` 放行整目录 |
 | A10 | bash 白名单 / 元字符拒绝 / writable / 缺 bwrap 时 fail closed | ✅ | 第 12–14 例 |
 | A11 | 活体验证：子代理在沙箱里跑通 typecheck | ✅ | 2026-10-28 buddy-proxy 内 `be-core` + `bash.allow: ["pnpm run typecheck"]`，子代理回报 tsc 通过 |
 | A12 | bwrap 隔离属性 | ✅ | 同参数手跑：写 `~/escape-probe` 被拒（Read-only file system）、`curl` 连不上 |
@@ -87,6 +87,10 @@ pi-allow-reads/
 `"**"` 编译成 `^.[^/]*$`、`"web/src/**"` 编译成 `^web\/src\/.[^/]*$`——只有精确
 文件名能用，通配范围全部失效（派单时表现为「路径不在任务范围内」，很容易被误判成
 模型不听话）。现改为单趟扫描生成正则，`*`/`**`/`?` 一次定性，测试第 15 例覆盖。
+
+同一处还修了尾斜杠：`compile()` 只认 `/**` 结尾与无通配的纯路径，`web/src/features/balance/`
+既不匹配前者、又因为含 `*?` 以外的字符走纯路径分支，被拼成 `.../balance//**`，一条都匹配
+不到。现在先去掉尾斜杠再展开，`dir/`、`dir`、`dir/**` 三种写法等价。
 
 ## 4. 遗留
 

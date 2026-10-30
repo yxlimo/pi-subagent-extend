@@ -297,7 +297,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     assert.equal(await all.call("ls", { path }), undefined, `"**" covers "${path}"`)
   }
   all.restore()
-  console.log("  ok   glob：** 覆盖整棵树，dir/** 覆盖任意深度，* 不跨层")
+  // A trailing slash is just another way to write the directory.
+  const slash = await handler({ bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["web/src/features/balance/"] } }) })
+  for (const path of ["web/src/features/balance", "web/src/features/balance/api.ts", "web/src/features/balance/a/b/c.ts"]) {
+    assert.equal(await slash.call("ls", { path }), undefined, `"${path}" is inside "web/src/features/balance/"`)
+  }
+  assert.equal((await slash.call("ls", { path: "web/src/other.ts" }))?.block, true, "trailing-slash scope stays narrow")
+  slash.restore()
+  console.log("  ok   glob：** 覆盖整棵树，dir/** 与 dir/ 覆盖任意深度，* 不跨层")
 }
 
 rmSync(workdir, { recursive: true, force: true })
