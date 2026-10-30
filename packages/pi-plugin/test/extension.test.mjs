@@ -274,5 +274,31 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   writable/network 选项生效；找不到 bwrap 时 fail closed")
 }
 
+// 15. Glob semantics regression: `**` must not be re-rewritten by the `*` rule.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": { scope: ["web/src/**", "lib/**/x.ts", "a?b", "one.ts"] },
+    }),
+  })
+  const allowed = ["web/src/a.vue", "web/src/x/y/z.vue", "lib/x.ts", "lib/a/b/x.ts", "aXb", "one.ts"]
+  for (const path of allowed) {
+    assert.equal(await h.call("ls", { path }), undefined, `"${path}" is inside the scope`)
+  }
+  const denied = ["web/other.ts", "web/srcs/a.ts", "lib/a.ts", "a/b", "two.ts"]
+  for (const path of denied) {
+    assert.equal((await h.call("ls", { path }))?.block, true, `"${path}" is outside the scope`)
+  }
+  h.restore()
+
+  // A bare `**` means the whole tree.
+  const all = await handler({ bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["**"] } }) })
+  for (const path of ["README.md", "deep/dir/file.ts", "web/src/x/y.vue"]) {
+    assert.equal(await all.call("ls", { path }), undefined, `"**" covers "${path}"`)
+  }
+  all.restore()
+  console.log("  ok   glob：** 覆盖整棵树，dir/** 覆盖任意深度，* 不跨层")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-allow-reads 测试通过")

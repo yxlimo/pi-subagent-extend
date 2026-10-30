@@ -86,13 +86,33 @@ function denyAll(source: string): Policy {
 	return { globs: [], regexps: [], source, readOnly: true, maxReads: 0, allowTools: [], active: true };
 }
 
+/**
+ * glob → 正则，单趟扫描。不能串 replace：`**` 先变成 `.*` 后，后一步的 `*` 规则会
+ * 把新生成的 `*` 再改写一遍（"**" 曾变成 ".[^/]*"）。
+ */
 function globToRegExp(glob: string): RegExp {
-	let re = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-	re = re
-		.replace(/\*\*\//g, "(?:.*/)?")
-		.replace(/\*\*/g, ".*")
-		.replace(/\*/g, "[^/]*")
-		.replace(/\?/g, "[^/]");
+	let re = "";
+	for (let i = 0; i < glob.length; i += 1) {
+		const ch = glob[i];
+		if (ch === "*") {
+			if (glob[i + 1] === "*") {
+				// `**/` 吃掉整段目录（含零段），`**` 吃掉任意层任意字符。
+				if (glob[i + 2] === "/") {
+					re += "(?:.*/)?";
+					i += 2;
+				} else {
+					re += ".*";
+					i += 1;
+				}
+			} else {
+				re += "[^/]*";
+			}
+		} else if (ch === "?") {
+			re += "[^/]";
+		} else {
+			re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+		}
+	}
 	return new RegExp(`^${re}$`);
 }
 
