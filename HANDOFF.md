@@ -153,4 +153,15 @@ packages/pi-plugin/skills/pi-allow-reads/SKILL.md  用法 skill
 | A15 | 只读空转 warn → abort；只读任务豁免 | ✅ | 测试 18 |
 | A16 | 原地打转 warn → stop | ✅ | 测试 19 |
 | A17 | 造杂物拒绝 + 撞权限 warn → stop | ✅ | 测试 20 |
-| A18 | 全套离线测试 | ✅ | 20 例通过；typecheck 通过 |
+| A18 | 全套离线测试 | ✅ | 21 例通过；typecheck 通过 |
+| A19 | 真机：原地打转 | ✅ | `fe` + 同一条 `pnpm run typecheck` 连跑，第 3 次 warn、第 4 次停，子代理输出了完整汇报 |
+| A20 | 真机：只读空转 | ✅ | `be-core` + `idleWriteMs/abortGraceMs = 2s`，被停后汇报「交付受阻 + 需要父代理放行什么」 |
+| A21 | 真机：早可收工 | ✅ | `be-core` + `successIdleMs = 1s`，typecheck 命中成功标记后 1 秒停，汇报写明被哪条判据停下 |
+| A22 | 真机：撞权限 | ✅ | `fe` + `maxDenies = 2`，第 3 次被拒后停，转告父代理扩权 |
+
+### 停机方式的两个坑（2026-10-30 实测）
+
+1. **不能用 `ctx.actions.abort()`**：硬 abort 会把模型正在生成的收尾汇报一起掐掉，父代理只收到一条工具错误。
+   实测同一个任务：带 abort 时最终输出被截断成一行「先确认 typecheck 脚本所在位置」，去掉后是完整汇报。
+2. **也不能用 `terminate: true`**：pi 在工具批次结束时直接结束本轮，模型仍然拿不到一个 turn 写汇报。
+   最终方案：停机只置内部状态，之后每个 tool 边界都返回 `block`（不带 terminate），模型失去工具后自然收敛到输出汇报。

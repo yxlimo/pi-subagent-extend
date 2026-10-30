@@ -160,6 +160,7 @@ export class Probe {
 	#bashCounts = new Map<string, number>();
 	#forbidPatterns: { source: string; re: RegExp }[];
 	#stopped = false;
+	#stopReason = "";
 	#successArmed = false;
 
 	constructor(deps: ProbeDeps) {
@@ -244,16 +245,18 @@ export class Probe {
 
 	/** tool 边界：把已武装的 warn 抛给模型；宽限走完就停。 */
 	atToolBoundary(): ProbeEvent | undefined {
+		// 停过之后每个边界都要拒绝：没有这条，停机只停在内部状态里，子代理照跑。
+		if (this.#stopped && this.#stopReason) {
+			return { reason: this.#stopReason, stop: true };
+		}
 		if (this.#stopped) return undefined;
 		const now = this.#host.now();
 		const expired = [this.#idle, this.#repeat].find((w) => w.warned && now >= w.abortAt);
 		if (expired) {
 			this.#stopped = true;
 			this.#clearTimers();
-			return {
-				reason: `${expired.message}（宽限已到期，停止本轮：把已完成的改动、当前状态、卡住的点写清楚作为最终汇报）`,
-				stop: true,
-			};
+			this.#stopReason = `${expired.message}\n宽限已到期，本轮到此停止：不要再调用工具，把已完成的改动、当前状态、卡住的点写清楚作为最终汇报。`;
+			return { reason: this.#stopReason, stop: true };
 		}
 		const armed = [this.#repeat, this.#idle].find((w) => w.armed);
 		if (armed) {
@@ -287,10 +290,11 @@ export class Probe {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		this.#clearTimers();
-		this.#hooks.warn(
-			`pi-allow-reads: 只读空转超过 ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} 没有写入，已停止本轮。` +
-				"请把「已确认的事实、下一步打算改动什么、为什么一直没动手」写清楚作为最终汇报。",
-		);
+		this.#stopReason =
+			`判据：只读空转——超过 ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} 没有写入任何文件，` +
+			"也没有跑过可写的 bash 命令。本轮到此停止：不要再调用工具，把「已确认的事实、下一步打算改动什么、" +
+			"为什么一直没动手」写清楚作为最终汇报。";
+		this.#hooks.warn(this.#stopReason);
 	}
 
 	#startIdleTimer(): void {
@@ -307,10 +311,10 @@ export class Probe {
 			if (this.#stopped) return;
 			this.#stopped = true;
 			this.#clearTimers();
-			this.#hooks.warn(
-				`pi-allow-reads: 验证已经通过（命中的成功标记："${marker}"），之后 ${ms(this.#cfg.successIdleMs)} 没有任何新改动` +
-					"（判据：早可收工），已停止本轮。直接汇报结果收工。",
-			);
+			this.#stopReason =
+				`判据：早可收工——验证已经通过（命中的成功标记："${marker}"），之后 ${ms(this.#cfg.successIdleMs)} ` +
+				"没有任何新改动。本轮到此停止：不要再调用工具，直接汇报结果收工。";
+			this.#hooks.warn(this.#stopReason);
 		}, this.#cfg.successIdleMs);
 	}
 

@@ -427,7 +427,9 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   clock.advance(500)
   assert.equal(aborted.length, 0, "the grace timer does not hard-abort (the model keeps its chance to report)")
   assert.equal(p.status().some((l) => l.includes("已停止")), true, "the probe is stopped after the grace")
-  assert.equal(p.atToolBoundary(), undefined, "after the stop the boundary stays silent")
+  const after = p.atToolBoundary()
+  assert.equal(after?.stop, true, "after the stop every boundary refuses the call")
+  assert.match(after.reason, /不要再调用工具/, "and asks for the report")
   p.dispose()
 
   // Read-only tasks are exempt.
