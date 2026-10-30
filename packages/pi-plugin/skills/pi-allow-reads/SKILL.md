@@ -39,7 +39,9 @@ subagent(
   extensionBindings: {
     "pi-allow-reads/1": {
       "scope": ["<文件/目录 glob>"],
-      "bash": { "allow": ["pnpm run typecheck", "pnpm test"] }
+      "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
+      "maxDenies": 3,
+      "probe": {}
     }
   }
 )
@@ -56,9 +58,16 @@ namespace 固定为 `pi-allow-reads/1`。每次委派都要传，scope 按本任
 | `maxReads` | `number` | 可选。成功 `read` 次数上限，超限后所有 read 被拒绝 |
 | `allowTools` | `string[]` | 可选。额外放行的工具名；`bash` 等执行器类不能用它放行 |
 | `bash` | `object` | 可选。不给就完全禁止 bash；给了才按下面的规则放行 |
-| `bash.allow` | `string[]` | 必填（`bash` 在场时）。允许执行的命令前缀，如 `["pnpm run typecheck", "pnpm test"]`；按空白切词逐 token 匹配 |
+| `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
+| `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；计入探针的「写入活动」 |
+| `maxDenies` | `number` | 默认 0（关闭）。连续被范围规则拒绝这么多次先 warn「多半是授权写错」，再撞一次就停 |
+| `probe` | `object` \| `false` | 可选。四条探针判据；`{}` 用默认值，`false` 关闭。见下 |
 | `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
 | `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照） |
+| `probe.idleWriteMs` / `probe.abortGraceMs` | `number` | 默认 6 / 2 分钟。这段时间内没有写入活动 → warn，再过宽限 → 停止 |
+| `probe.repeatBash` | `number` | 默认 3。同一条 bash 命令第 N 次 warn，第 N+1 次停止 |
+| `probe.successIdleMs` / `probe.successPatterns` | `number` / `string[]` | 默认 5 分钟 / `["fail=0", "0 failed", ...]`。测试出成功标记后这么久无新改动 → 停止 |
+| `probe.forbidWritePatterns` | `string[]` | 正则列表。`write`/`edit` 目标命中即拒绝 |
 
 glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字符，`?` 匹配单字符。
 
@@ -68,7 +77,7 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 - 范围内：`read`/`edit`/`write`/`grep`/`find`/`ls` 放行（`readOnly` 时 `edit`/`write` 拒绝）。
 - 一律拒绝：`powershell`/`codemode`；`scope`/`allowTools` 之外的未知工具。
-- `bash`：没配 `bash.allow` 时一律拒绝；配了则只有命中白名单的命令执行，并且自动改写为
+- `bash`：没配白名单时一律拒绝；配了则只有命中 `read`/`write` 两列的命令执行，并且自动改写为
   bwrap 沙箱里运行——根只读、默认断网、可写目录只有 scope（`writable` 时）。命令里出现
   `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
 - 范围内会话可用 `/allowed-reads` 查看当前范围、bash 白名单与 read 计数。
@@ -77,8 +86,10 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 - 子代理报「某路径不在任务范围内」时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。先核对 scope 写法本身（目录要写成 `dir` / `dir/` / `dir/**`），再怀疑子代理走错目录。
 - 不要为绕开拒绝而反复重试范围外的路径。
-- 需要子代理自己跑测试/typecheck 时，把命令写进 `bash.allow`（逐条前缀，别写 `*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。
+- 需要子代理自己跑测试/typecheck 时，把只读命令写进 `bash.read`、会写文件的写进 `bash.write`（查得细就用 `re:` 正则，别写 `re: .*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。
 - 沙箱挡越界写与联网，不挡读：跑测试要读整棵树，所以白名单命令在沙箱里仍可 `cat` 范围外文件。不要把 `bash.allow` 当成「连读也锁住」的手段。
-- 子代理报「bash 命令不在白名单内」时，先判断这条命令是否本任务必需：必需就把它加进 `bash.allow` 重派；不必要就改任务描述，别让它反复试。
+- 子代理报「bash 命令不在白名单内」时，先判断这条命令是否本任务必需：必需就把它加进对应列重派；不必要就改任务描述，别让它反复试。
+- 子代理被「只读空转 / 原地打转 / 早可收工」停下时，说明它确实在空转：把它的汇报当成诊断，补足信息或换 agent 重派，不要原样重试。
+- 想限制它乱写临时文件，就用 `probe.forbidWritePatterns` 点名模式（如 `_tscProbe`、`TestHooks`）。
 - 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
 - bindings 总量上限 16 KiB，scope 用简洁 glob 即可。

@@ -35,6 +35,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { allEntries, classifyCommand, commandMatches, parseBashRule, type BashRule } from "./bash-match.ts";
+import { DenyCounter } from "./deny-count.ts";
+import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-allow-reads";
@@ -51,15 +54,6 @@ const SAFE_TOOLS = ["structured_output"];
 /** shell 元字符：出现就不放行，否则白名单前缀可以被拼进任意命令。 */
 const SHELL_META = /[;&|<>()`$\n\r\\]/;
 
-interface BashRule {
-	/** 允许执行的命令前缀（按空白切词后逐 token 匹配）。 */
-	allow: string[];
-	/** 允许网络（默认关闭，沙箱里 --unshare-net）。 */
-	network: boolean;
-	/** scope 命中的目录在沙箱里可写（默认只读）。 */
-	writable: boolean;
-}
-
 interface Policy {
 	globs: string[];
 	regexps: RegExp[];
@@ -68,6 +62,10 @@ interface Policy {
 	maxReads: number;
 	allowTools: string[];
 	bash?: BashRule;
+	/** 探针配置；undefined = 关闭。 */
+	probe: unknown;
+	/** 连续被拒多少次算「撞权限」；0 = 关闭。 */
+	maxDenies: number;
 	active: boolean;
 }
 
@@ -78,12 +76,24 @@ const INACTIVE: Policy = {
 	readOnly: true,
 	maxReads: 0,
 	allowTools: [],
+	probe: undefined,
+	maxDenies: 0,
 	active: false,
 };
 
 /** bindings 存在但无法使用时的策略：会话保持活跃，但什么都拿不到。 */
 function denyAll(source: string): Policy {
-	return { globs: [], regexps: [], source, readOnly: true, maxReads: 0, allowTools: [], active: true };
+	return {
+		globs: [],
+		regexps: [],
+		source,
+		readOnly: true,
+		maxReads: 0,
+		allowTools: [],
+		probe: undefined,
+		maxDenies: 0,
+		active: true,
+	};
 }
 
 /**
@@ -137,18 +147,6 @@ function positiveInt(value: unknown): number {
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
-/** 解析 bindings 里的 bash 字段；没写或写坏都返回 undefined（= 拒绝 bash）。 */
-function parseBashRule(raw: unknown): BashRule | undefined {
-	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-	const cfg = raw as Record<string, unknown>;
-	if (!Array.isArray(cfg.allow)) return undefined;
-	const allow = (cfg.allow as unknown[])
-		.filter((c): c is string => typeof c === "string" && c.trim() !== "")
-		.map((c) => c.trim());
-	if (allow.length === 0) return undefined;
-	return { allow, network: cfg.network === true, writable: cfg.writable === true };
-}
-
 /** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace；没有则返回 undefined。 */
 function bindingsPolicy(raw: string | undefined): Policy | undefined {
 	if (!raw?.trim()) return undefined;
@@ -190,6 +188,8 @@ function bindingsPolicy(raw: string | undefined): Policy | undefined {
 		maxReads: positiveInt(config.maxReads),
 		allowTools,
 		bash: parseBashRule(config.bash),
+		probe: config.probe,
+		maxDenies: positiveInt(config.maxDenies),
 		active: true,
 	};
 }
@@ -202,15 +202,6 @@ function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 		if (re.test(rel) || re.test(abs)) return true;
 	}
 	return false;
-}
-
-/** 命中白名单：命令按空白切词后，必须以某条子命令的前缀开头。 */
-function bashAllowed(rule: BashRule, command: string): boolean {
-	const tokens = command.trim().split(/\s+/);
-	return rule.allow.some((entry) => {
-		const want = entry.trim().split(/\s+/);
-		return want.every((token, i) => tokens[i] === token);
-	});
 }
 
 /** 找 bwrap：环境变量优先，否则常见路径。 */
@@ -259,8 +250,40 @@ function preview(globs: string[]): string {
 export default function (pi: ExtensionAPI) {
 	// bindings 在激活时定格：前台子代理的 bindings 环境变量只在会话启动前存在，
 	// tool_call 里读不到，必须在这里取。
-	const policy = bindingsPolicy(process.env[BINDINGS_ENV]) ?? INACTIVE;
+	const rawBindings = process.env[BINDINGS_ENV];
+	const policy = bindingsPolicy(rawBindings) ?? INACTIVE;
+	const probeCfg = parseProbeConfig(policy.probe);
+	const denyCounter = new DenyCounter(policy.maxDenies);
 	let allowedReads = 0;
+	// 探针要停本轮：abort 是 hard stop，同一个动作可能触发多次，只做一次。
+	let aborted = false;
+	let lastAbortReason = "";
+	const abortNow = () => {
+		if (aborted) return;
+		aborted = true;
+		// ctx 在 tool_call 之外也能拿到：这里用最近一次事件的 actions。
+		const current = currentCtx;
+		try {
+			(current?.actions as { abort?: () => void } | undefined)?.abort?.();
+		} catch {
+			// abort 不可用时靠后续的 deny(terminate) 兜底。
+		}
+	};
+	let currentCtx: { cwd?: string; actions?: unknown; ui?: unknown } | undefined;
+	const probe =
+		policy.active && probeCfg
+			? new Probe({
+				config: probeCfg,
+				bashRule: policy.bash,
+				readOnly: policy.readOnly,
+				hooks: {
+					abort: abortNow,
+					warn: (text) => {
+						currentCtx?.ui && (currentCtx.ui as { notify?: (m: string, t?: string) => void }).notify?.(text, "warning");
+					},
+				},
+			})
+			: undefined;
 
 	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
 	// 可用列表；父代理据此知道委派时传 extensionBindings。已上锁的会话不注册——
@@ -268,39 +291,91 @@ export default function (pi: ExtensionAPI) {
 	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: [SKILL_DIR] }));
 
 	pi.on("session_start", async (_event, ctx) => {
+		currentCtx = ctx;
 		if (!policy.active) return;
 		const budget = policy.maxReads > 0 ? `，read 预算 ${policy.maxReads} 次` : "";
-		const bash = policy.bash ? `，bash 白名单 ${policy.bash.allow.length} 条` : "，bash 关闭";
+		const bash = policy.bash
+			? `，bash ${policy.bash.read.length} 读 / ${policy.bash.write.length} 写`
+			: "，bash 关闭";
+		const probeLine = probe ? "，探针开启" : "";
 		const mode = policy.readOnly ? "只读" : "读写";
 		const msg = policy.globs.length
-			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}）`
-			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}`;
+			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}${probeLine}）`
+			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}${probeLine}`;
 		ctx.ui.notify(`pi-allow-reads: ${msg}`, "info");
 	});
 
+	pi.on("session_shutdown", async () => {
+		probe?.dispose();
+	});
+
+	// 探针 3 需要看命令输出；tool_result 里拿。
+	pi.on("tool_result", async (event) => {
+		if (!probe) return;
+		const p = event as unknown as { toolName?: string; content?: unknown; result?: unknown };
+		if (p.toolName !== "bash") return;
+		probe.noteBashResult(textOf(p.content) || textOf(p.result));
+	});
+
 	pi.on("tool_call", async (event, ctx) => {
+		currentCtx = ctx;
 		if (!policy.active) return;
 		const cwd = ctx.cwd ?? process.cwd();
 		const deny = (reason: string) => ({ block: true, reason } as const);
+		// 探针在边界上的 warn / 到期停机，先于本工具的判定。
+		const boundary = probe?.atToolBoundary();
+		if (boundary) {
+			if (boundary.stop) {
+				lastAbortReason = boundary.reason;
+				abortNow();
+				return { block: true, reason: boundary.reason, terminate: true };
+			}
+			return { block: true, reason: boundary.reason, terminate: false };
+		}
+		// 已经停过：后续调用一律拒绝并再次要求收尾（terminate 让混批也停）。
+		if (aborted) {
+			return { block: true, reason: `${lastAbortReason}\n本轮已停止，不要再调用工具，直接输出最终汇报。`, terminate: true };
+		}
+
+		const bail = (reason: string) => {
+			const counted = denyCounter.record();
+			if (!counted.yes) return deny(reason);
+			const composed = counted.note ? `${reason}\n\n${counted.note}` : reason;
+			if (counted.stop) {
+				lastAbortReason = composed;
+				abortNow();
+				return { block: true, reason: composed, terminate: true };
+			}
+			return { block: true, reason: composed };
+		};
 
 		if (event.toolName === "bash") {
 			const command = String((event.input as { command?: unknown })?.command ?? "").trim();
 			const rule = policy.bash;
 			if (!rule) {
-				return deny(
-					`pi-allow-reads: 本会话不允许执行 bash（来源：${policy.source}）。需要跑测试/typecheck 时由父代理在 bindings 里给 bash.allow 点名命令`,
+				return bail(
+					`pi-allow-reads: 本会话不允许执行 bash（来源：${policy.source}）。需要跑测试/typecheck 时由父代理在 bindings 里给 bash.read / bash.write 点名命令`,
 				);
 			}
 			if (!command) return deny("pi-allow-reads: 空的 bash 命令");
 			if (SHELL_META.test(command)) {
 				return deny(
-					`pi-allow-reads: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(rule.allow)}`,
+					`pi-allow-reads: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(allEntries(rule))}`,
 				);
 			}
-			if (!bashAllowed(rule, command)) {
-				return deny(
-					`pi-allow-reads: bash 命令不在白名单内：${preview(rule.allow)}（来源：${policy.source}）`,
+			const match = classifyCommand(rule, command);
+			if (!match) {
+				return bail(
+					`pi-allow-reads: bash 命令不在白名单内：${preview(allEntries(rule))}（来源：${policy.source}）`,
 				);
+			}
+			const repeatEvent = probe?.noteBashStart(command, match.access);
+			if (repeatEvent) {
+				if (repeatEvent.stop) {
+					lastAbortReason = repeatEvent.reason;
+					abortNow();
+				}
+				return { block: true, reason: repeatEvent.reason, terminate: repeatEvent.stop };
 			}
 			const bwrap = bwrapPath();
 			if (!bwrap) {
@@ -310,7 +385,7 @@ export default function (pi: ExtensionAPI) {
 			return undefined;
 		}
 		if (EXEC_TOOLS.includes(event.toolName)) {
-			return deny(
+			return bail(
 				`pi-allow-reads: 本会话被限定在任务范围内（${preview(policy.globs)}），不允许执行 ${event.toolName}`,
 			);
 		}
@@ -323,40 +398,67 @@ export default function (pi: ExtensionAPI) {
 			const raw = typeof input?.path === "string" ? input.path.trim() : "";
 			const target = raw || ".";
 			if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
-				return deny(`pi-allow-reads: 已达 read 预算上限（${policy.maxReads} 次）`);
+				return bail(`pi-allow-reads: 已达 read 预算上限（${policy.maxReads} 次）`);
 			}
 			if (WRITE_TOOLS.includes(event.toolName) && policy.readOnly) {
-				return deny(`pi-allow-reads: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
+				return bail(`pi-allow-reads: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
 			}
 			if (!isAllowed(policy, cwd, target)) {
-				return deny(
+				return bail(
 					`pi-allow-reads: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
 				);
+			}
+			if (WRITE_TOOLS.includes(event.toolName)) {
+				const junk = probe?.checkWriteTarget(target);
+				if (junk) return { block: true, reason: junk.reason, terminate: false };
+				probe?.noteWriteActivity();
 			}
 			if (event.toolName === READ_TOOL) allowedReads += 1;
 			return undefined;
 		}
 
-		return deny(
+		return bail(
 			`pi-allow-reads: 工具 ${event.toolName} 不在放行名单内，拒绝（fail closed；确需放行就在 extensionBindings 的 allowTools 里列出）`,
 		);
 	});
 
 	pi.registerCommand("allowed-reads", {
-		description: "查看当前任务范围与 read 计数",
+		description: "查看当前任务范围、bash 白名单与探针状态",
 		handler: async (_args, ctx) => {
 			const lines = policy.active
 				? [
 					`来源: ${policy.source}`,
 					`模式: ${policy.readOnly ? "只读" : "读写"}`,
 					policy.bash
-						? `bash: 白名单 ${policy.bash.allow.join(" | ")}（${policy.bash.network ? "有网" : "断网"}，${policy.bash.writable ? "scope 可写" : "只读根"}）`
+						? `bash 读: ${policy.bash.read.join(" | ") || "（无）"}`
 						: "bash: 关闭",
+					policy.bash ? `bash 写: ${policy.bash.write.join(" | ") || "（无）"}` : undefined,
+					policy.bash
+						? `沙箱: ${policy.bash.network ? "有网" : "断网"}，${policy.bash.writable ? "scope 可写" : "只读根"}`
+						: undefined,
 					`已读 ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""} 次`,
+					`撞权限: ${denyCounter.status()}`,
+					...(probe ? probe.status() : ["探针: 关闭"]),
 					...policy.globs.map((g) => `  ${g}`),
-				]
+				].filter((l): l is string => Boolean(l))
 				: ["未生效（本会话没有 pi-allow-reads 的 extensionBindings）"];
 			ctx.ui.notify(`pi-allow-reads:\n${lines.join("\n")}`, "info");
 		},
 	});
+}
+
+/** 从 tool_result 的 content/result 里抽纯文本。 */
+function textOf(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) {
+		return value
+			.map((part) => {
+				if (typeof part === "string") return part;
+				if (part && typeof part === "object" && "text" in part) return String((part as { text: unknown }).text ?? "");
+				return "";
+			})
+			.join("\n");
+	}
+	if (value && typeof value === "object" && "text" in value) return String((value as { text: unknown }).text ?? "");
+	return "";
 }

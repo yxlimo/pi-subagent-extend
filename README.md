@@ -21,19 +21,34 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 | `read` | 解析 path（缺省视为 cwd），命中范围放行，否则拒绝；受 `maxReads` 预算约束 |
 | `edit` / `write` | 同上；`readOnly` 时即使范围内也拒绝 |
 | `grep` / `find` / `ls` | 同上（path 缺省为 cwd） |
-| `bash` | 没配 `bash.allow` 时一律拒绝；配了则只放行命中白名单的命令，并改写为 bwrap 沙箱里执行（根只读、默认断网、scope 可写需 `writable`）；命令含 shell 元字符直接拒绝 |
+| `bash` | 没配白名单时一律拒绝；配了则只放行 `bash.read` / `bash.write` 命中的命令，并改写为 bwrap 沙箱里执行（根只读、默认断网、scope 可写需 `writable`）；命令含 shell 元字符直接拒绝 |
 | `powershell` / `codemode` | 一律拒绝（没有路径可判，能绕过范围） |
 | `structured_output` | 放行（会话级运行时工具，不碰文件系统） |
 | 其余未知工具 | 拒绝；`allowTools` 里点名的工具放行（执行器类仍拒绝） |
 
-范围生效时会话开始有提示；`/allowed-reads` 查看当前范围、模式、bash 白名单与 read 计数。
+范围生效时会话开始有提示；`/allowed-reads` 查看当前范围、模式、bash 白名单、read 计数、撞权限计数与探针状态。
+
+### 探针（四条判据）
+
+范围生效后可选开启，`probe` 字段，缺省关闭；`"probe": {}` 用全部默认值，`"probe": false` 明确关闭。
+
+| 判据 | 缺省 | 行为 |
+| --- | --- | --- |
+| 只读空转 | `idleWriteMs: 360000`，`abortGraceMs: 120000` | `idleWriteMs` 内没有任何写入活动 → 下一个 tool 边界 warn；再过 `abortGraceMs` → 停止本轮 |
+| 原地打转 | `repeatBash: 3` | 同一条 bash 命令原文第 3 次 warn，第 4 次停止 |
+| 早可收工 | `successIdleMs: 300000`，`successPatterns` | bash 输出命中成功标记后，`successIdleMs` 内无新改动 → 停止 |
+| 造杂物 | `forbidWritePatterns: []` | `write`/`edit` 目标路径命中正则 → 直接拒绝该次写入 |
+
+「写入活动」只算 `edit`/`write` 调用与命中 `bash.write` 的命令；`bash.read` 与 `read`/`grep`/`ls` 都不算——否则拿 bash 只读打转就绕过了这条判据。`readOnly: true` 的任务跳过前两条（本来就该只读）。
+
+`maxDenies`（缺省 0 = 关闭）：连续被范围规则拒绝这么多次，先 warn「多半是父代理授权写错，向父代理报告缺什么」，再撞一次就停。
 
 ### bash 白名单与沙箱
 
 子代理要跑测试/typecheck 时，父代理在 bindings 里点名命令：
 
 ```json
-{ "pi-allow-reads/1": { "scope": ["lib/router/**"], "bash": { "allow": ["pnpm run typecheck", "pnpm test"] } } }
+{ "pi-allow-reads/1": { "scope": ["lib/router/**"], "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] } } }
 ```
 
 放行的命令会改写成：
@@ -42,7 +57,8 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net --die-with-parent --chdir <cwd> -- bash -lc '<命令>'
 ```
 
-- 前缀按空白切词逐 token 比配：`pnpm test` 匹配 `pnpm test -t foo`，不匹配 `pnpm publish`。
+- 条目两种写法：字面量按空白切词逐 token 前缀匹配（`pnpm test` 匹配 `pnpm test -t foo`，不匹配 `pnpm publish`）；`re:` 前缀按正则整串匹配（`"re: ^pnpm -r (test|build)"`）。不自动猜正则——命令参数常含 `*`、`.`，猜错方向是误授权。
+- `read` 列放行只读命令（typecheck、grep），`write` 列放行会写文件的命令（测试、构建）。两列都是授权；分类只影响探针的「写入活动」判定。两边都命中时按 write 算。
 - 命令里出现 `; & | < > \` $ \` 等元字符直接拒绝，白名单前缀拼不进别的命令。
 - 默认只读根、断网：写仓库外被拒、联网被拒。`"writable": true` 把 scope 命中的目录绑成可写（测试产物落地）；`"network": true` 放开网络。
 - 找不到 `bwrap` 时 fail closed：白名单命令也不执行，拒绝理由说明原因。`PI_ALLOW_READS_BWRAP` 可指定二进制路径。

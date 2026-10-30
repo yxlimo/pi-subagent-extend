@@ -18,7 +18,7 @@ const repo = join(here, "..")
 const { default: activate } = await import(join(repo, "src", "index.ts"))
 
 /** Activate the extension with the given bindings env and return its tool_call handler. */
-async function handler({ bindings, cwd = workdir }) {
+async function handler({ bindings, cwd = workdir, clock }) {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
@@ -32,14 +32,22 @@ async function handler({ bindings, cwd = workdir }) {
     registerCommand() {},
   })
 
-  const ctx = { cwd, ui: { notify: (message) => ui.push(message) } }
+  const ctx = { cwd, ui: { notify: (message) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
+  const aborts = []
   if (handlers.session_start) {
     // session_start is async but only reports; flush it before returning.
     await handlers.session_start({ type: "session_start" }, ctx)
   }
 
+  const call = async (toolName, input) =>
+    handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx)
+  const result = async (toolName, content) =>
+    handlers.tool_result?.({ type: "tool_result", toolName, content }, ctx)
+
   return {
-    call: async (toolName, input) => handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx),
+    call,
+    result,
+    aborts,
     ui,
     restore: () => {
       if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
@@ -47,6 +55,44 @@ async function handler({ bindings, cwd = workdir }) {
     },
   }
 }
+
+/** Deterministic clock: setTimeout is driven manually via advance(). */
+function fakeClock() {
+  let now = 0
+  let seq = 0
+  const timers = new Map()
+  const host = {
+    now: () => now,
+    setTimeout: (fn, delay) => {
+      const id = ++seq
+      timers.set(id, { at: now + delay, fn })
+      return id
+    },
+    clearTimeout: (id) => timers.delete(id),
+  }
+  const advance = (ms) => {
+    const target = now + ms
+    for (;;) {
+      const due = [...timers.entries()].filter(([, t]) => t.at <= target).sort((a, b) => a[1].at - b[1].at)
+      if (due.length === 0) break
+      const [id, t] = due[0]
+      timers.delete(id)
+      now = t.at
+      t.fn()
+    }
+    now = target
+  }
+  return { host, advance }
+}
+
+const defaultProbe = () => ({
+  idleWriteMs: 6 * 60 * 1000,
+  abortGraceMs: 2 * 60 * 1000,
+  repeatBash: 3,
+  successIdleMs: 5 * 60 * 1000,
+  successPatterns: ["fail=0"],
+  forbidWritePatterns: [],
+})
 
 const workdir = mkdtempSync(join(tmpdir(), "pi-allow-reads-test-"))
 mkdirSync(join(workdir, "src/auth"), { recursive: true })
@@ -209,7 +255,10 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-allow-reads/1": { scope: ["src/**"], bash: { allow: ["pnpm run typecheck", "pnpm test"] } },
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        bash: { read: ["pnpm run typecheck"], write: ["pnpm test"] },
+      },
     }),
   })
   const input = { command: "pnpm run typecheck" }
@@ -234,14 +283,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   bash 白名单命中即放行并改写为 bwrap 沙箱，其余拒绝")
 }
 
-// 13. bash without an allowlist stays closed, with a hint about bash.allow.
+// 13. bash without an allowlist stays closed, with a hint about bash.read/bash.write.
 {
   const h = await handler({ bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"] } }) })
   const denied = await h.call("bash", { command: "pnpm test" })
   assert.equal(denied?.block, true, "bash is denied when no allowlist is configured")
-  assert.match(denied.reason, /bash\.allow/, "denial explains how to open it")
+  assert.match(denied.reason, /bash\.read/, "denial explains how to open it")
   h.restore()
-  console.log("  ok   没配 bash.allow 时 bash 仍然关闭，拒绝文案给出开法")
+  console.log("  ok   没配 bash 白名单时 bash 仍然关闭，拒绝文案给出开法")
 }
 
 // 14. writable + network options, and a missing bwrap fails closed.
@@ -251,7 +300,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-allow-reads/1": {
         scope: ["src/**"],
-        bash: { allow: ["node harness.mjs"], writable: true, network: true },
+        bash: { write: ["node harness.mjs"], writable: true, network: true },
       },
     }),
   })
@@ -264,7 +313,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const previous = process.env.PI_ALLOW_READS_BWRAP
   process.env.PI_ALLOW_READS_BWRAP = "/nonexistent/bwrap"
   const h2 = await handler({
-    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], bash: { allow: ["node harness.mjs"] } } }),
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], bash: { write: ["node harness.mjs"] } } }),
   })
   const missing = await h2.call("bash", { command: "node harness.mjs" })
   assert.equal(missing?.block, true, "no bwrap means no bash, even for a listed command")
@@ -305,6 +354,140 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal((await slash.call("ls", { path: "web/src/other.ts" }))?.block, true, "trailing-slash scope stays narrow")
   slash.restore()
   console.log("  ok   glob：** 覆盖整棵树，dir/** 与 dir/ 覆盖任意深度，* 不跨层")
+}
+
+
+// 16. bash patterns: literal prefixes and `re:` regexes, both lists authorize.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        bash: { read: ["pnpm run typecheck", "re: ^tsc --noEmit$"], write: ["re: ^pnpm -r (test|build)"] },
+      },
+    }),
+  })
+  for (const command of ["pnpm run typecheck", "pnpm run typecheck --pretty false", "tsc --noEmit", "pnpm -r test", "pnpm -r build"]) {
+    assert.equal(await h.call("bash", { command }), undefined, `"${command}" is allowed`)
+  }
+  for (const command of ["pnpm publish", "tsc --noEmit --watch", "pnpm -r lint"]) {
+    const denied = await h.call("bash", { command })
+    assert.equal(denied?.block, true, `"${command}" is denied`)
+  }
+  // A regex cannot smuggle a second command: metacharacters are still rejected first.
+  assert.equal((await h.call("bash", { command: "tsc --noEmit && cat /etc/passwd" }))?.block, true, "metacharacters win over regex")
+  h.restore()
+  console.log("  ok   bash 白名单支持字面量前缀与 re: 正则，元字符仍先拒")
+}
+
+// 17. Access classification: a write-listed command resets the idle probe, a read-listed one does not.
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const { parseBashRule } = await import(join(repo, "src", "bash-match.ts"))
+  const rule = parseBashRule({ read: ["pnpm run typecheck"], write: ["pnpm test"] })
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 1000 },
+    bashRule: rule,
+    readOnly: false,
+    hooks: { abort: () => {}, warn: () => {} },
+    host: clock.host,
+  })
+  // Read-only command: idle window survives the call.
+  p.noteBashStart("pnpm run typecheck", "read")
+  clock.advance(1000)
+  assert.equal(p.atToolBoundary()?.stop, false, "read-only bash does not count as write activity")
+  // A write-listed command resets it.
+  p.noteBashStart("pnpm test", "write")
+  clock.advance(999)
+  assert.equal(p.atToolBoundary(), undefined, "write-listed bash resets the idle window")
+  p.dispose()
+  console.log("  ok   read 列 bash 不重置空转计时器，write 列重置")
+}
+
+// 18. Idle probe: warn at the boundary, abort once the grace runs out.
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const aborted = []
+  const warned = []
+  const p = new Probe({
+    config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 500 },
+    readOnly: false,
+    hooks: { abort: () => aborted.push(1), warn: (t) => warned.push(t) },
+    host: clock.host,
+  })
+  clock.advance(1000)
+  const warn = p.atToolBoundary()
+  assert.equal(warn?.stop, false, "first boundary warns")
+  assert.match(warn.reason, /只读空转/)
+  clock.advance(500)
+  assert.equal(aborted.length, 1, "the grace timer aborts on its own, without waiting for a boundary")
+  assert.equal(p.atToolBoundary(), undefined, "after the stop the boundary stays silent")
+  p.dispose()
+
+  // Read-only tasks are exempt.
+  const ro = new Probe({
+    config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 500 },
+    readOnly: true,
+    hooks: { abort: () => {}, warn: () => {} },
+    host: clock.host,
+  })
+  clock.advance(5000)
+  assert.equal(ro.atToolBoundary(), undefined, "review tasks are never idle-stopped")
+  ro.dispose()
+  console.log("  ok   只读空转：边界 warn → 宽限到期 abort；只读任务豁免")
+}
+
+// 19. Repeat probe: same bash command warns then stops.
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), repeatBash: 3 },
+    readOnly: true,
+    hooks: { abort: () => {}, warn: () => {} },
+    host: clock.host,
+  })
+  p.noteBashStart("pnpm test", "write")
+  p.noteBashStart("pnpm test", "write")
+  assert.equal(p.atToolBoundary(), undefined, "below the threshold nothing happens")
+  p.noteBashStart("pnpm test", "write")
+  assert.equal(p.atToolBoundary()?.stop, false, "the Nth repeat warns")
+  const stop = p.noteBashStart("pnpm test", "write")
+  assert.equal(stop?.stop, true, "one more repeat stops the run")
+  p.dispose()
+  console.log("  ok   原地打转：第 3 次 warn，第 4 次停止")
+}
+
+// 20. Junk-file probe blocks probe artifacts; deny budget warns then stops.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        maxDenies: 2,
+        probe: { forbidWritePatterns: ["_tscProbe", ".*\\.src\\.tsx"] },
+      },
+    }),
+  })
+  const junk = await h.call("write", { path: "src/_tscProbe.ts" })
+  assert.equal(junk?.block, true, "probe artifact path is refused")
+  assert.match(junk.reason, /造杂物/)
+  const junk2 = await h.call("write", { path: "src/TestHooks.src.tsx" })
+  assert.equal(junk2?.block, true, "regex pattern also refuses")
+  assert.equal(await h.call("write", { path: "src/real.ts" }), undefined, "normal writes pass")
+
+  const first = await h.call("read", { path: "outside/a.ts" })
+  assert.equal(first?.block, true, "out-of-scope read denied")
+  const second = await h.call("read", { path: "outside/b.ts" })
+  assert.equal(second?.block, true, "second denial feeds the counter")
+  assert.match(second.reason, /撞权限|撞到任务范围/, "the budget warns about a bad grant")
+  const third = await h.call("read", { path: "outside/c.ts" })
+  assert.equal(third?.terminate, true, "one more denial stops the run")
+  assert.equal(h.aborts.length >= 1, true, "abort was requested")
+  h.restore()
+  console.log("  ok   造杂物：探针产物路径被拒；撞权限：计数到上限 warn，再撞 stop")
 }
 
 rmSync(workdir, { recursive: true, force: true })

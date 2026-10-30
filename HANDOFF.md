@@ -118,3 +118,39 @@ packages/pi-plugin/skills/pi-allow-reads/SKILL.md  用法 skill
 - pi 扩展 API 类型：`~/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts`
   （`ToolCallEvent` 联合类型、`ToolCallEventResult.block/reason`）
 - 同类仓库：`~/extensions/subagent-only-skills/`（布局与测试模板来源）
+
+## bash 读写两列与探针（2026-10-30）
+
+### bash 配置
+
+`bash.allow`（单列表）→ `bash.read` / `bash.write`。两列都是授权面；分类只影响探针的「写入活动」判定。
+条目两种写法：字面量（空白切词前缀）与 `re:`（正则整串）。不自动探测正则——参数常含 `*`、`.`，
+误授权比误拒绝危险。旧 `allow` 字段仍解析，按 write 处理。
+
+### 探针（src/probe.ts）
+
+四条判据：只读空转（定时器驱动，warn → 宽限 → abort）、原地打转（同命令第 N 次 warn、第 N+1 次停）、
+早可收工（bash 输出命中成功标记后 N 分钟无新改动）、造杂物（write/edit 目标命中禁用模式即拒）。
+
+关键决定：
+- 「写入活动」= edit/write 调用 + ��中 `bash.write` 的命令。`bash.read` 不算，否则拿 bash 只读打转
+  就绕过判据。这条是本仓最容易再次搞错的地方。
+- warn 的载体只能是「拦下一次 tool_call」：定时器到点自己拦不了正在跑的调用。abort 走
+  `ctx.actions.abort()`，不等边界；混批时 `terminate: true` 兜底。
+- `readOnly: true` 的任务跳过两条时间判据。
+- 定时器 unref + `session_shutdown` 清理，避免残留。
+
+### 撞权限（src/deny-count.ts）
+
+`maxDenies`（缺省 0 = 关闭）：第 N 次被拒 warn 并提示「向父代理报告缺什么」，第 N+1 次 abort。
+
+### 验收
+
+| # | 项 | 结果 | 证据 |
+| --- | --- | --- | --- |
+| A13 | bash 两列 + `re:` | ✅ | 测试 16 |
+| A14 | 读写归类不影响计时器 | ✅ | 测试 17 |
+| A15 | 只读空转 warn → abort；只读任务豁免 | ✅ | 测试 18 |
+| A16 | 原地打转 warn → stop | ✅ | 测试 19 |
+| A17 | 造杂物拒绝 + 撞权限 warn → stop | ✅ | 测试 20 |
+| A18 | 全套离线测试 | ✅ | 20 例通过；typecheck 通过 |
