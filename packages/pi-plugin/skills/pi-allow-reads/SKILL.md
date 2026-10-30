@@ -9,6 +9,8 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 
 判据与停机（只读空转、原地打转、早可收工、造杂物、撞权限）见另一个 skill `pi-allow-reads-probes`。
 
+委派规则本身（brief 怎么写、等待方式、一个 cwd 一个写者）以 **pi-subagents 自带的 skill** 为准，本 skill 只补「怎么把范围和命令授权绑到一次委派上」这一层。
+
 ## 前置条件
 
 被委派的 agent 必须能加载本扩展，二选一：

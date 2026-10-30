@@ -76,6 +76,27 @@ warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool �
 
 ## 与 pi-subagents 自带能力的配合
 
+委派规则（brief 怎么写、一个 cwd 一个写者、resume/steer 的用法）以 **pi-subagents 自带的 skill** 为准，本 skill 只讲探针这一层：范围限制管「能碰什么」，探针管「有没有在推进」。
+
+pi-subagents 的 skill 已经规定了等待方式——派完活让出回合，靠原生完成通知唤醒，不要 sleep、不要轮询、不要对普通子代理用 `bg_wait`。要查细节按需读一节，不要通读：
+
+```
+subagent({ action: "guide", options: { topic: "tool-reference/execution-parameters" } })
+subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination-child-asks-parent" } })
+```
+
+本文下面列的 topic 都是 pi-subagents 随包文档里的真实小节名，版本升级后按同一地址读即可。
+
+| 想查 | guide topic |
+| --- | --- |
+| `timeoutMs` / `toolTimeoutMs` / `checkpointBeforeDeadlineMs` / `toolBudget` / `extensionBindings` | `tool-reference/execution-parameters` |
+| 查子代理状态与 transcript | `tool-reference/status` |
+| 保留子代理、resume 资格 | `tool-reference/retained-children` |
+| resume / steer / stop 的确切语义 | `tool-reference/resume`、`tool-reference/steer`、`tool-reference/stop` |
+| 验收证据与 gate | `tool-reference/acceptance-gates` |
+| 子代理主动问父代理（`contact_supervisor`） | `workflows/supervisor-coordination-child-asks-parent` |
+| LLM watchdog 的触发时机与模型选择 | `watchdog/when-it-runs`、`watchdog/choosing-a-model` |
+
 探针只管确定性信号（计数、时间、路径模式），下面几项管的是别的事，配好之后不需要探针再做。
 
 ### 分工表
@@ -102,6 +123,17 @@ warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool �
 **探针 + LLM watchdog。** 不冲突，配置通道不同：探针走 `extensionBindings`，watchdog 走 settings 的 `subagents.watchdog`。watchdog 自己有一条 `stalemateRepeats`（默认 3 次同样 warning）会结束轮次，那是语义层面的；探针的打转判据是命令层面的，两者可能同时命中，不重复计费也不用互相关闭。
 
 **探针 + 后台运行。** 后台（`async: true`）子代理在独立进程里跑，探针照常工作；`checkpointBeforeDeadlineMs` 只在 async 单代理上有效，前台阻塞运行时没有这个收尾机制，靠探针的 stop 让子代理写汇报。
+
+### 等待方式：让出回合，不要 sleep
+
+父代理派完活以后**不要自己 sleep 轮询**——原生完成通知会唤醒会话。而且 sleep 会占着父代理的前台 tool call，让它一直处于忙状态，完成通知于是降级成 steering 消息追加，反而更晚才到。
+
+- 普通 async 子代理：派完就结束这一轮，等通知
+- 必须在当前轮等结果：`bg_wait({ id, stopOnAttention: false })`
+- 长驻交互会话：`bg_wait({ id, nonBlocking: true })`
+- 想中途看进展：`subagent({ action: "status", id, options: { view: "transcript", lines: 80 } })`，按需查，不循环
+
+别拿 `lastUpdate` 当心跳判断存活：runner 每秒在内存推进它，但只在活动分类变化时才重写 `status.json`，一次长时间安静的工具调用会让文件看起来是陈旧的。
 
 ### 不要叠加的东西
 
