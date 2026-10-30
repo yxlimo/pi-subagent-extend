@@ -21,6 +21,13 @@ export interface BashRule {
 	network: boolean;
 	/** scope 命中的目录在沙箱里可写（默认只读根）。 */
 	writable: boolean;
+	/**
+	 * 额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd）。
+	 * pnpm store、mise 的 state 目录这类全局可写区，不在 scope 里，但工具链要写。
+	 */
+	writablePaths: string[];
+	/** 注入到沙箱里的环境变量（--setenv）。 */
+	env: Record<string, string>;
 }
 
 export interface BashMatch {
@@ -80,6 +87,17 @@ function stringList(value: unknown): string[] {
 		.map((v) => v.trim());
 }
 
+function stringMap(value: unknown): Record<string, string> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const out: Record<string, string> = {};
+	for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+		if (!key.trim()) continue;
+		if (typeof raw !== "string" && typeof raw !== "number") continue;
+		out[key.trim()] = String(raw);
+	}
+	return out;
+}
+
 /**
  * 解析 bindings 里的 bash 字段。没写、写坏、两列都空都返回 undefined（= 拒绝 bash）。
  * `allow` 是旧字段（单列表，全部按可写对待），保留兼容。
@@ -90,5 +108,12 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 	const read = stringList(cfg.read);
 	const write = stringList(cfg.write).concat(stringList(cfg.allow));
 	if (read.length === 0 && write.length === 0) return undefined;
-	return { read, write, network: cfg.network === true, writable: cfg.writable === true };
+	return {
+		read,
+		write,
+		network: cfg.network === true,
+		writable: cfg.writable === true,
+		writablePaths: stringList(cfg.writablePaths),
+		env: stringMap(cfg.env),
+	};
 }

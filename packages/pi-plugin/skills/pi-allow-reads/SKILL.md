@@ -72,12 +72,21 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 | `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
 | `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；算作「写入活动」 |
 | `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
-| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照） |
+| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照）；worktree 场景下 worktree 根也会被绑成可写 |
+| `bash.writablePaths` | `string[]` | 额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
+| `bash.env` | `object` | 注入沙箱的环境变量（`--setenv`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
 
 条目两种写法：
 
 - 字面量：按空白切词逐 token 前缀匹配。`"pnpm test"` 放行 `pnpm test -t foo`，不放行 `pnpm publish`。
 - `re:` 前缀：正则，整串锚定。`"re: ^pnpm -r (test|build)$"`。不自动猜正则——命令参数常含 `*`、`.`，猜错方向是误授权。
+
+## worktree 里的 bash
+
+子代理跑在 pi-subagents 的 managed worktree 时（`worktree: true`），两件事要额外安排：
+
+- **worktree 的 `node_modules` 是指向主仓的符号链接**，所以 `pnpm install` 在 worktree 里必然失败（pnpm 需要真实的 hoist 目录）。依赖已经就位时不要让子代理装依赖；让 `pnpm run` 不做前置安装（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`）就能正常跑验证。
+- **pnpm 与 mise 都要写沙箱外的地方**：pnpm 的锁目录在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`），mise 要把 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`。扩展默认把这两处指到沙箱私有 /tmp，所以这两个失败已经不用管；pnpm store 这类真正需要持久可写的地方，用 `bash.writablePaths` 显式给出。
 
 ## 生效后的规则
 
@@ -91,6 +100,7 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 ## 作为父代理的注意事项
 
+- 子代理报「没有给 path」或「必须给 path」时：那是工具参数缺失（`grep`/`find` 不带 path 会按 cwd 处理，`write`/`edit` 必须给 path），不是它走错了目录。给子代理的 task 里写清文件路径。
 - 子代理报「某路径不在任务范围内」时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。先核对 scope 写法本身（目录要写成 `dir` / `dir/` / `dir/**`），再怀疑子代理走错目录。
 - 不要为绕开拒绝而反复重试范围外的路径。
 - 需要子代理自己跑测试/typecheck 时，把只读命令写进 `bash.read`、会写文件的写进 `bash.write`（查得细就用 `re:` 正则，别写 `re: .*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。

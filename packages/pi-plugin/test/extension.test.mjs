@@ -7,7 +7,7 @@
 //   node test/extension.test.mjs
 
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -525,6 +525,60 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(commands[3].reason, /停止本轮/, "one more repeat stops the run")
   h.restore()
   console.log("  ok   打转与撞权限默认开启；时间判据需显式配置")
+}
+
+// 22. Worktree ergonomics: writablePaths, env injection, worktree root binding.
+{
+  const store = join(workdir, "pnpm-store")
+  mkdirSync(store, { recursive: true })
+  const wt = join(workdir, "wt")
+  mkdirSync(join(wt, "web/src"), { recursive: true })
+  // A worktree has .git as a file pointing at the real gitdir.
+  writeFileSync(join(wt, ".git"), "gitdir: /somewhere/.git/worktrees/wt\n")
+  writeFileSync(join(wt, "mise.toml"), "[tools]\nnode = \"lts\"\n")
+
+  const h = await handler({
+    cwd: join(wt, "web"),
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        bash: {
+          write: ["pnpm install"],
+          writable: true,
+          writablePaths: [store],
+          env: { FOO: "bar" },
+        },
+      },
+    }),
+  })
+  const input = { command: "pnpm install" }
+  assert.equal(await h.call("bash", input), undefined, "listed command passes")
+  assert.match(input.command, /'--bind' '[^']*wt\/web\/src' '[^']*wt\/web\/src'/, "scope dir inside the worktree is bound writable")
+  assert.match(input.command, /'--bind' '[^']*wt' '[^']*wt'/, "the worktree root itself is bound writable")
+  assert.match(input.command, /'--bind' '[^']*pnpm-store' '[^']*pnpm-store'/, "writablePaths are bound writable")
+  assert.match(input.command, /'--setenv' 'FOO' 'bar'/, "bash.env is injected")
+  assert.match(input.command, /'--setenv' 'MISE_STATE_DIR' '[^']*mise'/, "mise state moves into the sandbox so trust registration is not needed")
+  assert.match(input.command, /'--setenv' 'XDG_RUNTIME_DIR' '[^']*runtime'/, "pnpm's runtime lock dir moves into the sandbox")
+  h.restore()
+  console.log("  ok   worktree 场景：writablePaths、env 注入、worktree 根 bind、mise 信任绕过")
+}
+
+// 23. Missing path must not read as "the child walked to the wrong directory".
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], maxDenies: 0 } }),
+  })
+  const write = await h.call("write", { content: "x" })
+  assert.equal(write?.block, true, "write without path is refused")
+  assert.match(write.reason, /必须给 path/, "write says the path argument is missing")
+  assert.ok(!/不在任务范围内/.test(write.reason), "write does not blame the scope")
+
+  const grep = await h.call("grep", { pattern: "foo" })
+  assert.equal(grep?.block, true, "grep without path is refused")
+  assert.match(grep.reason, /没有给 path/, "grep says no path was given")
+  assert.match(grep.reason, /当前目录/, "grep says the cwd was used instead")
+  h.restore()
+  console.log("  ok   缺 path 的拒绝文案说清原因，不误导成走错目录")
 }
 
 rmSync(workdir, { recursive: true, force: true })

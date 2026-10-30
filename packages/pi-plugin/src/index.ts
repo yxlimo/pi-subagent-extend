@@ -32,8 +32,9 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, commandMatches, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
@@ -236,16 +237,97 @@ function writableDirs(policy: Policy, cwd: string): string[] {
 	return [...dirs];
 }
 
+/**
+ * 找 git worktree 的根：从 cwd 往上找第一个「.git 是文件」的目录。
+ * worktree 里 .git 是指向主仓 gitdir 的文件；主仓 checkout 里 .git 是目录。
+ * 返回 undefined 表示不在 worktree 里。
+ */
+export function findWorktreeRoot(cwd: string): string | undefined {
+	let dir = resolve(cwd);
+	for (let i = 0; i < 64; i += 1) {
+		const dotGit = resolve(dir, ".git");
+		if (existsSync(dotGit)) {
+			try {
+				const st = statSync(dotGit);
+				// worktree：.git 是文件
+				if (!st.isDirectory()) return dir;
+				return undefined;
+			} catch {
+				return undefined;
+			}
+		}
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+	return undefined;
+}
+
+/** 展开 ~ 与相对路径；返回 undefined 表示不是可用路径。 */
+function expandPath(cwd: string, raw: string): string | undefined {
+	const value = raw.trim();
+	if (!value) return undefined;
+	if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
+	if (value === "~") return homedir();
+	if (value.startsWith("/")) return value;
+	return resolve(cwd, value);
+}
+
+/**
+ * 沙箱里要绑成可写的路径集合：
+ * - scope 命中的目录（bash.writable 时）
+ * - worktree 根本身（bash.writable 时）：scope 通常只写到 worktree 里的相对路径，
+ *   而 package.json、node_modules 这类 worktree 根级文件在范围之外，不绑就只读
+ * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等）
+ */
+function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): string[] {
+	const dirs = new Set<string>();
+	if (rule.writable) {
+		for (const dir of writableDirs(policy, cwd)) dirs.add(dir);
+		const worktreeRoot = findWorktreeRoot(cwd);
+		if (worktreeRoot) dirs.add(worktreeRoot);
+	}
+	for (const raw of rule.writablePaths) {
+		const abs = expandPath(cwd, raw);
+		if (abs && abs !== "/" && existsSync(abs)) dirs.add(abs);
+	}
+	return [...dirs];
+}
+
+/**
+ * 沙箱里的环境变量：
+ * - bindings 给的 bash.env
+ * - XDG_RUNTIME_DIR：默认指向沙箱私有的 /tmp。pnpm 12 把自己的锁目录放在
+ *   XDG_RUNTIME_DIR（/run/user/<uid>）下，只读根下连 `pnpm run` 都跑不起来。
+ * - MISE_STATE_DIR：worktree 场景下 mise 要把新 worktree 的 mise.toml 登记进
+ *   ~/.local/state/mise/trusted-configs，只读根下解析配置阶段就失败；
+ *   把 state 目录挪到沙箱私有的 /tmp 即可免掉这次登记。
+ *
+ * 两者都可以被父代理用 bash.env 覆盖。
+ */
+function sandboxEnv(cwd: string, rule: BashRule): Record<string, string> {
+	const env: Record<string, string> = { ...rule.env };
+	const privateDir = `/tmp/.pi-allow-reads-${process.pid}`;
+	if (!env.XDG_RUNTIME_DIR) env.XDG_RUNTIME_DIR = `${privateDir}/runtime`;
+	if (!env.MISE_STATE_DIR) {
+		const worktreeRoot = findWorktreeRoot(cwd);
+		const miseConfig = worktreeRoot ? resolve(worktreeRoot, "mise.toml") : undefined;
+		if (miseConfig && existsSync(miseConfig)) env.MISE_STATE_DIR = `${privateDir}/mise`;
+	}
+	return env;
+}
+
 function shellQuote(text: string): string {
 	return `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
-/** 把命令包进 bwrap：只读根、私有 /tmp、可选断网、可选把 scope 绑成可写。 */
-function wrapInSandbox(command: string, cwd: string, rule: BashRule, policy: Policy, bwrap: string): string {
+/** 把命令包进 bwrap：只读根、私有 /tmp、可选断网、可选把可写目录 bind 进去。 */
+export function wrapInSandbox(command: string, cwd: string, rule: BashRule, policy: Policy, bwrap: string): string {
 	const parts = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"];
 	if (!rule.network) parts.push("--unshare-net");
-	if (rule.writable) {
-		for (const dir of writableDirs(policy, cwd)) parts.push("--bind", dir, dir);
+	for (const dir of sandboxWritableDirs(policy, cwd, rule)) parts.push("--bind", dir, dir);
+	for (const [key, value] of Object.entries(sandboxEnv(cwd, rule))) {
+		parts.push("--setenv", key, value);
 	}
 	parts.push("--die-with-parent", "--chdir", cwd, "--", "bash", "-lc", command);
 	return parts.map(shellQuote).join(" ");
@@ -410,13 +492,23 @@ export default function (pi: ExtensionAPI) {
 			if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 				return bail(`pi-allow-reads: 已达 read 预算上限（${policy.maxReads} 次）`);
 			}
-			if (WRITE_TOOLS.includes(event.toolName) && policy.readOnly) {
-				return bail(`pi-allow-reads: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
+			if (WRITE_TOOLS.includes(event.toolName)) {
+				if (policy.readOnly) {
+					return bail(`pi-allow-reads: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
+				}
+				// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
+				if (!raw) {
+					return bail(
+						`pi-allow-reads: ${event.toolName} 必须给 path（参数里没有 path，无法判断目标文件是否在任务范围内）。范围：${preview(policy.globs)}`,
+					);
+				}
 			}
 			if (!isAllowed(policy, cwd, target)) {
-				return bail(
-					`pi-allow-reads: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
-				);
+				// 缺 path 时目标其实是 cwd，说清这一点，免得被当成「子代理走错目录」。
+				const reason = raw
+					? `pi-allow-reads: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`
+					: `pi-allow-reads: 没有给 path，按当前目录（cwd：${cwd}）处理，而它不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`;
+				return bail(reason);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
 				const junk = probe?.checkWriteTarget(target);

@@ -22,6 +22,8 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 | `edit` / `write` | 同上；`readOnly` 时即使范围内也拒绝 |
 | `grep` / `find` / `ls` | 同上（path 缺省为 cwd） |
 | `bash` | 没配白名单时一律拒绝；配了则只放行 `bash.read` / `bash.write` 命中的命令，并改写为 bwrap 沙箱里执行（根只读、默认断网、scope 可写需 `writable`）；命令含 shell 元字符直接拒绝 |
+| `bash.writablePaths` | 额外绑成可写的路径（pnpm store、mise state 等全局可写区） |
+| `bash.env` | 注入沙箱的环境变量 |
 | `powershell` / `codemode` | 一律拒绝（没有路径可判，能绕过范围） |
 | `structured_output` | 放行（会话级运行时工具，不碰文件系统） |
 | 其余未知工具 | 拒绝；`allowTools` 里点名的工具放行（执行器类仍拒绝） |
@@ -63,8 +65,20 @@ bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net --die-wit
 - `read` 列放行只读命令（typecheck、grep），`write` 列放行会写文件的命令（测试、构建）。两列都是授权；分类只影响探针的「写入活动」判定。两边都命中时按 write 算。
 - 命令里出现 `; & | < > \` $ \` 等元字符直接拒绝，白名单前缀拼不进别的命令。
 - 默认只读根、断网：写仓库外被拒、联网被拒。`"writable": true` 把 scope 命中的目录绑成可写（测试产物落地）；`"network": true` 放开网络。
+- `bash.writablePaths`：额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd），用于 pnpm store 这类全局可写区。
+- `bash.env`：注入沙箱的环境变量（`--setenv`）。默认已经注入 `XDG_RUNTIME_DIR`（指向沙箱私有 /tmp）与 worktree 场景下的 `MISE_STATE_DIR`。
+- worktree 场景：`bash.writable` 为真时，worktree 根本身也会被绑成可写（scope 通常只写到 worktree 里的相对路径，根级的 package.json、node_modules 之类在范围之外）。
 - 找不到 `bwrap` 时 fail closed：白名单命令也不执行，拒绝理由说明原因。`PI_ALLOW_READS_BWRAP` 可指定二进制路径。
 - 上限明确：沙箱防的是**越界写和联网**，不是读。跑测试本身就要读整棵树（`node_modules`、配置），所以 `cat` 仓库里范围外的文件在沙箱内仍可读——读的约束仍由 `read`/`grep` 等工具层负责。
+
+## worktree 与 pnpm 的已知边界
+
+pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接**进 worktree（`src/runs/shared/worktree.js: linkNodeModulesIfPresent`）。由此：
+
+- `pnpm install` 在 worktree 里必然失败：pnpm 需要真实的 hoist 目录（`workspace hoist directory is not a real directory`）。这与沙箱无关，是 worktree 布局本身。
+- 依赖已就位的验证命令可以用：让 `pnpm run` 不做前置安装即可（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`，pnpm 12 的设置只认这个文件）。
+- pnpm 12 把锁目录放在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`）而不是 store 下，所以只读根下连 `pnpm run` 都起不来。扩展默认把 `XDG_RUNTIME_DIR` 指向沙箱私有 /tmp 解决这一条。
+- mise 在 worktree 里要把新 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`，只读根下会在解析配置阶段就失败。扩展在 worktree 场景把 `MISE_STATE_DIR` 指向沙箱私有 /tmp，免掉这次登记。
 
 ## 配置来源
 
