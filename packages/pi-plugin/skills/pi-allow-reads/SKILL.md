@@ -60,14 +60,14 @@ namespace 固定为 `pi-allow-reads/1`。每次委派都要传，scope 按本任
 | `bash` | `object` | 可选。不给就完全禁止 bash；给了才按下面的规则放行 |
 | `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
 | `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；计入探针的「写入活动」 |
-| `maxDenies` | `number` | 默认 0（关闭）。连续被范围规则拒绝这么多次先 warn「多半是授权写错」，再撞一次就停 |
-| `probe` | `object` \| `false` | 可选。四条探针判据；`{}` 用默认值，`false` 关闭。见下 |
+| `maxDenies` | `number` | 默认 3，写 0 关闭。连续被范围规则拒绝这么多次先 warn「多半是授权写错」，再撞一次就停 |
+| `probe` | `object` \| `false` | 四条探针判据的阈值。不写时只有「原地打转」「撞权限」生效；`{}` 打开全部默认值；写了字段则只打开写到的；`false` 全关 |
 | `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
 | `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照） |
-| `probe.idleWriteMs` / `probe.abortGraceMs` | `number` | 默认 6 / 2 分钟。这段时间内没有写入活动 → warn，再过宽限 → 停止 |
-| `probe.repeatBash` | `number` | 默认 3。同一条 bash 命令第 N 次 warn，第 N+1 次停止 |
-| `probe.successIdleMs` / `probe.successPatterns` | `number` / `string[]` | 默认 5 分钟 / `["fail=0", "0 failed", ...]`。测试出成功标记后这么久无新改动 → 停止 |
-| `probe.forbidWritePatterns` | `string[]` | 正则列表。`write`/`edit` 目标命中即拒绝 |
+| `probe.idleWriteMs` / `probe.abortGraceMs` | `number` | 需显式配置才生效（默认 6 / 2 分钟）。这段时间内没有写入活动 → warn，再过宽限 → 停止 |
+| `probe.repeatBash` | `number` | 默认 3（不配也生效）。同一条 bash 命令第 N 次 warn，第 N+1 次停止 |
+| `probe.successIdleMs` / `probe.successPatterns` | `number` / `string[]` | 需显式配置（默认 5 分钟 / `["fail=0", "0 failed", ...]`）。测试出成功标记后这么久无新改动 → 停止 |
+| `probe.forbidWritePatterns` | `string[]` | 需显式配置。正则列表，`write`/`edit` 目标命中即拒绝 |
 
 glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字符，`?` 匹配单字符。
 

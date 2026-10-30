@@ -48,8 +48,12 @@ const READ_TOOL = "read";
 const PATH_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
 const WRITE_TOOLS = ["edit", "write"];
 const EXEC_TOOLS = ["bash", "powershell", "codemode"];
-/** 不碰文件系统的会话级运行时工具，范围生效时照常放行。 */
-const SAFE_TOOLS = ["structured_output"];
+/**
+ * 不碰文件系统的会话级运行时工具，范围生效时照常放行。
+ * contact_supervisor / intercom 是子代理向父代理（监督者）转告的正当通道——探针的
+ * 停机判据本来就要它立刻上报，封锁它只会把信息憋在死掉的会话里。
+ */
+const SAFE_TOOLS = ["structured_output", "contact_supervisor", "intercom"];
 
 /** shell 元字符：出现就不放行，否则白名单前缀可以被拼进任意命令。 */
 const SHELL_META = /[;&|<>()`$\n\r\\]/;
@@ -189,7 +193,8 @@ function bindingsPolicy(raw: string | undefined): Policy | undefined {
 		allowTools,
 		bash: parseBashRule(config.bash),
 		probe: config.probe,
-		maxDenies: positiveInt(config.maxDenies),
+		// 撞权限是纯错误信号：不配也开，父代理可以显式写 0 关掉。
+		maxDenies: config.maxDenies === 0 ? 0 : positiveInt(config.maxDenies) || 3,
 		active: true,
 	};
 }
@@ -258,16 +263,13 @@ export default function (pi: ExtensionAPI) {
 	// 探针要停本轮：abort 是 hard stop，同一个动作可能触发多次，只做一次。
 	let aborted = false;
 	let lastAbortReason = "";
+	/**
+	 * 停机：不调 ctx.abort()。硬 abort 会把模型正在生成的收尾汇报一起掐掉，父代理只能
+	 * 收到一句工具错误。改为「粘住停止状态 + 后续调用一律 terminate」，pi 在工具批次
+	 * 结束后自然收尾，模型有机会把结论写完。
+	 */
 	const abortNow = () => {
-		if (aborted) return;
 		aborted = true;
-		// ctx 在 tool_call 之外也能拿到：这里用最近一次事件的 actions。
-		const current = currentCtx;
-		try {
-			(current?.actions as { abort?: () => void } | undefined)?.abort?.();
-		} catch {
-			// abort 不可用时靠后续的 deny(terminate) 兜底。
-		}
 	};
 	let currentCtx: { cwd?: string; actions?: unknown; ui?: unknown } | undefined;
 	const probe =
@@ -279,7 +281,8 @@ export default function (pi: ExtensionAPI) {
 				hooks: {
 					abort: abortNow,
 					warn: (text) => {
-						currentCtx?.ui && (currentCtx.ui as { notify?: (m: string, t?: string) => void }).notify?.(text, "warning");
+						const ui = currentCtx?.ui as { notify?: (m: string, t?: string) => void } | undefined;
+						ui?.notify?.(`pi-allow-reads: ${text}`, "warning");
 					},
 				},
 			})
@@ -328,13 +331,15 @@ export default function (pi: ExtensionAPI) {
 			if (boundary.stop) {
 				lastAbortReason = boundary.reason;
 				abortNow();
-				return { block: true, reason: boundary.reason, terminate: true };
+				return { block: true, reason: boundary.reason };
 			}
 			return { block: true, reason: boundary.reason, terminate: false };
 		}
-		// 已经停过：后续调用一律拒绝并再次要求收尾（terminate 让混批也停）。
+		// 已经停过：后续调用一律拒绝。不带 terminate——terminate 会在工具批次结束时
+		// 直接结束本轮，模型连收尾汇报都来不及写；这里靠「每次都被拒」逼它停止调工具
+		// 并输出汇报。
 		if (aborted) {
-			return { block: true, reason: `${lastAbortReason}\n本轮已停止，不要再调用工具，直接输出最终汇报。`, terminate: true };
+			return { block: true, reason: `${lastAbortReason}\n\n本轮已停止，不要再调用任何工具，直接输出最终汇报。` };
 		}
 
 		const bail = (reason: string) => {
@@ -344,7 +349,7 @@ export default function (pi: ExtensionAPI) {
 			if (counted.stop) {
 				lastAbortReason = composed;
 				abortNow();
-				return { block: true, reason: composed, terminate: true };
+				return { block: true, reason: composed };
 			}
 			return { block: true, reason: composed };
 		};
@@ -375,7 +380,7 @@ export default function (pi: ExtensionAPI) {
 					lastAbortReason = repeatEvent.reason;
 					abortNow();
 				}
-				return { block: true, reason: repeatEvent.reason, terminate: repeatEvent.stop };
+				return { block: true, reason: repeatEvent.reason };
 			}
 			const bwrap = bwrapPath();
 			if (!bwrap) {

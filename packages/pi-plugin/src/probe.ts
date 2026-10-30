@@ -77,17 +77,30 @@ function patternList(value: unknown, fallback: string[]): string[] {
 		.map((v) => v.trim());
 }
 
-/** 解析 bindings 的 probe 字段。`probe: false` 或没有该字段时返回 undefined。 */
+/**
+ * 解析 bindings 的 probe 字段。
+ *
+ * 打转与撞权限是纯错误信号，默认开启；时间基判据（只读空转、早可收工）会误伤
+ * 慢任务，必须由父代理显式配置。没有 probe 字段时，时间判据的阈值取 0 = 关闭。
+ */
 export function parseProbeConfig(raw: unknown): ProbeConfig | undefined {
-	if (raw === undefined) return undefined;
 	if (raw === false) return undefined;
-	if (raw === true || !raw || typeof raw !== "object" || Array.isArray(raw)) return DEFAULT_PROBE;
+	if (raw === undefined) return { ...DEFAULT_PROBE, idleWriteMs: 0, abortGraceMs: 0, successIdleMs: 0 };
+	if (raw === true) return DEFAULT_PROBE;
+	if (typeof raw !== "object" || Array.isArray(raw)) return DEFAULT_PROBE;
 	const cfg = raw as Record<string, unknown>;
+	// `{}` = 全部默认值；只写部分字段时，没写的那些保持关闭（0）。
+	const blank = Object.keys(cfg).length === 0;
+	const pick = (value: unknown, fallback: number) => {
+		if (blank) return fallback;
+		if (value === undefined) return 0;
+		return nonNegativeInt(value, fallback);
+	};
 	return {
-		idleWriteMs: nonNegativeInt(cfg.idleWriteMs, DEFAULT_PROBE.idleWriteMs),
-		abortGraceMs: nonNegativeInt(cfg.abortGraceMs, DEFAULT_PROBE.abortGraceMs),
+		idleWriteMs: pick(cfg.idleWriteMs, DEFAULT_PROBE.idleWriteMs),
+		abortGraceMs: pick(cfg.abortGraceMs, DEFAULT_PROBE.abortGraceMs),
 		repeatBash: Math.max(2, nonNegativeInt(cfg.repeatBash, DEFAULT_PROBE.repeatBash)),
-		successIdleMs: nonNegativeInt(cfg.successIdleMs, DEFAULT_PROBE.successIdleMs),
+		successIdleMs: pick(cfg.successIdleMs, DEFAULT_PROBE.successIdleMs),
 		successPatterns: patternList(cfg.successPatterns, DEFAULT_PROBE.successPatterns),
 		forbidWritePatterns: patternList(cfg.forbidWritePatterns, []),
 	};
@@ -180,15 +193,18 @@ export class Probe {
 		const count = (this.#bashCounts.get(key) ?? 0) + 1;
 		this.#bashCounts.set(key, count);
 		if (count === this.#cfg.repeatBash) {
+			const message =
+				`同一条 bash 命令已经重复 ${count} 次（判据：原地打转）：${key.slice(0, 160)}。` +
+				`再重复一次就停止本轮——换一种做法，或者直接把当前结论汇报给父代理。`;
 			this.#repeat = {
 				armed: true,
-				warned: false,
-				message:
-					`同一条 bash 命令已经重复 ${count} 次（判据：原地打转）：${key.slice(0, 160)}。` +
-					`再重复一次就停止本轮——换一种做法，或者直接把当前结论汇报给父代理。`,
+				warned: true,
+				message,
 				abortAt: this.#host.now() + this.#cfg.abortGraceMs,
 			};
-			return undefined;
+			// 第 N 次直接拦下这次调用并给 warn：放行到下一次就没机会说了。
+			this.#hooks.warn(message);
+			return { reason: message, stop: false };
 		}
 		if (count > this.#cfg.repeatBash) {
 			return {
@@ -234,7 +250,6 @@ export class Probe {
 		if (expired) {
 			this.#stopped = true;
 			this.#clearTimers();
-			this.#hooks.abort();
 			return {
 				reason: `${expired.message}（宽限已到期，停止本轮：把已完成的改动、当前状态、卡住的点写清楚作为最终汇报）`,
 				stop: true,
@@ -272,7 +287,6 @@ export class Probe {
 		if (this.#stopped) return;
 		this.#stopped = true;
 		this.#clearTimers();
-		this.#hooks.abort();
 		this.#hooks.warn(
 			`pi-allow-reads: 只读空转超过 ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} 没有写入，已停止本轮。` +
 				"请把「已确认的事实、下一步打算改动什么、为什么一直没动手」写清楚作为最终汇报。",
@@ -293,7 +307,6 @@ export class Probe {
 			if (this.#stopped) return;
 			this.#stopped = true;
 			this.#clearTimers();
-			this.#hooks.abort();
 			this.#hooks.warn(
 				`pi-allow-reads: 验证已经通过（命中的成功标记："${marker}"），之后 ${ms(this.#cfg.successIdleMs)} 没有任何新改动` +
 					"（判据：早可收工），已停止本轮。直接汇报结果收工。",
@@ -342,7 +355,7 @@ export class Probe {
 	/** 诊断用：当前状态。 */
 	status(): string[] {
 		const lines = [
-			`只读空转: ${this.#readOnly ? "不适用（只读任务）" : `${ms(this.#cfg.idleWriteMs)} + 宽限 ${ms(this.#cfg.abortGraceMs)}`}`,
+			`只读空转: ${this.#readOnly ? "不适用（只读任务）" : this.#cfg.idleWriteMs > 0 ? `${ms(this.#cfg.idleWriteMs)} + 宽限 ${ms(this.#cfg.abortGraceMs)}` : "关闭"}`, 
 			`原地打转: 同一命令第 ${this.#cfg.repeatBash} 次警告、第 ${this.#cfg.repeatBash + 1} 次停止（已记录 ${this.#bashCounts.size} 条命令）`,
 			`早可收工: ${this.#readOnly ? "不适用（只读任务）" : `${ms(this.#cfg.successIdleMs)} 无新改动即停止`}`,
 			`造杂物: ${this.#forbidPatterns.length} 条禁用路径模式`,

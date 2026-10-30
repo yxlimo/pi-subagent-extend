@@ -30,18 +30,20 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 
 ### 探针（四条判据）
 
-范围生效后可选开启，`probe` 字段，缺省关闭；`"probe": {}` 用全部默认值，`"probe": false` 明确关闭。
+打转与撞权限默认开启（纯错误信号，误伤小）；两条时间判据会误伤慢任务，必须在 `probe` 里显式配置才生效：`"probe": {}` 一次打开全部默认值，写部分字段则只打开写到的那些，`"probe": false` 关闭全部。
 
 | 判据 | 缺省 | 行为 |
 | --- | --- | --- |
-| 只读空转 | `idleWriteMs: 360000`，`abortGraceMs: 120000` | `idleWriteMs` 内没有任何写入活动 → 下一个 tool 边界 warn；再过 `abortGraceMs` → 停止本轮 |
-| 原地打转 | `repeatBash: 3` | 同一条 bash 命令原文第 3 次 warn，第 4 次停止 |
-| 早可收工 | `successIdleMs: 300000`，`successPatterns` | bash 输出命中成功标记后，`successIdleMs` 内无新改动 → 停止 |
-| 造杂物 | `forbidWritePatterns: []` | `write`/`edit` 目标路径命中正则 → 直接拒绝该次写入 |
+| 只读空转 | 需显式配置：`idleWriteMs: 360000`，`abortGraceMs: 120000` | `idleWriteMs` 内没有任何写入活动 → 下一个 tool 边界 warn；再过 `abortGraceMs` → 停止本轮 |
+| 原地打转 | 默认开启，`repeatBash: 3` | 同一条 bash 命令原文第 3 次 warn，第 4 次停止 |
+| 早可收工 | 需显式配置：`successIdleMs: 300000`，`successPatterns` | bash 输出命中成功标记后，`successIdleMs` 内无新改动 → 停止 |
+| 造杂物 | 需显式配置：`forbidWritePatterns: []` | `write`/`edit` 目标路径命中正则 → 直接拒绝该次写入 |
 
 「写入活动」只算 `edit`/`write` 调用与命中 `bash.write` 的命令；`bash.read` 与 `read`/`grep`/`ls` 都不算——否则拿 bash 只读打转就绕过了这条判据。`readOnly: true` 的任务跳过前两条（本来就该只读）。
 
-`maxDenies`（缺省 0 = 关闭）：连续被范围规则拒绝这么多次，先 warn「多半是父代理授权写错，向父代理报告缺什么」，再撞一次就停。
+`maxDenies`（缺省 3，写 `0` 关闭）：连续被范围规则拒绝这么多次，先 warn「多半是父代理授权写错，向父代理报告缺什么」，再撞一次就停。
+
+停机方式：不调 `ctx.abort()`。硬 abort 会把模型正在写的收尾汇报一起掐掉，父代理只拿到一句工具错误。改为「粘住停止状态 + 之后每次调用都拒绝」，模型失去工具后自然把结论写完，父代理收到的是一份完整汇报。实测对比过：带 `terminate` 时汇报被截断成一行，去掉后完整。
 
 ### bash 白名单与沙箱
 

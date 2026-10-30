@@ -110,7 +110,9 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 2. Bindings scope: reads and in-scope writes pass, everything else is denied.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/auth/**", "src/**", "README.md"] } }),
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": { scope: ["src/auth/**", "src/**", "README.md"], maxDenies: 0 },
+    }),
   })
   assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "in-scope read passes")
   assert.equal(await h.call("edit", { path: "src/auth/login.ts" }), undefined, "in-scope edit passes")
@@ -134,6 +136,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(unknown?.block, true, "unknown tools fail closed")
 
   assert.equal(await h.call("structured_output", { result: {} }), undefined, "structured_output passes")
+  assert.equal(await h.call("contact_supervisor", { message: "need a wider scope" }), undefined, "contact_supervisor is the report channel")
   h.restore()
   console.log("  ok   范围内放行、范围外拒绝，执行器与未知工具 fail closed")
 }
@@ -422,7 +425,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(warn?.stop, false, "first boundary warns")
   assert.match(warn.reason, /只读空转/)
   clock.advance(500)
-  assert.equal(aborted.length, 1, "the grace timer aborts on its own, without waiting for a boundary")
+  assert.equal(aborted.length, 0, "the grace timer does not hard-abort (the model keeps its chance to report)")
+  assert.equal(p.status().some((l) => l.includes("已停止")), true, "the probe is stopped after the grace")
   assert.equal(p.atToolBoundary(), undefined, "after the stop the boundary stays silent")
   p.dispose()
 
@@ -436,7 +440,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   clock.advance(5000)
   assert.equal(ro.atToolBoundary(), undefined, "review tasks are never idle-stopped")
   ro.dispose()
-  console.log("  ok   只读空转：边界 warn → 宽限到期 abort；只读任务豁免")
+  console.log("  ok   只读空转：边界 warn → 宽限到期停止；只读任务豁免")
 }
 
 // 19. Repeat probe: same bash command warns then stops.
@@ -484,10 +488,37 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(second?.block, true, "second denial feeds the counter")
   assert.match(second.reason, /撞权限|撞到任务范围/, "the budget warns about a bad grant")
   const third = await h.call("read", { path: "outside/c.ts" })
-  assert.equal(third?.terminate, true, "one more denial stops the run")
-  assert.equal(h.aborts.length >= 1, true, "abort was requested")
+  assert.equal(third?.block, true, "one more denial stops the run")
+  const after = await h.call("read", { path: "src/real.ts" })
+  assert.equal(after?.block, true, "once stopped, every later call is refused")
+  assert.match(after.reason, /不要再调用任何工具/, "and the model is told to write its report")
   h.restore()
   console.log("  ok   造杂物：探针产物路径被拒；撞权限：计数到上限 warn，再撞 stop")
+}
+
+// 21. Repeat probe and deny budget are on by default; time-based probes are not.
+{
+  const { parseProbeConfig } = await import(join(repo, "src", "probe.ts"))
+  const bare = parseProbeConfig(undefined)
+  assert.equal(bare.repeatBash, 3, "repeat detection is on without any probe config")
+  assert.equal(bare.idleWriteMs, 0, "idle detection stays off until configured")
+  assert.equal(bare.successIdleMs, 0, "success-idle stays off until configured")
+  assert.equal(parseProbeConfig(false), undefined, "probe: false turns everything off")
+  assert.equal(parseProbeConfig({}).idleWriteMs, 6 * 60 * 1000, "an empty probe object opts into the defaults")
+
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } },
+    }),
+  })
+  const commands = []
+  for (let i = 0; i < 4; i += 1) commands.push(await h.call("bash", { command: "pnpm run typecheck" }))
+  assert.ok(commands.slice(0, 2).every((r) => r === undefined), "the first two repeats run")
+  assert.match(commands[2].reason, /原地打转/, "the 3rd identical command is refused with a warning")
+  assert.equal(commands[2].block, true, "the warning refuses that call but keeps the run alive")
+  assert.match(commands[3].reason, /停止本轮/, "one more repeat stops the run")
+  h.restore()
+  console.log("  ok   打转与撞权限默认开启；时间判据需显式配置")
 }
 
 rmSync(workdir, { recursive: true, force: true })
