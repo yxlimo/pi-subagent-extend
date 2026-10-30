@@ -68,7 +68,8 @@ bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net --die-wit
 - `bash.writablePaths`：额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd），用于 pnpm store 这类全局可写区。
 - `bash.env`：注入沙箱的环境变量（`--setenv`）。默认已经注入 `XDG_RUNTIME_DIR`（指向沙箱私有 /tmp）与 worktree 场景下的 `MISE_STATE_DIR`。
 - 白名单外的 bash 命令，其拒绝文案会带上探测到的 pnpm store 路径——模型看得见这段文案，能把它连同「父代理需要写什么」一起汇报上来。扩展只探测不自动放行：放行与否是父代理的显式决定。
-- worktree 场景：`bash.writable` 为真时，worktree 根本身也会被绑成可写（scope 通常只写到 worktree 里的相对路径，根级的 package.json、node_modules 之类在范围之外）。
+- `bash.writable` 为真时，额外绑成可写：**当前工作目录**（沙箱根只读，不绑的话 git 连索引都写不了）、**`<cwd>/node_modules`**（解析符号链接后的真实路径，pnpm install 要写 `.bin` 里的 shim）、**worktree 根本身**（scope 通常只写到 worktree 里的相对路径，根级的 package.json、node_modules 之类在范围之外）。
+- `bash.gitExcludes`（默认 `true`）：给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`）。沙箱里 pnpm 一定会用项目内的 `.pnpm-store`（见下），否则子代理一句 `git add -A` 就能把几万个依赖文件吸进索引，patch 直接生成失败。
 - 找不到 `bwrap` 时 fail closed：白名单命令也不执行，拒绝理由说明原因。`PI_ALLOW_READS_BWRAP` 可指定二进制路径。
 - 上限明确：沙箱防的是**越界写和联网**，不是读。跑测试本身就要读整棵树（`node_modules`、配置），所以 `cat` 仓库里范围外的文件在沙箱内仍可读——读的约束仍由 `read`/`grep` 等工具层负责。
 
@@ -80,6 +81,8 @@ pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接*
 - 依赖已就位的验证命令可以用：让 `pnpm run` 不做前置安装即可（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`，pnpm 12 的设置只认这个文件）。
 - pnpm 12 把锁目录放在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`）而不是 store 下，所以只读根下连 `pnpm run` 都起不来。扩展默认把 `XDG_RUNTIME_DIR` 指向沙箱私有 /tmp 解决这一条。
 - mise 在 worktree 里要把新 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`，只读根下会在解析配置阶段就失败。扩展在 worktree 场景把 `MISE_STATE_DIR` 指向沙箱私有 /tmp，免掉这次登记。
+- **沙箱里 pnpm 一定用项目内的 `.pnpm-store`**：bwrap 把项目目录单独 bind 成一个挂载点，跨挂载无法建硬链接（`Invalid cross-device link`），pnpm 因此放弃全局 store、退回项目内 store（`<项目>/node_modules/.pnpm-store`）。这不是沙箱配置不当，是挂载语义决定的；用 `package-import-method: copy` 也改不了 pnpm 的 store 选择。副作用是项目里会多出一个几十 MB 的 `.pnpm-store`——扩展用 `core.excludesFile` 保证它进不了 git 索引，但项目自己的 `.gitignore` 仍应忽略 `node_modules/`。
+- **装依赖需要联网**：沙箱内 pnpm 用的是项目内的空 store，只能从 registry 下载。`bash.network` 默认关闭，所以 `pnpm install` 在沙箱里必然失败，除非显式开网络。
 
 ## 配置来源
 

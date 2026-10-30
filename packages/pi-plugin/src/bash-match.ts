@@ -28,6 +28,11 @@ export interface BashRule {
 	writablePaths: string[];
 	/** 注入到沙箱里的环境变量（--setenv）。 */
 	env: Record<string, string>;
+	/**
+	 * 是否给沙箱里的 git 注入全局排除规则（node_modules/、.pnpm-store/）。
+	 * 默认开：防止子代理 `git add -A` 把依赖目录吸进索引。
+	 */
+	gitExcludes: boolean;
 }
 
 export interface BashMatch {
@@ -115,5 +120,6 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 		writable: cfg.writable === true,
 		writablePaths: stringList(cfg.writablePaths),
 		env: stringMap(cfg.env),
+		gitExcludes: cfg.gitExcludes !== false,
 	};
 }

@@ -277,7 +277,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(input.command, /^'\/[^']*bwrap' '--ro-bind' '\/' '\/'/, "command is rewritten to run under bwrap")
   assert.match(input.command, /'--unshare-net'/, "network is off by default")
   assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
-  assert.ok(!/--bind/.test(input.command), "nothing is writable by default")
+  // Only the git excludes file is bound; no directory is writable by default.
+  assert.ok(
+    !/'--bind' '\/[^']*' '\/[^']*'/.test(input.command.replace(/--bind' '\/home\/[^']*git-excludes' '\/home\/[^']*git-excludes'/, "")),
+    "no directory is writable by default",
+  )
 
   const other = { command: "pnpm publish" }
   const denied = await h.call("bash", other)
@@ -625,6 +629,29 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(denied.reason, /writablePaths/, "and says how the parent would allow it")
   h.restore()
   console.log("  ok   bash 拒绝文案带上 pnpm store 路径")
+}
+
+// 26. node_modules is writable when the sandbox is writable; git excludes keep
+// dependency directories out of the index.
+{
+  mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true })
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        bash: { write: ["pnpm install"], writable: true },
+      },
+    }),
+  })
+  const input = { command: "pnpm install" }
+  assert.equal(await h.call("bash", input), undefined, "listed command passes")
+  assert.match(input.command, /'--bind' '[^']*node_modules' '[^']*node_modules'/, "node_modules is bound writable")
+  assert.match(input.command, /'--bind' '[^']*' '[^']*'/, "the working directory is bound writable")
+  assert.match(input.command, /'--setenv' 'GIT_CONFIG_COUNT' '1'/, "git excludes are configured")
+  assert.match(input.command, /'--setenv' 'GIT_CONFIG_KEY_0' 'core.excludesFile'/, "the exclude file is passed to git")
+  assert.match(input.command, /'--bind' '[^']*git-excludes' '[^']*git-excludes'/, "the exclude file is visible in the sandbox")
+  h.restore()
+  console.log("  ok   可写沙箱里 node_modules 也可写；git 排除规则防止依赖目录进索引")
 }
 
 rmSync(workdir, { recursive: true, force: true })

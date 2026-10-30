@@ -33,7 +33,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -285,14 +285,51 @@ function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): strin
 	const dirs = new Set<string>();
 	if (rule.writable) {
 		for (const dir of writableDirs(policy, cwd)) dirs.add(dir);
+		// cwd 本身要可写：沙箱根是只读的，不绑的话 git 连索引都写不了，
+		// 子代理任何落盘操作都会失败。cwd 落在 /tmp 下时也顺带解决
+		// 沙箱的 tmpfs /tmp 把 cwd 挡住的问题。
+		dirs.add(cwd);
 		const worktreeRoot = findWorktreeRoot(cwd);
 		if (worktreeRoot) dirs.add(worktreeRoot);
+		// node_modules 也要可写：pnpm install 要写 .bin 里的 shim。它通常不在
+		// scope 里，但装依赖是任务的必要步骤。worktree 里它是符号链接，要绑
+		// 解析后的真实路径（bwrap 不能把符号链接当 bind 源）。
+		const nodeModules = resolve(cwd, "node_modules");
+		if (existsSync(nodeModules)) {
+			try {
+				dirs.add(realpathSync(nodeModules));
+			} catch {
+				dirs.add(nodeModules);
+			}
+		}
 	}
 	for (const raw of rule.writablePaths) {
 		const abs = expandPath(cwd, raw);
 		if (abs && abs !== "/" && existsSync(abs)) dirs.add(abs);
 	}
 	return [...dirs];
+}
+
+/** 沙箱里 git 用的全局排除规则：依赖目录不进索引。 */
+const GIT_EXCLUDE_PATTERNS = ["node_modules/", ".pnpm-store/"];
+
+/**
+ * 写出 git 的全局排除文件。放在 cache 目录下（不是 /tmp：沙箱里的 /tmp 是
+ * tmpfs，会把宿主的文件挡住）。
+ */
+function gitExcludesFile(): string | undefined {
+	try {
+		const dir = resolve(homedir(), ".cache", "pi-allow-reads");
+		const file = resolve(dir, "git-excludes");
+		const wanted = `${GIT_EXCLUDE_PATTERNS.join("\n")}\n`;
+		if (!existsSync(file) || readFileSync(file, "utf8") !== wanted) {
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(file, wanted);
+		}
+		return file;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -309,6 +346,16 @@ function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): strin
 function sandboxEnv(cwd: string, rule: BashRule): Record<string, string> {
 	const env: Record<string, string> = { ...rule.env };
 	const privateDir = `/tmp/.pi-allow-reads-${process.pid}`;
+	// git 的全局排除：子代理 `git add -A` 时不把依赖目录吸进索引。
+	// 宿主已经设了 GIT_CONFIG_COUNT 就不插手，免得覆盖别人的配置。
+	if (rule.gitExcludes && !process.env.GIT_CONFIG_COUNT) {
+		const excludes = gitExcludesFile();
+		if (excludes) {
+			env.GIT_CONFIG_COUNT = "1";
+			env.GIT_CONFIG_KEY_0 = "core.excludesFile";
+			env.GIT_CONFIG_VALUE_0 = excludes;
+		}
+	}
 	if (!env.XDG_RUNTIME_DIR) env.XDG_RUNTIME_DIR = `${privateDir}/runtime`;
 	if (!env.MISE_STATE_DIR) {
 		const worktreeRoot = findWorktreeRoot(cwd);
@@ -367,6 +414,10 @@ export function wrapInSandbox(command: string, cwd: string, rule: BashRule, poli
 	const parts = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"];
 	if (!rule.network) parts.push("--unshare-net");
 	for (const dir of sandboxWritableDirs(policy, cwd, rule)) parts.push("--bind", dir, dir);
+	if (rule.gitExcludes && !process.env.GIT_CONFIG_COUNT) {
+		const excludes = gitExcludesFile();
+		if (excludes) parts.push("--bind", excludes, excludes);
+	}
 	for (const [key, value] of Object.entries(sandboxEnv(cwd, rule))) {
 		parts.push("--setenv", key, value);
 	}

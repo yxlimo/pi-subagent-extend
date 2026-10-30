@@ -96,6 +96,7 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 | `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照）；worktree 场景下 worktree 根也会被绑成可写 |
 | `bash.writablePaths` | `string[]` | 额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
 | `bash.env` | `object` | 注入沙箱的环境变量（`--setenv`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
+| `bash.gitExcludes` | `boolean` | 默认 `true`。给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`），防止 `git add -A` 把依赖目录吸进索引 |
 
 白名单外的 bash 命令，拒绝文案里会带上探测到的 pnpm store 路径——模型看得见，能把它和「父代理要写什么」一起汇报上来。扩展只探测不自动放行。
 
@@ -110,6 +111,8 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 - **worktree 的 `node_modules` 是指向主仓的符号链接**，所以 `pnpm install` 在 worktree 里必然失败（pnpm 需要真实的 hoist 目录）。依赖已经就位时不要让子代理装依赖；让 `pnpm run` 不做前置安装（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`）就能正常跑验证。
 - **pnpm 与 mise 都要写沙箱外的地方**：pnpm 的锁目录在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`），mise 要把 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`。扩展默认把这两处指到沙箱私有 /tmp，所以这两个失败已经不用管；pnpm store 这类真正需要持久可写的地方，用 `bash.writablePaths` 显式给出。
+- **沙箱里 pnpm 一定用项目内的 `.pnpm-store`**：项目目录被单独 bind 成挂载点，跨挂载不能建硬链接，pnpm 只能退回项目内 store。扩展已经用 git 全局排除规则保证它进不了索引，但项目自己的 `.gitignore` 也应忽略 `node_modules/`。
+- **沙箱里装依赖需要开网络**（`"network": true`）：项目内的 store 是空的，只能从 registry 下载。默认断网时 `pnpm install` 必然失败。
 
 ## 生效后的规则
 
