@@ -9,7 +9,7 @@ pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任�
 ## 布局
 
 ```
-packages/pi-plugin       pi 扩展   (src/index.ts, test/extension.test.mjs, install.sh, skills/pi-allow-reads/SKILL.md)
+packages/pi-plugin       pi 扩展   (src/, test/extension.test.mjs, install.sh, skills/pi-allow-reads{,-probes}/SKILL.md)
 ```
 
 ## 行为

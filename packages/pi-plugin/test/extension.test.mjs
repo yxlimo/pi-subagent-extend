@@ -228,12 +228,16 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   assert.equal(typeof handlers.resources_discover, "function", "the extension registers resources_discover")
   const result = await handlers.resources_discover({ type: "resources_discover", cwd: workdir, reason: "startup" })
-  const skillDir = result?.skillPaths?.[0]
-  assert.ok(skillDir, "resources_discover returns a skill path")
-  assert.equal(existsSync(join(skillDir, "SKILL.md")), true, "the skill path holds a SKILL.md")
-  const frontmatter = readFileSync(join(skillDir, "SKILL.md"), "utf8").slice(0, 200)
-  assert.match(frontmatter, /name: pi-allow-reads/, "the skill is named pi-allow-reads")
-  console.log("  ok   用法 skill 随扩展经 resources_discover 注册")
+  const dirs = result?.skillPaths ?? []
+  assert.equal(dirs.length, 2, "both usage skills are registered")
+  const names = dirs.map((dir) => {
+    const path = join(dir, "SKILL.md")
+    assert.equal(existsSync(path), true, `${dir} holds a SKILL.md`)
+    const frontmatter = readFileSync(path, "utf8").slice(0, 400)
+    return frontmatter.match(/name: ([\w-]+)/)?.[1]
+  })
+  assert.deepEqual(names.sort(), ["pi-allow-reads", "pi-allow-reads-probes"], "scope skill and probe skill")
+  console.log("  ok   两个用法 skill 随扩展经 resources_discover 注册")
 }
 
 // 11. A scoped session does not advertise the delegation skill.

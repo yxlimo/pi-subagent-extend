@@ -41,8 +41,13 @@ import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-allow-reads";
-/** 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。 */
-const SKILL_DIR = fileURLToPath(new URL("../skills/pi-allow-reads", import.meta.url));
+/**
+ * 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。
+ * 拆成两个：范围与 bash 白名单、探针判据与停机语义。
+ */
+const SKILL_DIRS = ["pi-allow-reads", "pi-allow-reads-probes"].map((name) =>
+	fileURLToPath(new URL(`../skills/${name}`, import.meta.url)),
+);
 
 const READ_TOOL = "read";
 const PATH_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
@@ -291,7 +296,7 @@ export default function (pi: ExtensionAPI) {
 	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
 	// 可用列表；父代理据此知道委派时传 extensionBindings。已上锁的会话不注册——
 	// 它不委派，也不该去读一个自己被范围拦住的文件。
-	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: [SKILL_DIR] }));
+	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: SKILL_DIRS }));
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
