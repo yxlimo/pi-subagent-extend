@@ -16,7 +16,7 @@ description: 给受限子代理配置探针判据时使用：只读空转、原�
 | 判据 | 默认 | 说明 |
 | --- | --- | --- |
 | 原地打转 | 开，`repeatBash: 3` | 同一条 bash 命令原文（trim 后）第 3 次 → warn，第 4 次 → stop |
-| 撞权限 | 开，`maxDenies: 3` | 连续被范围规则拒绝第 3 次 → warn，第 4 次 → stop |
+| 撞权限 | 开，`maxDenies: 3` | 连续被范围规则拒绝第 3 次 → warn，第 4 次 → stop。工具参数缺失（没给 path）不算在内 |
 
 会误伤慢任务的三条必须显式配置：`probe: {}` 一次打开全部默认值，写部分字段则只打开写到的那些，`probe: false` 全关。
 
@@ -72,6 +72,7 @@ warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool �
 - `successPatterns` 默认是 `fail=0` / `0 failed` 这类测试汇总标记；项目用别的输出格式就自己写（如 `no errors`、`All files pass`）。别写成过宽的 `ok`、`passed`——几乎每条命令都会命中。
 - 想限制子代理乱写调试文件，用 `forbidWritePatterns` 点名，如 `_tscProbe`、`TestHooks`、`.*\.src\.tsx`。命中是拒绝单次写入，不停机。
 - 同一轮委派里反复出现「原地打转」说明任务描述有问题（要求它重复同一动作），先修任务而不是调大 `repeatBash`。
+- 「撞权限」只统计范围类拒绝。工具参数缺失（没给 path）是另一类问题，改 task 说清路径，不要靠调大 `maxDenies` 掩盖。
 - 探针只管确定性信号。语义层面的漏测、不安全改动，交给 pi-subagents 自带的 LLM watchdog（`subagents.watchdog`），两者互补。
 
 ## 与 pi-subagents 自带能力的配合

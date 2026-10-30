@@ -581,6 +581,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(grep?.block, true, "grep without path is refused")
   assert.match(grep.reason, /没有给 path/, "grep says no path was given")
   assert.match(grep.reason, /当前目录/, "grep says the cwd was used instead")
+
+  // A missing path is a usage error, not a permission problem: it must not
+  // count toward the deny budget, or a forgetful child gets stopped as
+  // "the parent granted the wrong scope".
+  for (let i = 0; i < 5; i += 1) await h.call("write", { content: "x" })
+  const after = await h.call("read", { path: "src/real.ts" })
+  assert.equal(after, undefined, "repeated missing-path refusals do not exhaust the deny budget")
   h.restore()
   console.log("  ok   缺 path 的拒绝文案说清原因，不误导成走错目录")
 }

@@ -544,18 +544,24 @@ export default function (pi: ExtensionAPI) {
 					return bail(`pi-allow-reads: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
 				}
 				// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
+				// 这是用法错误不是权限错误，不计入撞权限计数。
 				if (!raw) {
-					return bail(
+					return deny(
 						`pi-allow-reads: ${event.toolName} 必须给 path（参数里没有 path，无法判断目标文件是否在任务范围内）。范围：${preview(policy.globs)}`,
 					);
 				}
 			}
 			if (!isAllowed(policy, cwd, target)) {
 				// 缺 path 时目标其实是 cwd，说清这一点，免得被当成「子代理走错目录」。
-				const reason = raw
-					? `pi-allow-reads: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`
-					: `pi-allow-reads: 没有给 path，按当前目录（cwd：${cwd}）处理，而它不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`;
-				return bail(reason);
+				if (!raw) {
+					// 缺 path：用法错误，不计入撞权限计数。
+					return deny(
+						`pi-allow-reads: 没有给 path，按当前目录（cwd：${cwd}）处理，而它不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
+					);
+				}
+				return bail(
+					`pi-allow-reads: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
+				);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
 				const junk = probe?.checkWriteTarget(target);
