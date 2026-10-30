@@ -108,3 +108,58 @@ warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool �
 - **不要给写实现类子代理设 `toolBudget.hard`**：它先封读和搜索，子代理拿不到上下文反而更容易空转，探针随后把 run 判死，看起来像探针误伤。要限制就限制范围（`scope`）和时长（`timeoutMs`）。
 - **不要同时配 `successPatterns` 和 gate 的同一份验证**：一处判成功就够了，两处容易先后不一致。
 - **不要用 `probe: false` 来「省事」**：默认只开打转和撞权限，关掉等于放弃两个最便宜的错误信号。真要静音就写 `probe: { repeatBash: 50 }` 这类具体放宽。
+
+## 与 review 子代理（sidecar 评审）配合
+
+评审子代理在主流程之外旁挂：写实现的那单不管评审，评审单自己起一个 fresh-context 子代理看 diff。它和探针的关系是**两类 agent 配两套 bindings**。
+
+### sidecar 评审的形态
+
+| 形态 | 谁起 | 怎么用 |
+| --- | --- | --- |
+| `/parallel-review` | 用户或父代理 | 并行起多个 reviewer，各给一个角度（正确性、测试、简化），回来看综合结论；加 `autofix` 才动手改 |
+| `/review-loop` | 同上 | worker → reviewer → fix-worker 循环，直到干净或到上限 |
+| `/parallel-cleanup` | 同上 | 实现完之后的清理型评审，只审不改 |
+| `acceptance.review` | 原生验收 | `{ level: "checked", review: { required: true } }`；`acceptanceRole: "writer"` 的 async/dynamic writer 会自动带这条 |
+| `acceptanceRole: "read-only"` | 原生验收 | 只读角色（reviewer、scout、validator）推断为 `none`，不需要证据门槛 |
+
+### bindings 怎么分
+
+**只有强制的形态才需要配探针。** 评审子代理本来就该只读、不该跑测试、不该长时间不产出「结论」——时间判据（只读空转、早可收工）对它是误伤源，一律不配。
+
+```json
+// 实现型子代理：范围收窄 + 允许跑验证 + 探针全开
+"pi-allow-reads/1": {
+  "scope": ["web/src/features/balance/**"],
+  "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
+  "probe": { "idleWriteMs": 360000, "abortGraceMs": 120000 }
+}
+
+// 评审型子代理：只读、范围给到整棵相关树、探针只留默认两条
+"pi-allow-reads/1": {
+  "scope": ["web/src/features/balance/**", "web/src/lib/**"],
+  "readOnly": true,
+  "maxDenies": 3
+}
+```
+
+要点：
+
+- **评审要读得比实现宽**。实现子代理的 scope 只该有它要改的那块；评审要看改动涉及的依赖、类型定义、测试，scope 得覆盖这些，否则评审会一路撞权限停下，而且它撞权限的汇报会被父代理误读成「实现有问题」。
+- **评审单 `readOnly: true`**：同时跳过「只读空转」和「早可收工」两条时间判据（本来就是只读任务），但「原地打转」「撞权限」「造杂物」仍然生效——评审反复跑同一条命令或乱写临时文件一样是浪费。
+- **`maxDenies` 对评审单更重要**：评审忘了给某个目录的读权限时，它会立刻停下并报告「缺哪个目录」，父代理据此补 scope 重跑评审即可，不用重新实现。
+
+### 与验收 gate 的分工
+
+`acceptance.review` 是**验收环节**：跑完实现、证据齐了之后，再独立起一个 reviewer 判「能不能收」。
+探针是**运行环节**：在实现或评审进行的**途中**判「有没有在推进」。
+
+两者不冲突也不重复：
+
+- 探针判死一轮实现 → 那轮没有交付，不需要进验收。
+- 探针放过、审核通过 → gate 报 `verified` / 失败，跟探针无关。
+- 别指望探针代替评审：探针只能看见「没写文件、重复命令、验证通过后还在磨」，看不见「改错了、漏了测试、越界重构」。
+
+### 一个容易踩的坑
+
+`/parallel-review` 和 `/parallel-cleanup` 的默认约定是**评审不要往仓库写文件**（`output: false`，不改代码）。如果你给的评审 bindings 里 `readOnly: false` 且 scope 包含源码目录，评审模型可能顺手「帮你修」——于是评审变成第二个写入者，而源实现子代理可能还在跑，两个写者撞同一个工作树。要么评审单 `readOnly: true`，要么等实现的 run 完全结束再起评审。
