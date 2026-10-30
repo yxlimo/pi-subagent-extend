@@ -67,6 +67,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-net --die-wit
 - 默认只读根、断网：写仓库外被拒、联网被拒。`"writable": true` 把 scope 命中的目录绑成可写（测试产物落地）；`"network": true` 放开网络。
 - `bash.writablePaths`：额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd），用于 pnpm store 这类全局可写区。
 - `bash.env`：注入沙箱的环境变量（`--setenv`）。默认已经注入 `XDG_RUNTIME_DIR`（指向沙箱私有 /tmp）与 worktree 场景下的 `MISE_STATE_DIR`。
+- 白名单外的 bash 命令，其拒绝文案会带上探测到的 pnpm store 路径——模型看得见这段文案，能把它连同「父代理需要写什么」一起汇报上来。扩展只探测不自动放行：放行与否是父代理的显式决定。
 - worktree 场景：`bash.writable` 为真时，worktree 根本身也会被绑成可写（scope 通常只写到 worktree 里的相对路径，根级的 package.json、node_modules 之类在范围之外）。
 - 找不到 `bwrap` 时 fail closed：白名单命令也不执行，拒绝理由说明原因。`PI_ALLOW_READS_BWRAP` 可指定二进制路径。
 - 上限明确：沙箱防的是**越界写和联网**，不是读。跑测试本身就要读整棵树（`node_modules`、配置），所以 `cat` 仓库里范围外的文件在沙箱内仍可读——读的约束仍由 `read`/`grep` 等工具层负责。

@@ -32,6 +32,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { execFileSync } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
@@ -317,6 +318,46 @@ function sandboxEnv(cwd: string, rule: BashRule): Record<string, string> {
 	return env;
 }
 
+/**
+ * 探测 pnpm 的 store 路径（只探测，不自动放行）。路径随 cwd 变，必须用子代理的
+ * cwd 跑。探测失败不影响其他功能，只是这一行显示不出来。
+ */
+const pnpmStoreCache = new Map<string, { path?: string; error?: string }>();
+
+export function detectPnpmStore(cwd: string): { path?: string; error?: string } {
+	const cached = pnpmStoreCache.get(cwd);
+	if (cached) return cached;
+	const found = probePnpmStore(cwd);
+	pnpmStoreCache.set(cwd, found);
+	return found;
+}
+
+function probePnpmStore(cwd: string): { path?: string; error?: string } {
+	try {
+		const out = execFileSync("pnpm", ["store", "path"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const line = out
+			.split("\n")
+			.map((l) => l.trim())
+			.filter(Boolean)
+			.pop();
+		return line ? { path: line } : { error: "pnpm store path 没有输出" };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/** /allowed-reads 里显示 pnpm store：探测到的路径 + 一句「未放行」的提示。 */
+function describePnpmStore(cwd: string): string {
+	const found = detectPnpmStore(cwd);
+	if (found.path) return `${found.path}（未放行；要让子代理装依赖就写进 bash.writablePaths）`;
+	return `探测失败（${found.error ?? "未知原因"}）`;
+}
+
 function shellQuote(text: string): string {
 	return `'${text.replace(/'/g, `'\\''`)}'`;
 }
@@ -388,10 +429,11 @@ export default function (pi: ExtensionAPI) {
 			? `，bash ${policy.bash.read.length} 读 / ${policy.bash.write.length} 写`
 			: "，bash 关闭";
 		const probeLine = probe ? "，探针开启" : "";
+		const storeLine = policy.bash ? `，pnpm store ${detectPnpmStore(ctx.cwd ?? process.cwd()).path ?? "探测失败"}` : "";
 		const mode = policy.readOnly ? "只读" : "读写";
 		const msg = policy.globs.length
-			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}${probeLine}）`
-			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}${probeLine}`;
+			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}${probeLine}${storeLine}）`
+			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}${probeLine}${storeLine}`;
 		ctx.ui.notify(`pi-allow-reads: ${msg}`, "info");
 	});
 
@@ -457,8 +499,13 @@ export default function (pi: ExtensionAPI) {
 			}
 			const match = classifyCommand(rule, command);
 			if (!match) {
+				// 模型能看见这段文案，所以把它需要的路径直接写进去，省得它再猜。
+				const store = detectPnpmStore(cwd);
+				const storeHint = store.path
+					? `（pnpm store 在 ${store.path}，未放行；需要装依赖时由父代理写进 bash.writablePaths）`
+					: "";
 				return bail(
-					`pi-allow-reads: bash 命令不在白名单内：${preview(allEntries(rule))}（来源：${policy.source}）`,
+					`pi-allow-reads: bash 命令不在白名单内：${preview(allEntries(rule))}（来源：${policy.source}）${storeHint}`,
 				);
 			}
 			const repeatEvent = probe?.noteBashStart(command, match.access);
@@ -527,6 +574,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("allowed-reads", {
 		description: "查看当前任务范围、bash 白名单与探针状态",
 		handler: async (_args, ctx) => {
+			const cwd = ctx.cwd ?? process.cwd();
 			const lines = policy.active
 				? [
 					`来源: ${policy.source}`,
@@ -538,6 +586,14 @@ export default function (pi: ExtensionAPI) {
 					policy.bash
 						? `沙箱: ${policy.bash.network ? "有网" : "断网"}，${policy.bash.writable ? "scope 可写" : "只读根"}`
 						: undefined,
+					policy.bash
+						? `沙箱可写路径: ${
+							sandboxWritableDirs(policy, cwd, policy.bash)
+								.map((d) => d.replace(cwd, "."))
+								.join(" | ") || "（无）"
+						}`
+						: undefined,
+					policy.bash ? `pnpm store: ${describePnpmStore(cwd)}` : undefined,
 					`已读 ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""} 次`,
 					`撞权限: ${denyCounter.status()}`,
 					...(probe ? probe.status() : ["探针: 关闭"]),

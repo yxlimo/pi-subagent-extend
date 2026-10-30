@@ -24,12 +24,15 @@ async function handler({ bindings, cwd = workdir, clock }) {
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
 
   const handlers = {}
+  const commands = {}
   const ui = []
   activate({
     on(event, fn) {
       handlers[event] = fn
     },
-    registerCommand() {},
+    registerCommand(name, spec) {
+      commands[name] = spec
+    },
   })
 
   const ctx = { cwd, ui: { notify: (message) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
@@ -49,6 +52,7 @@ async function handler({ bindings, cwd = workdir, clock }) {
     result,
     aborts,
     ui,
+    commands,
     restore: () => {
       if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
       else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous
@@ -579,6 +583,41 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(grep.reason, /当前目录/, "grep says the cwd was used instead")
   h.restore()
   console.log("  ok   缺 path 的拒绝文案说清原因，不误导成走错目录")
+}
+
+// 24. /allowed-reads reports the writable paths and the pnpm store probe.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": {
+        scope: ["src/**"],
+        bash: { read: ["pnpm run typecheck"], writable: true, writablePaths: ["/tmp"] },
+      },
+    }),
+  })
+  const notified = []
+  await h.commands["allowed-reads"].handler("", { cwd: workdir, ui: { notify: (m) => notified.push(m) } })
+  const text = notified.join("\n")
+  assert.match(text, /沙箱可写路径/, "the command lists the writable paths")
+  assert.match(text, /pnpm store/, "the command probes the pnpm store")
+  h.restore()
+  console.log("  ok   /allowed-reads 列出可写路径并探测 pnpm store")
+}
+
+// 25. A denied bash command carries the pnpm store path, so the model can report it.
+{
+  const h = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({
+      "pi-allow-reads/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] }, maxDenies: 0 },
+    }),
+  })
+  const denied = await h.call("bash", { command: "pnpm install" })
+  assert.equal(denied?.block, true, "unlisted command is denied")
+  assert.match(denied.reason, /pnpm store/, "the refusal tells the model where the pnpm store is")
+  assert.match(denied.reason, /writablePaths/, "and says how the parent would allow it")
+  h.restore()
+  console.log("  ok   bash 拒绝文案带上 pnpm store 路径")
 }
 
 rmSync(workdir, { recursive: true, force: true })
