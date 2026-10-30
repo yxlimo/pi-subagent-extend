@@ -107,7 +107,14 @@ bindings 字段：
 
 namespace 是 `pi-allow-reads/1`。pi-subagents 把 bindings 编码进 `PI_SUBAGENT_EXTENSION_BINDINGS` 传给子代理，本扩展在激活时一次性读取（前台子代理的该环境变量只在会话启动前存在，之后恢复，不能懒读）。bindings 损坏或 `scope` 非法时 fail closed：会话保持运行但所有文件访问被拒绝，拒绝理由写明原因。
 
-父代理模型需要知道的约定打包成 skill，随扩展发布（`packages/pi-plugin/skills/pi-allow-reads/SKILL.md`）。扩展用 `resources_discover` 把 skill 目录注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到调用模板、字段表和注意事项。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-allow-reads` 可手动加载。
+父代理模型需要知道的约定打包成两个 skill，随扩展发布：
+
+| skill | 内容 |
+| --- | --- |
+| `skills/pi-allow-reads` | 文件范围、bash 两列与 `re:` 正则、沙箱、调用模板 |
+| `skills/pi-allow-reads-probes` | 四条探针判据、撞权限计数、warn/stop 语义、被停后怎么读汇报 |
+
+扩展用 `resources_discover` 把两个目录一起注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到对应那份。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-allow-reads` 与 `/skill:pi-allow-reads-probes` 可手动加载。
 
 前提：父会话也要加载本扩展，skill 才能到达父代理。`./install.sh` 全局软链即可——父会话没有 bindings，扩展是空操作，无副作用；子代理那一侧的加载用 `subagentOnlyExtensions`（前台生效）或全局自动发现（仅后台子代理）覆盖。
 
