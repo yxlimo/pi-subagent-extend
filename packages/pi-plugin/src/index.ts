@@ -1,18 +1,18 @@
 /**
- * pi-allow-reads — 把一个会话（主要是子代理）能碰的文件限制在任务范围内。
+ * pi-subagent-permission — 把一个会话（主要是子代理）能碰的文件限制在任务范围内。
  *
  * 设计目标：父代理委派子代理时指定本次任务的文件/目录范围，子代理会话里
  * 范围之外的 tool_call 一律拒绝（fail closed），防止子代理漫无目的地扫仓库。
  *
  * 配置只来自 pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
- *      extensionBindings: { "pi-allow-reads/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+ *      extensionBindings: { "pi-subagent-permission/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
  * pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
  * 激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
  * 之后父进程环境被恢复，所以不能在 tool_call 里懒读。
  *
  * 没有 bindings 时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
- * 扩展还随包带一个用法 skill（../skills/pi-allow-reads），经 resources_discover
+ * 扩展还随包带一个用法 skill（../skills/pi-subagent-permission），经 resources_discover
  * 注册给会话：扩展加载到哪个会话，父代理侧就能看到「委派时如何传 bindings」的约定，
  * 不需要往 AGENTS.md 里写。
  *
@@ -43,12 +43,12 @@ import { DenyCounter } from "./deny-count.ts";
 import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
-const BINDING_NAMESPACE = "pi-allow-reads";
+const BINDING_NAMESPACE = "pi-subagent-permission";
 /**
  * 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。
  * 拆成两个：范围与 bash 白名单、探针判据与停机语义。
  */
-const SKILL_DIRS = ["pi-allow-reads", "pi-allow-reads-probes"].map((name) =>
+const SKILL_DIRS = ["pi-subagent-permission", "pi-subagent-permission-probes"].map((name) =>
 	fileURLToPath(new URL(`../skills/${name}`, import.meta.url)),
 );
 
@@ -219,12 +219,12 @@ function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 
 /** 找 helper：环境变量优先，其次包内构建产物，最后缓存目录。 */
 function helperPath(): string | undefined {
-	const fromEnv = process.env.PI_ALLOW_READS_HELPER?.trim();
+	const fromEnv = process.env.PI_SUBAGENT_PERMISSION_HELPER?.trim();
 	if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
 	const here = dirname(fileURLToPath(import.meta.url));
 	const candidates = [
-		resolve(here, "..", "bin", "pi-allow-reads-helper"),
-		resolve(homedir(), ".pi", "allow-reads", "bin", "pi-allow-reads-helper"),
+		resolve(here, "..", "bin", "pi-subagent-permission-helper"),
+		resolve(homedir(), ".pi", "subagent-permission", "bin", "pi-subagent-permission-helper"),
 	];
 	for (const candidate of candidates) {
 		if (existsSync(candidate)) return candidate;
@@ -325,7 +325,7 @@ const GIT_EXCLUDE_PATTERNS = ["node_modules/", ".pnpm-store/"];
  */
 function gitExcludesFile(): string | undefined {
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-allow-reads");
+		const dir = resolve(homedir(), ".cache", "pi-subagent-permission");
 		const file = resolve(dir, "git-excludes");
 		const wanted = `${GIT_EXCLUDE_PATTERNS.join("\n")}\n`;
 		if (!existsSync(file) || readFileSync(file, "utf8") !== wanted) {
@@ -351,7 +351,7 @@ function gitExcludesFile(): string | undefined {
  */
 function sandboxEnv(cwd: string, rule: BashRule): Record<string, string> {
 	const env: Record<string, string> = { ...rule.env };
-	const privateDir = `/tmp/.pi-allow-reads-${process.pid}`;
+	const privateDir = `/tmp/.pi-subagent-permission-${process.pid}`;
 	// git 的全局排除：子代理 `git add -A` 时不把依赖目录吸进索引。
 	// 宿主已经设了 GIT_CONFIG_COUNT 就不插手，免得覆盖别人的配置。
 	if (rule.gitExcludes && !process.env.GIT_CONFIG_COUNT) {
@@ -404,7 +404,7 @@ function probePnpmStore(cwd: string): { path?: string; error?: string } {
 	}
 }
 
-/** /allowed-reads 里显示 pnpm store：探测到的路径 + 一句「未放行」的提示。 */
+/** /permission 里显示 pnpm store：探测到的路径 + 一句「未放行」的提示。 */
 function describePnpmStore(cwd: string): string {
 	const found = detectPnpmStore(cwd);
 	if (found.path) return `${found.path}（未放行；要让子代理装依赖就写进 bash.writablePaths）`;
@@ -491,7 +491,7 @@ export function writeSpec(cwd: string, rule: BashRule, policy: Policy): string |
 		env: sandboxEnv(cwd, rule),
 	};
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-allow-reads");
+		const dir = resolve(homedir(), ".cache", "pi-subagent-permission");
 		mkdirSync(dir, { recursive: true });
 		const file = resolve(dir, `spec-${process.pid}.json`);
 		writeFileSync(file, JSON.stringify(spec));
@@ -545,7 +545,7 @@ export default function (pi: ExtensionAPI) {
 					abort: abortNow,
 					warn: (text) => {
 						const ui = currentCtx?.ui as { notify?: (m: string, t?: string) => void } | undefined;
-						ui?.notify?.(`pi-allow-reads: ${text}`, "warning");
+						ui?.notify?.(`pi-subagent-permission: ${text}`, "warning");
 					},
 				},
 			})
@@ -569,7 +569,7 @@ export default function (pi: ExtensionAPI) {
 		const msg = policy.globs.length
 			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}${probeLine}${storeLine}）`
 			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}${probeLine}${storeLine}`;
-		ctx.ui.notify(`pi-allow-reads: ${msg}`, "info");
+		ctx.ui.notify(`pi-subagent-permission: ${msg}`, "info");
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -623,13 +623,13 @@ export default function (pi: ExtensionAPI) {
 			const rule = policy.bash;
 			if (!rule) {
 				return bail(
-					`pi-allow-reads: 本会话不允许执行 bash（来源：${policy.source}）。需要跑测试/typecheck 时由父代理在 bindings 里给 bash.read / bash.write 点名命令`,
+					`pi-subagent-permission: 本会话不允许执行 bash（来源：${policy.source}）。需要跑测试/typecheck 时由父代理在 bindings 里给 bash.read / bash.write 点名命令`,
 				);
 			}
-			if (!command) return deny("pi-allow-reads: 空的 bash 命令");
+			if (!command) return deny("pi-subagent-permission: 空的 bash 命令");
 			if (SHELL_META.test(command)) {
 				return deny(
-					`pi-allow-reads: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(allEntries(rule))}`,
+					`pi-subagent-permission: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(allEntries(rule))}`,
 				);
 			}
 			const match = classifyCommand(rule, command);
@@ -640,7 +640,7 @@ export default function (pi: ExtensionAPI) {
 					? `（pnpm store 在 ${store.path}，未放行；需要装依赖时由父代理写进 bash.writablePaths）`
 					: "";
 				return bail(
-					`pi-allow-reads: bash 命令不在白名单内：${preview(allEntries(rule))}（来源：${policy.source}）${storeHint}`,
+					`pi-subagent-permission: bash 命令不在白名单内：${preview(allEntries(rule))}（来源：${policy.source}）${storeHint}`,
 				);
 			}
 			const repeatEvent = probe?.noteBashStart(command, match.access);
@@ -654,24 +654,24 @@ export default function (pi: ExtensionAPI) {
 			const helper = helperPath();
 			if (!helper) {
 				return deny(
-					"pi-allow-reads: 找不到沙箱 helper（pi-allow-reads-helper）。在 pi-plugin 目录里跑一次 `pnpm run build:helper`，或用 PI_ALLOW_READS_HELPER 指定路径",
+					"pi-subagent-permission: 找不到沙箱 helper（pi-subagent-permission-helper）。在 pi-plugin 目录里跑一次 `pnpm run build:helper`，或用 PI_SUBAGENT_PERMISSION_HELPER 指定路径",
 				);
 			}
 			const caps = describeHelper(helper);
 			if (!caps?.landlock.supported) {
 				const reason = caps?.landlock.reason ?? "helper --describe 没有输出可用信息";
-				return deny(`pi-allow-reads: 当前内核无法强制任务范围：${reason}`);
+				return deny(`pi-subagent-permission: 当前内核无法强制任务范围：${reason}`);
 			}
 			const specFile = writeSpec(cwd, rule, policy);
 			if (!specFile) {
-				return deny("pi-allow-reads: 写不出沙箱 spec（检查 ~/.cache/pi-allow-reads 是否可写）");
+				return deny("pi-subagent-permission: 写不出沙箱 spec（检查 ~/.cache/pi-subagent-permission 是否可写）");
 			}
 			(event.input as { command?: string }).command = wrapInSandbox(command, specFile, helper);
 			return undefined;
 		}
 		if (EXEC_TOOLS.includes(event.toolName)) {
 			return bail(
-				`pi-allow-reads: 本会话被限定在任务范围内（${preview(policy.globs)}），不允许执行 ${event.toolName}`,
+				`pi-subagent-permission: 本会话被限定在任务范围内（${preview(policy.globs)}），不允许执行 ${event.toolName}`,
 			);
 		}
 		if (SAFE_TOOLS.includes(event.toolName) || policy.allowTools.includes(event.toolName)) {
@@ -683,17 +683,17 @@ export default function (pi: ExtensionAPI) {
 			const raw = typeof input?.path === "string" ? input.path.trim() : "";
 			const target = raw || ".";
 			if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
-				return bail(`pi-allow-reads: 已达 read 预算上限（${policy.maxReads} 次）`);
+				return bail(`pi-subagent-permission: 已达 read 预算上限（${policy.maxReads} 次）`);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
 				if (policy.readOnly) {
-					return bail(`pi-allow-reads: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
+					return bail(`pi-subagent-permission: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
 				}
 				// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
 				// 这是用法错误不是权限错误，不计入撞权限计数。
 				if (!raw) {
 					return deny(
-						`pi-allow-reads: ${event.toolName} 必须给 path（参数里没有 path，无法判断目标文件是否在任务范围内）。范围：${preview(policy.globs)}`,
+						`pi-subagent-permission: ${event.toolName} 必须给 path（参数里没有 path，无法判断目标文件是否在任务范围内）。范围：${preview(policy.globs)}`,
 					);
 				}
 			}
@@ -702,11 +702,11 @@ export default function (pi: ExtensionAPI) {
 				if (!raw) {
 					// 缺 path：用法错误，不计入撞权限计数。
 					return deny(
-						`pi-allow-reads: 没有给 path，按当前目录（cwd：${cwd}）处理，而它不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
+						`pi-subagent-permission: 没有给 path，按当前目录（cwd：${cwd}）处理，而它不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
 					);
 				}
 				return bail(
-					`pi-allow-reads: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
+					`pi-subagent-permission: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
 				);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
@@ -719,11 +719,11 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		return bail(
-			`pi-allow-reads: 工具 ${event.toolName} 不在放行名单内，拒绝（fail closed；确需放行就在 extensionBindings 的 allowTools 里列出）`,
+			`pi-subagent-permission: 工具 ${event.toolName} 不在放行名单内，拒绝（fail closed；确需放行就在 extensionBindings 的 allowTools 里列出）`,
 		);
 	});
 
-	pi.registerCommand("allowed-reads", {
+	pi.registerCommand("permission", {
 		description: "查看当前任务范围、bash 白名单与探针状态",
 		handler: async (_args, ctx) => {
 			const cwd = ctx.cwd ?? process.cwd();
@@ -751,8 +751,8 @@ export default function (pi: ExtensionAPI) {
 					...(probe ? probe.status() : ["探针: 关闭"]),
 					...policy.globs.map((g) => `  ${g}`),
 				].filter((l): l is string => Boolean(l))
-				: ["未生效（本会话没有 pi-allow-reads 的 extensionBindings）"];
-			ctx.ui.notify(`pi-allow-reads:\n${lines.join("\n")}`, "info");
+				: ["未生效（本会话没有 pi-subagent-permission 的 extensionBindings）"];
+			ctx.ui.notify(`pi-subagent-permission:\n${lines.join("\n")}`, "info");
 		},
 	});
 }

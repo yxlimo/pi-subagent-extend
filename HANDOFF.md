@@ -1,24 +1,24 @@
-# HANDOFF — pi-allow-reads
+# HANDOFF — pi-subagent-permission
 
 交接文档。后续独立 agent 接手时读这一份 + `README.md` 即可，不必翻本机历史。
 
 | | |
 | --- | --- |
 | 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
-| 位置 | `/home/shay/extensions/pi-allow-reads/`（独立 git 仓库，本地提交，未推远程） |
-| 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除 |
+| 位置 | `/home/shay/extensions/pi-subagent-permission/`（独立 git 仓库，本地提交，未推远程） |
+| 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除；包名与绑定命名空间后来从 `pi-allow-reads` 统一改名为 `pi-subagent-permission` |
 | 状态 | 已实现、离线测试通过（15 例）、typecheck 通过；活体验证通过（前台子代理拦截 + 父会话 skill 可见） |
 
 ## 1. 仓库结构
 
 ```text
-pi-allow-reads/
+pi-subagent-permission/
 ├── packages/pi-plugin/
 │   ├── src/index.ts            扩展本体
 │   ├── test/extension.test.mjs 离线测试
-│   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-allow-reads）
+│   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-subagent-permission）
 │   ├── package.json            pi 清单（"pi.extensions": ["src/index.ts"]）
-│   ├── skills/pi-allow-reads/SKILL.md  用法 skill，随扩展注册
+│   ├── skills/pi-subagent-permission/SKILL.md  用法 skill，随扩展注册
 │   └── tsconfig.json
 ├── README.md
 └── HANDOFF.md                  本文件
@@ -32,18 +32,18 @@ pi-allow-reads/
   （`src/extension/schemas.js`），父代理按次传 JSON，namespace 形如 `包名/版本`。
   pi-subagents 经 `src/runs/shared/child-launch.js` 把它编码进
   `PI_SUBAGENT_EXTENSION_BINDINGS` 环境变量传给子代理。本扩展的 namespace 是
-  `pi-allow-reads/1`，在 `src/index.ts` 的 `BINDING_NAMESPACE`。
+  `pi-subagent-permission/1`，在 `src/index.ts` 的 `BINDING_NAMESPACE`。
 - **读取时机**：bindings 在扩展激活（factory）时定格。文档
   （pi-subagents `docs/tool-reference.md` 的 extensionBindings 行）明确：前台子代理
   的该环境变量只在会话启动前存在，之后父进程环境恢复，tool_call 里读不到。
-  配置通道只有这一个；早先的 `PI_ALLOWED_FILES` / `.pi/allowed-reads.txt` 兜底
+  配置通道只有这一个；早先的 `PI_ALLOWED_FILES` / `.pi/permission.txt` 兜底
   通道已删除。
 - **前台子代理不加载 ambient extensions**：要让扩展在子代理里可用，agent 定义必须
   写 `subagentOnlyExtensions`（前台后台都生效）或 `extensions`，或只跑后台子代理
   靠全局自动发现。README 推荐前者。
-- **文件来源已删除**：早先按会话 cwd 惰性解析 `.pi/allowed-reads.txt` 的路径
+- **文件来源已删除**：早先按会话 cwd 惰性解析 `.pi/permission.txt` 的路径
   随旧通道一起移除，策略在激活时一次定格。
-- **用法 skill 随扩展加载**：`skills/pi-allow-reads/SKILL.md`（调用模板、字段表、
+- **用法 skill 随扩展加载**：`skills/pi-subagent-permission/SKILL.md`（调用模板、字段表、
   注意事项）经 `resources_discover` 事件的 `skillPaths` 注册给会话（pi 1.4 的
   `ResourcesDiscoverResult`；目录会被递归扫描找 `SKILL.md`）。扩展被加载到哪个
   会话，该会话就看到 skill——父代理靠它知道 namespace 与传法，不需要写 `AGENTS.md`。
@@ -54,7 +54,7 @@ pi-allow-reads/
   `powershell`/`codemode` 与未知工具仍然一律拒绝。
 - **bash 白名单 + helper 沙箱**：binding 的 `bash.read` / `bash.write` 给出命令前缀（按
   空白切词逐 token 匹配），命中的命令在 tool_call 里被原地改写成
-  `<helper> --spec ~/.cache/pi-allow-reads/spec-<pid>.json -- bash -lc '<cmd>'`
+  `<helper> --spec ~/.cache/pi-subagent-permission/spec-<pid>.json -- bash -lc '<cmd>'`
   （pi 的 `ToolCallEventResult` 只能 block，改参数得改 `event.input`）。helper 是
   `packages/helper` 的 Rust 二进制，在 `exec` 前把自身关进沙箱：Landlock 强制文件范围
   （根可读、只有 spec 列出的目录可写），私有网络命名空间断 TCP/UDP/DNS，私有 mount
@@ -74,7 +74,7 @@ pi-allow-reads/
 | A4 | maxReads 预算、allowTools、缺省 path | ✅ | 第 7–9 例 |
 | A5 | 用法 skill 经 resources_discover 注册；已上锁会话不注册 | ✅ | 第 10–11 例 |
 | A6 | typecheck | ✅ | `pnpm run typecheck` |
-| A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-allow-reads` |
+| A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-subagent-permission` |
 | A8 | 活体验证：带 bindings 的前台子代理被拦截 | ✅ | 同日 `be-core` + scope `package.json` 委派，子代理读 `README.md` 被拒，文案含范围与来源 |
 | A9 | glob 语义回归（`**` 不被 `*` 规则二次改写；`dir/` 与 `dir`、`dir/**` 等价） | ✅ | 第 15 例；活体：`be-core`/`fe` + scope `web/src/features/balance/**` 放行整目录 |
 | A10 | bash 白名单 / 元字符拒绝 / writable / 缺 helper 时 fail closed | ✅ | 第 12–14 例 |
@@ -115,7 +115,7 @@ pi-allow-reads/
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
 packages/pi-plugin/test/extension.test.mjs 离线测试（15 例）
 packages/pi-plugin/install.sh              装/卸
-packages/pi-plugin/skills/pi-allow-reads/SKILL.md  用法 skill
+packages/pi-plugin/skills/pi-subagent-permission/SKILL.md  用法 skill
 ```
 
 ## 6. 相关材料

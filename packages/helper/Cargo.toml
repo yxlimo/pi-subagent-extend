@@ -1,12 +1,12 @@
 [package]
-name = "pi-allow-reads-helper"
+name = "pi-subagent-permission-helper"
 version = "0.1.0"
 edition = "2021"
-description = "Sandbox a command for pi-allow-reads: Landlock for files, a network namespace for the network"
+description = "Sandbox a command for pi-subagent-permission: Landlock for files, a network namespace for the network"
 license = "MIT"
 
 [[bin]]
-name = "pi-allow-reads-helper"
+name = "pi-subagent-permission-helper"
 path = "src/main.rs"
 
 [dependencies]

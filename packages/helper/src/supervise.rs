@@ -47,7 +47,7 @@ fn supervisor(child_main: impl FnOnce() -> i32) -> ! {
     };
 
     if let Err(error) = crate::namespace::mount_proc() {
-        eprintln!("pi-allow-reads-helper: {error}");
+        eprintln!("pi-subagent-permission-helper: {error}");
         unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
     }
 
@@ -60,7 +60,7 @@ fn supervisor(child_main: impl FnOnce() -> i32) -> ! {
     match unsafe { libc::fork() } {
         -1 => {
             eprintln!(
-                "pi-allow-reads-helper: cannot start the command: {}",
+                "pi-subagent-permission-helper: cannot start the command: {}",
                 std::io::Error::last_os_error()
             );
             unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
@@ -74,7 +74,7 @@ fn supervisor(child_main: impl FnOnce() -> i32) -> ! {
             let status = match wait_for(pid) {
                 Ok(status) => status,
                 Err(error) => {
-                    eprintln!("pi-allow-reads-helper: {error}");
+                    eprintln!("pi-subagent-permission-helper: {error}");
                     unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
                 }
             };

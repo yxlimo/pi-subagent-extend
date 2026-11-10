@@ -1,5 +1,5 @@
 {
-  "name": "pi-allow-reads",
+  "name": "pi-subagent-permission",
   "version": "0.1.0",
   "description": "Scope what a pi session (primarily a subagent) may touch: reject every tool call outside the task scope",
   "type": "module",
@@ -22,7 +22,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
-    "build:helper": "mkdir -p bin && cargo build --release --manifest-path ../helper/Cargo.toml && cp ../helper/target/release/pi-allow-reads-helper bin/",
+    "build:helper": "mkdir -p bin && cargo build --release --manifest-path ../helper/Cargo.toml && cp ../helper/target/release/pi-subagent-permission-helper bin/",
     "pretest": "pnpm run build:helper",
     "test": "node test/extension.test.mjs",
     "prepublishOnly": "pnpm run build"

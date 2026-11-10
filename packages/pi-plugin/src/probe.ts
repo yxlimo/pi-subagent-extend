@@ -133,7 +133,7 @@ export interface ProbeDeps {
 	config: ProbeConfig;
 	/** bash 读写归类；没有 bash 规则时传 undefined。 */
 	bashRule?: BashRule;
-	/** 只读任务（pi-allow-reads 的 readOnly）：跳过判据 1 与 3。 */
+	/** 只读任务（pi-subagent-permission 的 readOnly）：跳过判据 1 与 3。 */
 	readOnly: boolean;
 	hooks: ProbeHooks;
 	host?: ProbeHost;
@@ -234,7 +234,7 @@ export class Probe {
 			if (p.re.test(path)) {
 				return {
 					reason:
-						`pi-allow-reads: 不允许把 "${path}" 写进仓库（判据：造杂物，命中 forbidWritePatterns "` +
+						`pi-subagent-permission: 不允许把 "${path}" 写进仓库（判据：造杂物，命中 forbidWritePatterns "` +
 						`${p.source}"）。这是调试/临时产物，不要留在工作区；需要临时文件就写到 /tmp。`,
 					stop: false,
 				};

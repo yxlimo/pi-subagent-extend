@@ -1,15 +1,17 @@
-# pi-allow-reads
+# pi-subagent-permission
+
+> 曾用名 `pi-allow-reads`。绑定命名空间、环境变量、helper 二进制与 skill 目录都已随之改名，旧名不再接受。
 
 pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任务范围内。父代理委派时指定本次任务的文件/目录，子代理会话里范围之外的 tool_call 一律拒绝，防止子代理漫无目的地扫仓库。
 
 | npm package | directory | host | what it does |
 | --- | --- | --- | --- |
-| `pi-allow-reads` | `packages/pi-plugin` | pi extension | 会话激活时读取任务范围，`tool_call` 阶段拦截范围外的一切调用 |
+| `pi-subagent-permission` | `packages/pi-plugin` | pi extension | 会话激活时读取任务范围，`tool_call` 阶段拦截范围外的一切调用 |
 
 ## 布局
 
 ```text
-packages/pi-plugin       pi 扩展   (src/, test/extension.test.mjs, install.sh, skills/pi-allow-reads{,-probes}/SKILL.md)
+packages/pi-plugin       pi 扩展   (src/, test/extension.test.mjs, install.sh, skills/pi-subagent-permission{,-probes}/SKILL.md)
 packages/helper          沙箱 helper (Rust：Landlock + 网络/挂载命名空间，构建产物落到 packages/pi-plugin/bin/)
 ```
 
@@ -29,7 +31,7 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 | `structured_output` | 放行（会话级运行时工具，不碰文件系统） |
 | 其余未知工具 | 拒绝；`allowTools` 里点名的工具放行（执行器类仍拒绝） |
 
-范围生效时会话开始有提示；`/allowed-reads` 查看当前范围、模式、bash 白名单、read 计数、撞权限计数与探针状态。
+范围生效时会话开始有提示；`/permission` 查看当前范围、模式、bash 白名单、read 计数、撞权限计数与探针状态。
 
 ### 探针（四条判据）
 
@@ -53,13 +55,13 @@ fail closed：范围生效时，下表之外的任何工具也一律拒绝。
 子代理要跑测试/typecheck 时，父代理在 bindings 里点名命令：
 
 ```json
-{ "pi-allow-reads/1": { "scope": ["lib/router/**"], "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] } } }
+{ "pi-subagent-permission/1": { "scope": ["lib/router/**"], "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] } } }
 ```
 
 放行的命令会改写成：
 
 ```text
-<helper> --spec ~/.cache/pi-allow-reads/spec-<pid>.json -- bash -lc '<命令>'
+<helper> --spec ~/.cache/pi-subagent-permission/spec-<pid>.json -- bash -lc '<命令>'
 ```
 
 helper 是 `packages/helper` 里的 Rust 二进制（`pnpm run build:helper` 构建）。它在 `exec` 之前先把**自己**关进沙箱，所以白名单命令拿到的就是一个已经限定好范围、断好网的进程：
@@ -71,7 +73,7 @@ helper 是 `packages/helper` 里的 Rust 二进制（`pnpm run build:helper` 构
 - **`/tmp`**：私有 tmpfs，不跟宿主的临时文件混在一起（cwd 本身在 `/tmp` 下时跳过，否则会把工作目录挡掉）。
 - **设备**：`/dev/null`、`/dev/zero`、`/dev/tty` 等基线设备默认可写，否则 `2>/dev/null` 这种写法会直接失败。
 
-内核要求 **Landlock ABI 7（Linux 6.15+）**，这是能拦住 `open(O_TRUNC)` 绕过的最低下限；ABI 不够时插件干脆不支持，而不是给一个更弱的沙箱。helper 缺失、ABI 不足或宿主不允许 user namespace 时，bash 保持关闭（fail closed），拒绝文案会说明缺什么。`PI_ALLOW_READS_HELPER` 可指定二进制路径。
+内核要求 **Landlock ABI 7（Linux 6.15+）**，这是能拦住 `open(O_TRUNC)` 绕过的最低下限；ABI 不够时插件干脆不支持，而不是给一个更弱的沙箱。helper 缺失、ABI 不足或宿主不允许 user namespace 时，bash 保持关闭（fail closed），拒绝文案会说明缺什么。`PI_SUBAGENT_PERMISSION_HELPER` 可指定二进制路径。
 
 - 条目两种写法：字面量按空白切词逐 token 前缀匹配（`pnpm test` 匹配 `pnpm test -t foo`，不匹配 `pnpm publish`）；`re:` 前缀按正则整串匹配（`"re: ^pnpm -r (test|build)"`）。不自动猜正则——命令参数常含 `*`、`.`，猜错方向是误授权。
 - `read` 列放行只读命令（typecheck、grep），`write` 列放行会写文件的命令（测试、构建）。两列都是授权；分类只影响探针的「写入活动」判定。两边都命中时按 write 算。
@@ -82,7 +84,7 @@ helper 是 `packages/helper` 里的 Rust 二进制（`pnpm run build:helper` 构
 - 白名单外的 bash 命令，其拒绝文案会带上探测到的 pnpm store 路径——模型看得见这段文案，能把它连同「父代理需要写什么」一起汇报上来。扩展只探测不自动放行：放行与否是父代理的显式决定。
 - `bash.writable` 为真时，额外给写权限：**当前工作目录**（不写的话 git 连索引都写不了）、**`<cwd>/node_modules`**（解析符号链接后的真实路径，pnpm install 要写 `.bin` 里的 shim）、**worktree 根本身**（scope 通常只写到 worktree 里的相对路径，根级的 package.json、node_modules 之类在范围之外）。
 - `bash.gitExcludes`（默认 `true`）：给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`）。沙箱里 pnpm 一定会用项目内的 `.pnpm-store`（见下），否则子代理一句 `git add -A` 就能把几万个依赖文件吸进索引，patch 直接生成失败。
-- 找不到 helper 时 fail closed：白名单命令也不执行，拒绝理由说明原因（并给出构建命令）。`PI_ALLOW_READS_HELPER` 可指定二进制路径。
+- 找不到 helper 时 fail closed：白名单命令也不执行，拒绝理由说明原因（并给出构建命令）。`PI_SUBAGENT_PERMISSION_HELPER` 可指定二进制路径。
 - 上限明确：沙箱防的是**越界写和联网**，不是读。跑测试本身就要读整棵树（`node_modules`、配置），所以 `cat` 仓库里范围外的文件在沙箱内仍可读——读的约束仍由 `read`/`grep` 等工具层负责。
 
 ## worktree 与 pnpm 的已知边界
@@ -110,7 +112,7 @@ pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接*
 ---
 name: worker
 description: 在指定范围内完成实现任务
-subagentOnlyExtensions: /home/shay/extensions/pi-allow-reads/packages/pi-plugin/src/index.ts
+subagentOnlyExtensions: /home/shay/extensions/pi-subagent-permission/packages/pi-plugin/src/index.ts
 ---
 ```
 
@@ -122,7 +124,7 @@ subagentOnlyExtensions: /home/shay/extensions/pi-allow-reads/packages/pi-plugin/
 subagent(
   agent: "worker",
   task: "修复 login.ts 里的空指针",
-  extensionBindings: { "pi-allow-reads/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+  extensionBindings: { "pi-subagent-permission/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
 )
 ```
 
@@ -135,16 +137,16 @@ bindings 字段：
 | `maxReads` | `number` | 可选，成功 read 次数上限 |
 | `allowTools` | `string[]` | 可选，额外放行的非执行器工具名 |
 
-namespace 是 `pi-allow-reads/1`。pi-subagents 把 bindings 编码进 `PI_SUBAGENT_EXTENSION_BINDINGS` 传给子代理，本扩展在激活时一次性读取（前台子代理的该环境变量只在会话启动前存在，之后恢复，不能懒读）。bindings 损坏或 `scope` 非法时 fail closed：会话保持运行但所有文件访问被拒绝，拒绝理由写明原因。
+namespace 是 `pi-subagent-permission/1`。pi-subagents 把 bindings 编码进 `PI_SUBAGENT_EXTENSION_BINDINGS` 传给子代理，本扩展在激活时一次性读取（前台子代理的该环境变量只在会话启动前存在，之后恢复，不能懒读）。bindings 损坏或 `scope` 非法时 fail closed：会话保持运行但所有文件访问被拒绝，拒绝理由写明原因。
 
 父代理模型需要知道的约定打包成两个 skill，随扩展发布：
 
 | skill | 内容 |
 | --- | --- |
-| `skills/pi-allow-reads` | 文件范围、bash 两列与 `re:` 正则、沙箱、调用模板 |
-| `skills/pi-allow-reads-probes` | 四条探针判据、撞权限计数、warn/stop 语义、被停后怎么读汇报 |
+| `skills/pi-subagent-permission` | 文件范围、bash 两列与 `re:` 正则、沙箱、调用模板 |
+| `skills/pi-subagent-permission-probes` | 四条探针判据、撞权限计数、warn/stop 语义、被停后怎么读汇报 |
 
-扩展用 `resources_discover` 把两个目录一起注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到对应那份。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-allow-reads` 与 `/skill:pi-allow-reads-probes` 可手动加载。
+扩展用 `resources_discover` 把两个目录一起注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到对应那份。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-subagent-permission` 与 `/skill:pi-subagent-permission-probes` 可手动加载。
 
 前提：父会话也要加载本扩展，skill 才能到达父代理。`./install.sh` 全局软链即可——父会话没有 bindings，扩展是空操作，无副作用；子代理那一侧的加载用 `subagentOnlyExtensions`（前台生效）或全局自动发现（仅后台子代理）覆盖。
 
@@ -153,8 +155,8 @@ namespace 是 `pi-allow-reads/1`。pi-subagents 把 bindings 编码进 `PI_SUBAG
 配置通道只有 bindings 一个。没有父代理时，手工导出同一环境变量即可（内容是 bindings 的 JSON）：
 
 ```bash
-PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-allow-reads/1":{"scope":["src/**"],"readOnly":true}}' \
-pi -e ~/extensions/pi-allow-reads/packages/pi-plugin/src/index.ts --tools read --no-session -p "<task>"
+PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagent-permission/1":{"scope":["src/**"],"readOnly":true}}' \
+pi -e ~/extensions/pi-subagent-permission/packages/pi-plugin/src/index.ts --tools read --no-session -p "<task>"
 ```
 
 ## 安装
@@ -164,7 +166,7 @@ cd packages/pi-plugin
 ./install.sh
 ```
 
-软链 `~/.pi/agent/extensions/pi-allow-reads`，pi 自动发现。范围生效与否完全由配置决定：没有 bindings、环境变量和范围文件时扩展是空操作，全局链接对父会话无害。卸载 `./install.sh --uninstall`。
+软链 `~/.pi/agent/extensions/pi-subagent-permission`，pi 自动发现。范围生效与否完全由配置决定：没有 bindings、环境变量和范围文件时扩展是空操作，全局链接对父会话无害。卸载 `./install.sh --uninstall`。
 
 不装全局链接、只在某个 agent 的子代理里加载时，用 frontmatter 的 `subagentOnlyExtensions`（路径指向本包的 `src/index.ts`），不需要安装步骤。
 
