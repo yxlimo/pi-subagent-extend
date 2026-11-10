@@ -21,8 +21,8 @@
  *   放行，否则拒绝；readOnly 时 edit / write 一律拒绝
  * - bash：默认拒绝。bindings 里写 bash.allow（命令前缀白名单，如 "pnpm run typecheck"）
  *   后，只有命中白名单的命令放行，并且改写成在 bwrap 沙箱里执行：只读根、断网
- *   （bash.network 可开）、可写目录只有 scope（bash.writable 时），防止用 shell
- *   绕过范围去改文件
+ *   （bash.network 可开，开启后 DNS 也一并放行；默认断网时连域名解析都断掉），
+ *   可写目录只有 scope（bash.writable 时），防止用 shell 绕过范围去改文件
  * - powershell / codemode：一律拒绝（没有路径可判，能绕过范围）
  * - structured_output 与 allowTools 里列出的工具：放行（执行器类不可放行）
  * - 其余未知工具：拒绝
@@ -35,7 +35,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, relative, resolve } from "node:path";
+import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, commandMatches, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
@@ -216,11 +216,13 @@ function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 	return false;
 }
 
-/** 找 bwrap：环境变量优先，否则常见路径。 */
+/** 找 bwrap：环境变量优先，否则按 PATH 解析（发行版和 Nix 的安装位置各不相同）。 */
 function bwrapPath(): string | undefined {
 	const fromEnv = process.env.PI_ALLOW_READS_BWRAP?.trim();
 	if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
-	for (const candidate of ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"]) {
+	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+		if (!dir) continue;
+		const candidate = join(dir, "bwrap");
 		if (existsSync(candidate)) return candidate;
 	}
 	return undefined;
@@ -409,10 +411,32 @@ function shellQuote(text: string): string {
 	return `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
-/** 把命令包进 bwrap：只读根、私有 /tmp、可选断网、可选把可写目录 bind 进去。 */
+/**
+ * 解析器套接字目录：`--unshare-net` 只掉网络包，glibc 仍会先去问 nscd /
+ * systemd-resolved 的 unix socket，而 unix socket 不受网络命名空间限制。断网时
+ * 把这些目录盖成空 tmpfs，域名解析才会真的失败。
+ */
+function resolverSocketDirs(): string[] {
+	const dirs = new Set<string>();
+	for (const candidate of ["/run/nscd", "/var/run/nscd", "/run/systemd/resolve"]) {
+		if (!existsSync(candidate)) continue;
+		try {
+			// /var/run 一般是指向 /run 的符号链接，bwrap 不能在符号链接上挂载。
+			dirs.add(realpathSync(candidate));
+		} catch {
+			// 解析不了的路径跳过，不让一条坏路径把整条沙箱命令弄失败。
+		}
+	}
+	return [...dirs];
+}
+
+/** 把命令包进 bwrap：只读根、私有 /tmp、可选断网（连 DNS 一起断）、可选把可写目录 bind 进去。 */
 export function wrapInSandbox(command: string, cwd: string, rule: BashRule, policy: Policy, bwrap: string): string {
 	const parts = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"];
-	if (!rule.network) parts.push("--unshare-net");
+	if (!rule.network) {
+		parts.push("--unshare-net");
+		for (const dir of resolverSocketDirs()) parts.push("--tmpfs", dir);
+	}
 	for (const dir of sandboxWritableDirs(policy, cwd, rule)) parts.push("--bind", dir, dir);
 	if (rule.gitExcludes && !process.env.GIT_CONFIG_COUNT) {
 		const excludes = gitExcludesFile();

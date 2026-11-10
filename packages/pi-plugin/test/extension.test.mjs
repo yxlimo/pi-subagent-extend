@@ -276,6 +276,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
   assert.match(input.command, /^'\/[^']*bwrap' '--ro-bind' '\/' '\/'/, "command is rewritten to run under bwrap")
   assert.match(input.command, /'--unshare-net'/, "network is off by default")
+  // A network namespace alone still lets glibc ask nscd/resolved over a unix
+  // socket, so the resolver socket dirs are shadowed as well.
+  if (existsSync("/run/nscd")) {
+    assert.match(input.command, /'--tmpfs' '\/run\/nscd'/, "the nscd socket dir is shadowed when networking is off")
+  }
   assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
   // Only the git excludes file is bound; no directory is writable by default.
   assert.ok(
