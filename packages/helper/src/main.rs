@@ -13,8 +13,11 @@
 //!   paths and writing only the writable ones;
 //! * **network** — a private network namespace, so no TCP, no UDP and no DNS;
 //! * **resolver** — the `nscd`/`systemd-resolved` socket directories are
-//!   shadowed in a private mount namespace, because a unix socket crosses a
+//!   shadowed in the private mount namespace, because a unix socket crosses a
 //!   network namespace;
+//! * **processes** — a private PID namespace with a fresh `/proc`, so the host's
+//!   processes and their environments are out of reach;
+//! * **capabilities** — every capability is dropped before the command starts;
 //! * **TCP** — also denied by Landlock, which keeps holding when the kernel
 //!   refuses user namespaces.
 //!
@@ -24,6 +27,7 @@
 mod namespace;
 mod sandbox;
 mod spec;
+mod supervise;
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -33,11 +37,11 @@ use std::process::Command;
 use spec::Spec;
 
 /// The kernel cannot sandbox this command: no Landlock, or an ABI below 7.
-const EXIT_UNSUPPORTED: i32 = 76;
+pub(crate) const EXIT_UNSUPPORTED: i32 = 76;
 /// The spec handed over by the extension is unusable.
-const EXIT_BAD_SPEC: i32 = 77;
+pub(crate) const EXIT_BAD_SPEC: i32 = 77;
 /// The sandbox could not be set up, so the command must not run.
-const EXIT_SANDBOX_FAILED: i32 = 78;
+pub(crate) const EXIT_SANDBOX_FAILED: i32 = 78;
 /// The command itself could not be executed.
 const EXIT_EXEC_FAILED: i32 = 127;
 
@@ -120,14 +124,14 @@ fn run_with_spec(args: &[OsString]) -> Result<i32, (i32, String)> {
         .split_first()
         .ok_or((EXIT_BAD_SPEC, "no command given after the spec".to_string()))?;
 
-    apply(&spec)?;
-    exec(program, program_args, &spec)
+    apply(program, program_args, &spec)
 }
 
-/// Enter the namespaces and the Landlock domain, then become the command.
-fn apply(spec: &Spec) -> Result<(), (i32, String)> {
-    // The mount namespace always runs: it is what gives the command a private
-    // /tmp. The network namespace is only entered for an offline command.
+/// Enter the namespaces, then run the command inside the sandbox.
+fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i32, (i32, String)> {
+    // The mount and PID namespaces always run: they are what give the command a
+    // private /tmp and hide the host's processes. The network namespace is only
+    // entered for an offline command.
     let cwd = spec.cwd.clone();
     match namespace::isolate(spec.offline, cwd.as_deref()) {
         Ok(isolated) => match isolated.shadowed.is_empty() {
@@ -145,48 +149,60 @@ fn apply(spec: &Spec) -> Result<(), (i32, String)> {
             }
         },
         // Landlock still denies TCP below, so a host without user namespaces
-        // loses the UDP/DNS cut and the private /tmp, but not the sandbox as a
-        // whole. Staying quiet for an online command: nothing was promised.
-        Err(error) => match spec.offline {
-            true => eprintln!(
-                "pi-allow-reads-helper: warning: cannot enter a network namespace ({error}); \
-                 the command keeps host networking, only TCP stays blocked"
-            ),
-            false => {}
-        },
+        // loses the UDP/DNS cut, the private /tmp and the private /proc, but
+        // not the sandbox as a whole. Staying quiet for an online command:
+        // nothing was promised.
+        Err(error) => {
+            if spec.offline {
+                eprintln!(
+                    "pi-allow-reads-helper: warning: cannot enter a network namespace ({error}); \
+                     the command keeps host networking, only TCP stays blocked"
+                );
+            }
+        }
     }
 
+    supervise::run(|| run_command(program, program_args, spec))
+        .map_err(|e| (EXIT_SANDBOX_FAILED, e))
+}
+
+/// Runs as the command, inside the PID namespace, and never returns on success.
+fn run_command(program: &OsString, program_args: &[OsString], spec: &Spec) -> i32 {
     if let Some(cwd) = &spec.cwd {
-        std::env::set_current_dir(cwd).map_err(|e| {
-            (
-                EXIT_SANDBOX_FAILED,
-                format!("cannot enter {}: {e}", cwd.display()),
-            )
-        })?;
+        if let Err(error) = std::env::set_current_dir(cwd) {
+            eprintln!(
+                "pi-allow-reads-helper: cannot enter {}: {error}",
+                cwd.display()
+            );
+            return EXIT_SANDBOX_FAILED;
+        }
     }
 
-    sandbox::apply(spec).map_err(|e| (EXIT_UNSUPPORTED, e))?;
+    if let Err(error) = sandbox::apply(spec) {
+        eprintln!("pi-allow-reads-helper: {error}");
+        return EXIT_UNSUPPORTED;
+    }
+    // Nothing below needs a capability: the namespaces and mounts are set up,
+    // and the sandbox itself is enforced by Landlock.
+    if let Err(error) = namespace::drop_capabilities() {
+        eprintln!("pi-allow-reads-helper: {error}");
+        return EXIT_SANDBOX_FAILED;
+    }
 
     for (key, value) in &spec.env {
         std::env::set_var(key, value);
     }
-    Ok(())
-}
 
-/// Hand the process over to the command, keeping the sandbox.
-fn exec(program: &OsString, args: &[OsString], spec: &Spec) -> Result<i32, (i32, String)> {
-    let error = Command::new(program).args(args).exec();
+    let error = Command::new(program).args(program_args).exec();
     let cwd = match &spec.cwd {
         Some(cwd) => cwd.display().to_string(),
         None => "the current directory".to_string(),
     };
-    Err((
-        EXIT_EXEC_FAILED,
-        format!(
-            "cannot execute {} in {cwd}: {error}",
-            program.to_string_lossy()
-        ),
-    ))
+    eprintln!(
+        "pi-allow-reads-helper: cannot execute {} in {cwd}: {error}",
+        program.to_string_lossy()
+    );
+    EXIT_EXEC_FAILED
 }
 
 /// Print what this machine can enforce, as JSON, so the extension can gate on

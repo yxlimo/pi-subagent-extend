@@ -66,6 +66,8 @@ helper 是 `packages/helper` 里的 Rust 二进制（`pnpm run build:helper` 构
 
 - **文件**：Landlock 规则集。`/` 可读可执行，只有 spec 里列出的目录可写（scope、cwd、`node_modules`、`bash.writablePaths`），写到范围外直接 `EPERM`。
 - **网络**：私有网络命名空间，TCP、UDP、DNS 全断（网卡只剩 `lo`）。同时用私有 mount 命名空间把 `nscd` / `systemd-resolved` 的 unix socket 目录盖成空 tmpfs——unix socket 不受网络命名空间约束，不盖的话域名照样能解析。
+- **进程**：私有 PID 命名空间并重挂 `/proc`，沙箱里只有自己的进程——看不到宿主进程，读不到别的进程的 `/proc/<pid>/environ`，也发不出跨进程信号。PID 1 是一个转发信号的监督者，命令跑在它下面，所以 `kill` 能正常结束命令而不是被 PID 1 忽略。
+- **capability**：命令启动前清空 bounding set 与 effective 集合（对齐 bwrap 默认），`CapEff`/`CapBnd` 都是 0。
 - **`/tmp`**：私有 tmpfs，不跟宿主的临时文件混在一起（cwd 本身在 `/tmp` 下时跳过，否则会把工作目录挡掉）。
 - **设备**：`/dev/null`、`/dev/zero`、`/dev/tty` 等基线设备默认可写，否则 `2>/dev/null` 这种写法会直接失败。
 

@@ -58,8 +58,9 @@ pi-allow-reads/
   （pi 的 `ToolCallEventResult` 只能 block，改参数得改 `event.input`）。helper 是
   `packages/helper` 的 Rust 二进制，在 `exec` 前把自身关进沙箱：Landlock 强制文件范围
   （根可读、只有 spec 列出的目录可写），私有网络命名空间断 TCP/UDP/DNS，私有 mount
-  命名空间盖住 nscd/resolved 的 unix socket 并给出私有 /tmp。内核要求 Landlock ABI 7
-  （Linux 6.15+）。命令含 `; & | < > \` $ \\` 等元字符一律拒，白名单前缀拼不进别的
+  命名空间盖住 nscd/resolved 的 unix socket 并给出私有 /tmp，私有 PID 命名空间加重挂的
+  /proc 把宿主进程藏起来（PID 1 是转发信号的监督者，命令在它下面），命令启动前清空
+  capability。内核要求 Landlock ABI 7（Linux 6.15+）。命令含 `; & | < > \` $ \\` 等元字符一律拒，白名单前缀拼不进别的
   命令。helper 缺失或 ABI 不足时 fail closed。沙箱挡的是越界写与联网，不挡读：跑测试
   要读整棵树，读的约束仍在 `read`/`grep` 这些工具层。
 
@@ -78,8 +79,9 @@ pi-allow-reads/
 | A9 | glob 语义回归（`**` 不被 `*` 规则二次改写；`dir/` 与 `dir`、`dir/**` 等价） | ✅ | 第 15 例；活体：`be-core`/`fe` + scope `web/src/features/balance/**` 放行整目录 |
 | A10 | bash 白名单 / 元字符拒绝 / writable / 缺 helper 时 fail closed | ✅ | 第 12–14 例 |
 | A11 | 活体验证：子代理在沙箱里跑通 typecheck | ✅ | 2026-10-28 buddy-proxy 内 `be-core` + `bash.allow: ["pnpm run typecheck"]`，子代理回报 tsc 通过 |
-| A12 | helper 隔离属性 | ✅ | 2026-11-10 端到端：走扩展 `tool_call` 生成命令后真跑，范围外 `touch` 被拒（Permission denied）、`curl` 连不上、`getent hosts` 无结果、网卡只剩 `lo`、`2>/dev/null` 正常 |
+| A12 | helper 隔离属性 | ✅ | 2026-11-10 端到端：走扩展 `tool_call` 生成命令后真跑，范围外 `touch` 被拒、`curl` 连不上、`getent hosts` 无结果、网卡只剩 `lo`、`2>/dev/null` 正常；`/proc` 只剩 1..7、宿主 pid 不可见、同用户进程 `environ` 读不到、`kill` 报无此进程、`CapEff`/`CapBnd` 为 0 |
 | A13 | 内核能力门槛 | ✅ | `helper --describe` 报 ABI 7 / supported；第 27 例用假 helper 验证 ABI 不足时 bash 被拒 |
+| A14 | 进程生命周期 | ✅ | 命令运行期间 helper 存活；`SIGTERM` 到 helper 后命令结束；`SIGKILL` 到 helper 后不产生孤儿（PDEATHSIG）；退出码 0/7/42 逐级透传 |
 
 实测记下来的坑：`pi -p -nt`（`noTools: "all"`）不会把 skills 段放进提示词，模型会回答
 「没有可用 skill」。验证 skill 是否注册不要加 `-nt`。
