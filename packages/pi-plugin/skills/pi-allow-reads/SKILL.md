@@ -1,6 +1,6 @@
 ---
 name: pi-allow-reads
-description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-allow-reads/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝；需要子代理自己跑测试/typecheck 时用 bash.read / bash.write 点名命令（支持 re: 正则），在 bwrap 沙箱里执行；worktree 隔离、pnpm/mise 的可写目录用 bash.writablePaths 与 bash.env 处理。
+description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-allow-reads/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝；需要子代理自己跑测试/typecheck 时用 bash.read / bash.write 点名命令（支持 re: 正则），在沙箱 helper 里执行（Landlock 强制文件范围、默认断网）；worktree 隔离、pnpm/mise 的可写目录用 bash.writablePaths 与 bash.env 处理。
 ---
 
 # pi-allow-reads：给子代理限定任务范围
@@ -20,13 +20,13 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 
 扩展没加载时 bindings 传了也没用，拦截不会发生。
 
-`bash.read` / `bash.write` 里的命令靠 bwrap 跑；机器上没有 bwrap 时 bash 保持关闭（其余功能不受影响）。
+`bash.read` / `bash.write` 里的命令靠沙箱 helper（`packages/helper` 的 Rust 二进制）跑：文件范围由 Landlock 强制，默认断网（TCP/UDP/DNS 全断）。宿主需要 Landlock ABI 7（Linux 6.15+）；helper 缺失或内核不够时 bash 保持关闭（其余功能不受影响）。
 
 ## 调用模板
 
 只读/读写文件、不需要跑命令：
 
-```
+```text
 subagent(
   agent: "<agent-name>",
   task: "<任务描述>",
@@ -36,7 +36,7 @@ subagent(
 
 需要子代理自己跑测试或 typecheck：
 
-```
+```text
 subagent(
   agent: "<agent-name>",
   task: "<任务描述>，完成后跑 typecheck 并报告结果",
@@ -53,7 +53,7 @@ namespace 固定为 `pi-allow-reads/1`。每次委派都要传，scope 按本任
 
 子代理在 worktree 里跑（`worktree: true`）且需要装依赖或跑验证时：
 
-```
+```text
 subagent(
   agent: "<agent-name>",
   task: "<任务描述>",
@@ -120,7 +120,7 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 - 一律拒绝：`powershell`/`codemode`；`scope`/`allowTools` 之外的未知工具。
 - `contact_supervisor` / `intercom` / `structured_output` 始终放行：子代理中途向监督者转告是正当通道。
 - `bash`：没配白名单时一律拒绝；配了则只有命中 `read`/`write` 两列的命令执行，并且自动改写为
-  bwrap 沙箱里运行——根只读、默认断网、可写目录只有 scope（`writable` 时）。命令里出现
+  helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录只有 scope（`writable` 时）。命令里出现
   `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
 - 缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理，`write`/`edit` 必须给 path。这类拒绝不计入撞权限计数，不会把子代理误判成「授权写错」。
 - 范围内会话可用 `/allowed-reads` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态。

@@ -26,8 +26,31 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-log() { printf '%s\n' "$*"; }
+log() { printf '%s\n' "$*" ; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# The sandbox helper is a Rust binary; without it bash stays closed (fail closed),
+# so build it rather than leaving that discovery to the first bash call.
+build_helper() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    log "warning: cargo not found; run 'pnpm run build:helper' later or bash stays closed"
+    return 0
+  fi
+  log "building the sandbox helper (cargo build --release)"
+  if ( cd "$REPO_DIR" \
+    && mkdir -p bin \
+    && cargo build --release --quiet --manifest-path ../helper/Cargo.toml \
+    && cp ../helper/target/release/pi-allow-reads-helper bin/ ); then
+    log "helper ready: $REPO_DIR/bin/pi-allow-reads-helper"
+    # --describe exits 76 when the kernel cannot enforce the sandbox, so report
+    # that now instead of failing on the first bash call.
+    if ! "$REPO_DIR/bin/pi-allow-reads-helper" --describe; then
+      log "warning: this kernel cannot enforce the sandbox (Landlock ABI 7 needed); bash stays closed"
+    fi
+  else
+    log "warning: the helper did not build; bash stays closed"
+  fi
+}
 
 if [ "$UNINSTALL" = 1 ]; then
   if [ -L "$INSTALL_DIR" ] || [ -d "$INSTALL_DIR" ]; then
@@ -45,6 +68,7 @@ mkdir -p "$(dirname "$INSTALL_DIR")"
 if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
   if [ -L "$INSTALL_DIR" ] && [ "$(readlink "$INSTALL_DIR")" = "$REPO_DIR" ]; then
     log "already linked: $INSTALL_DIR -> $REPO_DIR"
+    build_helper
     exit 0
   fi
   die "$INSTALL_DIR exists and is not a link to this checkout; remove it first"
@@ -52,4 +76,5 @@ fi
 
 ln -s "$REPO_DIR" "$INSTALL_DIR"
 log "linked $INSTALL_DIR -> $REPO_DIR"
+build_helper
 log "the next pi session loads the extension"

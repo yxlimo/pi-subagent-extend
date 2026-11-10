@@ -7,13 +7,29 @@
 //   node test/extension.test.mjs
 
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
+
+// The sandbox helper is a Rust binary built by `pnpm run build:helper` (the
+// package's pretest hook). Pointing the environment at it makes these tests
+// exercise the real sandbox instead of a mock.
+const helperBin = join(repo, "bin", "pi-allow-reads-helper")
+if (!existsSync(helperBin)) {
+  throw new Error(`missing ${helperBin}; run \`pnpm run build:helper\` first`)
+}
+process.env.PI_ALLOW_READS_HELPER = helperBin
+
+/** The sandbox spec the extension wrote for a rewritten bash command. */
+function specOf(command) {
+  const match = /'--spec' '([^']+)'/.exec(command)
+  assert.ok(match, `no --spec in: ${command}`)
+  return JSON.parse(readFileSync(match[1], "utf8"))
+}
 
 const { default: activate } = await import(join(repo, "src", "index.ts"))
 
@@ -262,7 +278,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   已上锁的会话不注册委派 skill")
 }
 
-// 12. bash allowlist: a listed command runs wrapped in bwrap, everything else is denied.
+// 12. bash allowlist: a listed command is handed to the sandbox helper, everything else is denied.
 {
   const h = await handler({
     bindings: JSON.stringify({
@@ -274,19 +290,24 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const input = { command: "pnpm run typecheck" }
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
-  assert.match(input.command, /^'\/[^']*bwrap' '--ro-bind' '\/' '\/'/, "command is rewritten to run under bwrap")
-  assert.match(input.command, /'--unshare-net'/, "network is off by default")
-  // A network namespace alone still lets glibc ask nscd/resolved over a unix
-  // socket, so the resolver socket dirs are shadowed as well.
-  if (existsSync("/run/nscd")) {
-    assert.match(input.command, /'--tmpfs' '\/run\/nscd'/, "the nscd socket dir is shadowed when networking is off")
-  }
-  assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
-  // Only the git excludes file is bound; no directory is writable by default.
-  assert.ok(
-    !/'--bind' '\/[^']*' '\/[^']*'/.test(input.command.replace(/--bind' '\/home\/[^']*git-excludes' '\/home\/[^']*git-excludes'/, "")),
-    "no directory is writable by default",
+  assert.match(
+    input.command,
+    /^'\/[^']*pi-allow-reads-helper' '--spec' '\/[^']*spec-[0-9]+\.json' '--' 'bash' '-lc'/,
+    "command is rewritten to run under the sandbox helper",
   )
+  assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
+  const spec = specOf(input.command)
+  assert.deepEqual(spec.read, ["/"], "everything stays readable")
+  // The scratch dir plus the baseline devices are writable; nothing from the
+  // task scope is, which is the point.
+  assert.deepEqual(
+    spec.write.filter((path) => !path.startsWith("/dev")),
+    ["/tmp"],
+    "only the scratch dir is writable by default",
+  )
+  assert.ok(spec.write.includes("/dev/null"), "the baseline devices stay writable, or 2>/dev/null fails")
+  assert.equal(spec.offline, true, "the command is offline by default")
+  assert.equal(spec.cwd, workdir, "the command keeps its working directory")
 
   const other = { command: "pnpm publish" }
   const denied = await h.call("bash", other)
@@ -300,7 +321,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   assert.equal((await h.call("powershell", { command: "dir" }))?.block, true, "powershell stays denied")
   h.restore()
-  console.log("  ok   bash 白名单命中即放行并改写为 bwrap 沙箱，其余拒绝")
+  console.log("  ok   bash 白名单命中即放行并交给 helper 沙箱，其余拒绝")
 }
 
 // 13. bash without an allowlist stays closed, with a hint about bash.read/bash.write.
@@ -313,7 +334,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   没配 bash 白名单时 bash 仍然关闭，拒绝文案给出开法")
 }
 
-// 14. writable + network options, and a missing bwrap fails closed.
+// 14. writable + network options, and a missing helper fails closed.
 {
   mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
@@ -326,21 +347,26 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const input = { command: "node harness.mjs" }
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
-  assert.match(input.command, /'--bind' '[^']*\/src' '[^']*\/src'/, "scope dir is bound writable")
-  assert.ok(!/--unshare-net/.test(input.command), "network stays on when requested")
+  const spec = specOf(input.command)
+  assert.equal(spec.offline, false, "network stays on when requested")
+  assert.ok(
+    spec.write.some((dir) => dir.endsWith("/src")),
+    `the scope dir is writable through Landlock, got: ${spec.write.join(", ")}`,
+  )
   h.restore()
 
-  const previous = process.env.PI_ALLOW_READS_BWRAP
-  process.env.PI_ALLOW_READS_BWRAP = "/nonexistent/bwrap"
+  const previous = process.env.PI_ALLOW_READS_HELPER
+  process.env.PI_ALLOW_READS_HELPER = "/nonexistent/pi-allow-reads-helper"
   const h2 = await handler({
     bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], bash: { write: ["node harness.mjs"] } } }),
   })
   const missing = await h2.call("bash", { command: "node harness.mjs" })
-  assert.equal(missing?.block, true, "no bwrap means no bash, even for a listed command")
+  assert.equal(missing?.block, true, "no helper means no bash, even for a listed command")
+  assert.match(missing.reason, /build:helper/, "the denial says how to build the helper")
   h2.restore()
-  if (previous === undefined) delete process.env.PI_ALLOW_READS_BWRAP
-  else process.env.PI_ALLOW_READS_BWRAP = previous
-  console.log("  ok   writable/network 选项生效；找不到 bwrap 时 fail closed")
+  if (previous === undefined) delete process.env.PI_ALLOW_READS_HELPER
+  else process.env.PI_ALLOW_READS_HELPER = previous
+  console.log("  ok   writable/network 选项写进 spec；找不到 helper 时 fail closed")
 }
 
 // 15. Glob semantics regression: `**` must not be re-rewritten by the `*` rule.
@@ -566,14 +592,28 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const input = { command: "pnpm install" }
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
-  assert.match(input.command, /'--bind' '[^']*wt\/web\/src' '[^']*wt\/web\/src'/, "scope dir inside the worktree is bound writable")
-  assert.match(input.command, /'--bind' '[^']*wt' '[^']*wt'/, "the worktree root itself is bound writable")
-  assert.match(input.command, /'--bind' '[^']*pnpm-store' '[^']*pnpm-store'/, "writablePaths are bound writable")
-  assert.match(input.command, /'--setenv' 'FOO' 'bar'/, "bash.env is injected")
-  assert.match(input.command, /'--setenv' 'MISE_STATE_DIR' '[^']*mise'/, "mise state moves into the sandbox so trust registration is not needed")
-  assert.match(input.command, /'--setenv' 'XDG_RUNTIME_DIR' '[^']*runtime'/, "pnpm's runtime lock dir moves into the sandbox")
+  const spec = specOf(input.command)
+  assert.ok(
+    spec.write.some((dir) => dir.endsWith("/wt/web/src")),
+    `scope dir inside the worktree is writable, got: ${spec.write.join(", ")}`,
+  )
+  assert.ok(
+    spec.write.some((dir) => dir.endsWith("/wt")),
+    `the worktree root itself is writable, got: ${spec.write.join(", ")}`,
+  )
+  assert.ok(
+    spec.write.some((dir) => dir.endsWith("/pnpm-store")),
+    `writablePaths are writable, got: ${spec.write.join(", ")}`,
+  )
+  assert.equal(spec.env.FOO, "bar", "bash.env is injected")
+  assert.match(
+    spec.env.MISE_STATE_DIR ?? "",
+    /mise$/,
+    "mise state moves off the read-only root so trust registration is not needed",
+  )
+  assert.match(spec.env.XDG_RUNTIME_DIR ?? "", /runtime$/, "pnpm's runtime lock dir moves off the read-only root")
   h.restore()
-  console.log("  ok   worktree 场景：writablePaths、env 注入、worktree 根 bind、mise 信任绕过")
+  console.log("  ok   worktree 场景：writablePaths、env 注入、worktree 根可写、mise 信任绕过")
 }
 
 // 23. Missing path must not read as "the child walked to the wrong directory".
@@ -650,13 +690,43 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const input = { command: "pnpm install" }
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
-  assert.match(input.command, /'--bind' '[^']*node_modules' '[^']*node_modules'/, "node_modules is bound writable")
-  assert.match(input.command, /'--bind' '[^']*' '[^']*'/, "the working directory is bound writable")
-  assert.match(input.command, /'--setenv' 'GIT_CONFIG_COUNT' '1'/, "git excludes are configured")
-  assert.match(input.command, /'--setenv' 'GIT_CONFIG_KEY_0' 'core.excludesFile'/, "the exclude file is passed to git")
-  assert.match(input.command, /'--bind' '[^']*git-excludes' '[^']*git-excludes'/, "the exclude file is visible in the sandbox")
+  const spec = specOf(input.command)
+  assert.ok(
+    spec.write.some((dir) => dir.endsWith("/node_modules")),
+    `node_modules is writable, got: ${spec.write.join(", ")}`,
+  )
+  assert.ok(spec.write.includes(workdir), `the working directory is writable, got: ${spec.write.join(", ")}`)
+  assert.equal(spec.env.GIT_CONFIG_COUNT, "1", "git excludes are configured")
+  assert.equal(spec.env.GIT_CONFIG_KEY_0, "core.excludesFile", "the exclude key is passed to git")
+  assert.match(
+    spec.env.GIT_CONFIG_VALUE_0 ?? "",
+    /git-excludes$/,
+    "the exclude file is readable from the sandbox (read covers all of /)",
+  )
   h.restore()
   console.log("  ok   可写沙箱里 node_modules 也可写；git 排除规则防止依赖目录进索引")
+}
+
+// 27. The helper gates on kernel support: a kernel below Landlock ABI 7 means no bash.
+{
+  const fake = join(workdir, "fake-helper")
+  writeFileSync(
+    fake,
+    `#!/bin/sh\necho '{"landlock":{"kernel_abi":3,"required_abi":7,"supported":false,"reason":"kernel Landlock ABI is 3, but ABI 7 is required"},"network_namespace":true,"resolver_sockets":[]}'\nexit 76\n`,
+  )
+  chmodSync(fake, 0o755)
+  const previous = process.env.PI_ALLOW_READS_HELPER
+  process.env.PI_ALLOW_READS_HELPER = fake
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-allow-reads/1": { scope: ["src/**"], bash: { write: ["pnpm test"] } } }),
+  })
+  const denied = await h.call("bash", { command: "pnpm test" })
+  assert.equal(denied?.block, true, "an unsupported kernel denies bash")
+  assert.match(denied.reason, /ABI 7 is required/, "the denial names the ABI the plugin needs")
+  h.restore()
+  if (previous === undefined) delete process.env.PI_ALLOW_READS_HELPER
+  else process.env.PI_ALLOW_READS_HELPER = previous
+  console.log("  ok   内核 ABI 不足时 bash 被拒绝，文案说清缺的版本")
 }
 
 rmSync(workdir, { recursive: true, force: true })

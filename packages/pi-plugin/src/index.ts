@@ -20,9 +20,10 @@
  * - read / edit / write / grep / find / ls：解析 path（缺省为 cwd），命中范围
  *   放行，否则拒绝；readOnly 时 edit / write 一律拒绝
  * - bash：默认拒绝。bindings 里写 bash.allow（命令前缀白名单，如 "pnpm run typecheck"）
- *   后，只有命中白名单的命令放行，并且改写成在 bwrap 沙箱里执行：只读根、断网
- *   （bash.network 可开，开启后 DNS 也一并放行；默认断网时连域名解析都断掉），
- *   可写目录只有 scope（bash.writable 时），防止用 shell 绕过范围去改文件
+ *   后，只有命中白名单的命令放行，并且改写成交给沙箱 helper 执行：读写范围由
+ *   Landlock 强制（内核 ABI 7 起），网络默认断（bash.network 可开）：断网时连
+ *   UDP/DNS 一起断，靠私有网络命名空间 + 盖掉解析器套接字；可写目录只有 scope
+ *   （bash.writable 时）与 bash.writablePaths，防止用 shell 绕过范围去改文件
  * - powershell / codemode：一律拒绝（没有路径可判，能绕过范围）
  * - structured_output 与 allowTools 里列出的工具：放行（执行器类不可放行）
  * - 其余未知工具：拒绝
@@ -34,10 +35,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, dirname, join, relative, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, commandMatches, parseBashRule, type BashRule } from "./bash-match.ts";
+import { allEntries, classifyCommand, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { Probe, parseProbeConfig } from "./probe.ts";
 
@@ -216,13 +217,16 @@ function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 	return false;
 }
 
-/** 找 bwrap：环境变量优先，否则按 PATH 解析（发行版和 Nix 的安装位置各不相同）。 */
-function bwrapPath(): string | undefined {
-	const fromEnv = process.env.PI_ALLOW_READS_BWRAP?.trim();
+/** 找 helper：环境变量优先，其次包内构建产物，最后缓存目录。 */
+function helperPath(): string | undefined {
+	const fromEnv = process.env.PI_ALLOW_READS_HELPER?.trim();
 	if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
-	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-		if (!dir) continue;
-		const candidate = join(dir, "bwrap");
+	const here = dirname(fileURLToPath(import.meta.url));
+	const candidates = [
+		resolve(here, "..", "bin", "pi-allow-reads-helper"),
+		resolve(homedir(), ".pi", "allow-reads", "bin", "pi-allow-reads-helper"),
+	];
+	for (const candidate of candidates) {
 		if (existsSync(candidate)) return candidate;
 	}
 	return undefined;
@@ -412,41 +416,97 @@ function shellQuote(text: string): string {
 }
 
 /**
- * 解析器套接字目录：`--unshare-net` 只掉网络包，glibc 仍会先去问 nscd /
- * systemd-resolved 的 unix socket，而 unix socket 不受网络命名空间限制。断网时
- * 把这些目录盖成空 tmpfs，域名解析才会真的失败。
+ * helper 的能力探测结果：`--describe` 只读，每个进程查一次。
  */
-function resolverSocketDirs(): string[] {
-	const dirs = new Set<string>();
-	for (const candidate of ["/run/nscd", "/var/run/nscd", "/run/systemd/resolve"]) {
-		if (!existsSync(candidate)) continue;
-		try {
-			// /var/run 一般是指向 /run 的符号链接，bwrap 不能在符号链接上挂载。
-			dirs.add(realpathSync(candidate));
-		} catch {
-			// 解析不了的路径跳过，不让一条坏路径把整条沙箱命令弄失败。
+export type HelperCapabilities = {
+	landlock: { kernel_abi: number; required_abi: number; supported: boolean; reason?: string | null };
+	network_namespace: boolean;
+	resolver_sockets: string[];
+};
+
+const helperCache = new Map<string, HelperCapabilities | undefined>();
+
+/** 问 helper 能做到什么程度；拿不到就返回 undefined，调用方按不可用处理。 */
+export function describeHelper(helper: string): HelperCapabilities | undefined {
+	if (helperCache.has(helper)) return helperCache.get(helper);
+	let caps: HelperCapabilities | undefined;
+	try {
+		// ABI 不够时 --describe 也会输出 JSON，只是退出码非 0；所以按输出解析。
+		const out = execFileSync(helper, ["--describe"], {
+			encoding: "utf8",
+			timeout: 5000,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		caps = JSON.parse(out) as HelperCapabilities;
+	} catch (error) {
+		const stdout = (error as { stdout?: unknown })?.stdout;
+		if (typeof stdout === "string" && stdout.trim()) {
+			try {
+				caps = JSON.parse(stdout) as HelperCapabilities;
+			} catch {
+				caps = undefined;
+			}
 		}
 	}
-	return [...dirs];
+	helperCache.set(helper, caps);
+	return caps;
 }
 
-/** 把命令包进 bwrap：只读根、私有 /tmp、可选断网（连 DNS 一起断）、可选把可写目录 bind 进去。 */
-export function wrapInSandbox(command: string, cwd: string, rule: BashRule, policy: Policy, bwrap: string): string {
-	const parts = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"];
-	if (!rule.network) {
-		parts.push("--unshare-net");
-		for (const dir of resolverSocketDirs()) parts.push("--tmpfs", dir);
+/**
+ * 沙箱 spec：每个会话写一次，所有 bash 调用复用。
+ *
+ * helper 只认绝对路径，这里给的都是 resolve 过的；路径不存在时 helper 会直接拒绝，
+ * 所以不存在的可写目录要提前滤掉。
+ */
+/**
+ * 沙箱里默认可写的设备：bwrap 当年靠 `--dev /dev` 提供一份新的 /dev，换成 Landlock
+ * 后没人补上，`2>/dev/null` 这种写法会直接 EPERM。
+ */
+const SANDBOX_DEVICE_PATHS = [
+	"/dev/null",
+	"/dev/zero",
+	"/dev/full",
+	"/dev/random",
+	"/dev/urandom",
+	"/dev/tty",
+	"/dev/pts",
+];
+
+export function writeSpec(cwd: string, rule: BashRule, policy: Policy): string | undefined {
+	const spec = {
+		cwd,
+		read: ["/"],
+		// The helper mounts a private tmpfs on the scratch dir, so writes there stay
+		// inside the sandbox; when the cwd already sits in it, the mount is skipped
+		// and the write allowance below is what makes it usable.
+		write: [
+			...new Set([
+				...sandboxWritableDirs(policy, cwd, rule),
+				tmpdir(),
+				// The helper refuses a spec path that does not exist, so filter here.
+				...SANDBOX_DEVICE_PATHS.filter((path) => existsSync(path)),
+			]),
+		],
+		offline: rule.network !== true,
+		env: sandboxEnv(cwd, rule),
+	};
+	try {
+		const dir = resolve(homedir(), ".cache", "pi-allow-reads");
+		mkdirSync(dir, { recursive: true });
+		const file = resolve(dir, `spec-${process.pid}.json`);
+		writeFileSync(file, JSON.stringify(spec));
+		return file;
+	} catch {
+		return undefined;
 	}
-	for (const dir of sandboxWritableDirs(policy, cwd, rule)) parts.push("--bind", dir, dir);
-	if (rule.gitExcludes && !process.env.GIT_CONFIG_COUNT) {
-		const excludes = gitExcludesFile();
-		if (excludes) parts.push("--bind", excludes, excludes);
-	}
-	for (const [key, value] of Object.entries(sandboxEnv(cwd, rule))) {
-		parts.push("--setenv", key, value);
-	}
-	parts.push("--die-with-parent", "--chdir", cwd, "--", "bash", "-lc", command);
-	return parts.map(shellQuote).join(" ");
+}
+
+/**
+ * 把命令交给 helper：它在 exec 前给自己套上 Landlock 与网络命名空间，所以白名单命令
+ * 拿到的就是已经限定好范围、断好网的进程。
+ */
+export function wrapInSandbox(command: string, specFile: string, helper: string): string {
+	return [helper, "--spec", specFile, "--", "bash", "-lc", command].map(shellQuote).join(" ");
 }
 
 function preview(globs: string[]): string {
@@ -591,11 +651,22 @@ export default function (pi: ExtensionAPI) {
 				}
 				return { block: true, reason: repeatEvent.reason };
 			}
-			const bwrap = bwrapPath();
-			if (!bwrap) {
-				return deny("pi-allow-reads: 找不到 bwrap，无法在沙箱内执行 bash（白名单命令也不会在没有沙箱的情况下放行）");
+			const helper = helperPath();
+			if (!helper) {
+				return deny(
+					"pi-allow-reads: 找不到沙箱 helper（pi-allow-reads-helper）。在 pi-plugin 目录里跑一次 `pnpm run build:helper`，或用 PI_ALLOW_READS_HELPER 指定路径",
+				);
 			}
-			(event.input as { command?: string }).command = wrapInSandbox(command, cwd, rule, policy, bwrap);
+			const caps = describeHelper(helper);
+			if (!caps?.landlock.supported) {
+				const reason = caps?.landlock.reason ?? "helper --describe 没有输出可用信息";
+				return deny(`pi-allow-reads: 当前内核无法强制任务范围：${reason}`);
+			}
+			const specFile = writeSpec(cwd, rule, policy);
+			if (!specFile) {
+				return deny("pi-allow-reads: 写不出沙箱 spec（检查 ~/.cache/pi-allow-reads 是否可写）");
+			}
+			(event.input as { command?: string }).command = wrapInSandbox(command, specFile, helper);
 			return undefined;
 		}
 		if (EXEC_TOOLS.includes(event.toolName)) {

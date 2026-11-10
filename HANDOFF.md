@@ -11,7 +11,7 @@
 
 ## 1. 仓库结构
 
-```
+```text
 pi-allow-reads/
 ├── packages/pi-plugin/
 │   ├── src/index.ts            扩展本体
@@ -52,14 +52,16 @@ pi-allow-reads/
 - **语义变化（相对前身）**：前身把 edit/write/grep/find/ls 一律拒绝；现在范围内
   的 edit/write/grep/find/ls 放行（读写模式），只读场景用 bindings 的 `readOnly`。
   `powershell`/`codemode` 与未知工具仍然一律拒绝。
-- **bash 白名单 + bwrap 沙箱**：binding 的 `bash.allow` 给出命令前缀（按空白切词
-  逐 token 匹配），命中的命令在 tool_call 里被原地改写成
-  `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--unshare-net]
-  [--bind <scope dir> <scope dir>] --die-with-parent --chdir <cwd> -- bash -lc '<cmd>'`
-  （pi 的 `ToolCallEventResult` 只能 block，改参数得改 `event.input`）。命令含
-  `; & | < > \` $ \\` 等元字符一律拒，白名单前缀拼不进别的命令。找不到 bwrap
-  时 fail closed。沙箱挡的是越界写与联网，不挡读：跑测试要读整棵树，读的约束仍在
-  `read`/`grep` 这些工具层。
+- **bash 白名单 + helper 沙箱**：binding 的 `bash.read` / `bash.write` 给出命令前缀（按
+  空白切词逐 token 匹配），命中的命令在 tool_call 里被原地改写成
+  `<helper> --spec ~/.cache/pi-allow-reads/spec-<pid>.json -- bash -lc '<cmd>'`
+  （pi 的 `ToolCallEventResult` 只能 block，改参数得改 `event.input`）。helper 是
+  `packages/helper` 的 Rust 二进制，在 `exec` 前把自身关进沙箱：Landlock 强制文件范围
+  （根可读、只有 spec 列出的目录可写），私有网络命名空间断 TCP/UDP/DNS，私有 mount
+  命名空间盖住 nscd/resolved 的 unix socket 并给出私有 /tmp。内核要求 Landlock ABI 7
+  （Linux 6.15+）。命令含 `; & | < > \` $ \\` 等元字符一律拒，白名单前缀拼不进别的
+  命令。helper 缺失或 ABI 不足时 fail closed。沙箱挡的是越界写与联网，不挡读：跑测试
+  要读整棵树，读的约束仍在 `read`/`grep` 这些工具层。
 
 ## 3. 验收状态
 
@@ -74,9 +76,10 @@ pi-allow-reads/
 | A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-allow-reads` |
 | A8 | 活体验证：带 bindings 的前台子代理被拦截 | ✅ | 同日 `be-core` + scope `package.json` 委派，子代理读 `README.md` 被拒，文案含范围与来源 |
 | A9 | glob 语义回归（`**` 不被 `*` 规则二次改写；`dir/` 与 `dir`、`dir/**` 等价） | ✅ | 第 15 例；活体：`be-core`/`fe` + scope `web/src/features/balance/**` 放行整目录 |
-| A10 | bash 白名单 / 元字符拒绝 / writable / 缺 bwrap 时 fail closed | ✅ | 第 12–14 例 |
+| A10 | bash 白名单 / 元字符拒绝 / writable / 缺 helper 时 fail closed | ✅ | 第 12–14 例 |
 | A11 | 活体验证：子代理在沙箱里跑通 typecheck | ✅ | 2026-10-28 buddy-proxy 内 `be-core` + `bash.allow: ["pnpm run typecheck"]`，子代理回报 tsc 通过 |
-| A12 | bwrap 隔离属性 | ✅ | 同参数手跑：写 `~/escape-probe` 被拒（Read-only file system）、`curl` 连不上 |
+| A12 | helper 隔离属性 | ✅ | 2026-11-10 端到端：走扩展 `tool_call` 生成命令后真跑，范围外 `touch` 被拒（Permission denied）、`curl` 连不上、`getent hosts` 无结果、网卡只剩 `lo`、`2>/dev/null` 正常 |
+| A13 | 内核能力门槛 | ✅ | `helper --describe` 报 ABI 7 / supported；第 27 例用假 helper 验证 ABI 不足时 bash 被拒 |
 
 实测记下来的坑：`pi -p -nt`（`noTools: "all"`）不会把 skills 段放进提示词，模型会回答
 「没有可用 skill」。验证 skill 是否注册不要加 `-nt`。
@@ -99,12 +102,14 @@ pi-allow-reads/
 2. **bash 沙箱不约束读**：白名单命令在沙箱里仍能读整棵树（测试要 node_modules 与
    配置）。要连读一起管，只能把命令收得更窄或上更重的方案（per-command seccomp、
    预置测试脚本），当前没做。
-3. **bwrap 是外部依赖**：Linux 才有；没装时 bash 关闭但其余功能不受影响。
+3. **helper 是从源码构建的 Rust 二进制**：需要 cargo（`pnpm run build:helper`，
+   `install.sh` 也会自动构建）。宿主需 Landlock ABI 7（Linux 6.15+）与可用的 user
+   namespace；任一条不满足时 bash 关闭，其余功能不受影响。
 4. **未做的事**：不改 pi 核心、不改 pi-subagents；没有 opencode 变体（pi 专用）。
 
 ## 5. 源码地图
 
-```
+```text
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
 packages/pi-plugin/test/extension.test.mjs 离线测试（15 例）
 packages/pi-plugin/install.sh              装/卸
