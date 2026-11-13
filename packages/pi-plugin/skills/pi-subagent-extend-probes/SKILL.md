@@ -1,11 +1,11 @@
 ---
-name: pi-subagent-permission-probes
-description: 给受限子代理配置探针判据时使用：只读空转、原地打转、早可收工、造杂物、撞权限。写明 extensionBindings 里 pi-subagent-permission/1 的 maxDenies 与 probe 字段、默认值、warn 与 stop 的停机语义，以及子代理被停后如何读它的汇报。文件范围与 bash 白名单见 skill pi-subagent-permission。
+name: pi-subagent-extend-probes
+description: 给受限子代理配置探针判据时使用：只读空转、原地打转、早可收工、造杂物、撞权限。写明 extensionBindings 里 pi-subagent-extend/1 的 maxDenies 与 probe 字段、默认值、warn 与 stop 的停机语义，以及子代理被停后如何读它的汇报。文件范围与 bash 白名单见 skill pi-subagent-extend。
 ---
 
 # 探针：检测子代理的空转与无效工作
 
-范围限制（`scope`）只用来看住「能碰哪些文件」；探针看的是「有没有在推进」。两者共用同一次委派的 `extensionBindings`，namespace 同为 `pi-subagent-permission/1`。
+范围限制（`scope`）只用来看住「能碰哪些文件」；探针看的是「有没有在推进」。两者共用同一次委派的 `extensionBindings`，namespace 同为 `pi-subagent-extend/1`。
 
 判据全部 fail closed：命中之后不再放行任何工具调用，子代理只能写汇报。
 
@@ -40,7 +40,7 @@ description: 给受限子代理配置探针判据时使用：只读空转、原�
 ## 配置模板
 
 ```json
-"pi-subagent-permission/1": {
+"pi-subagent-extend/1": {
   "scope": ["web/src/features/balance/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
   "maxDenies": 3,
@@ -162,14 +162,14 @@ subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination
 
 ```json
 // 实现型子代理：范围收窄 + 允许跑验证 + 探针全开
-"pi-subagent-permission/1": {
+"pi-subagent-extend/1": {
   "scope": ["web/src/features/balance/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
   "probe": { "idleWriteMs": 360000, "abortGraceMs": 120000 }
 }
 
 // 评审型子代理：只读、范围给到整棵相关树、探针只留默认两条
-"pi-subagent-permission/1": {
+"pi-subagent-extend/1": {
   "scope": ["web/src/features/balance/**", "web/src/lib/**"],
   "readOnly": true,
   "maxDenies": 3

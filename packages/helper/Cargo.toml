@@ -1,12 +1,12 @@
 [package]
-name = "pi-subagent-permission-helper"
+name = "pi-subagent-extend-helper"
 version = "0.1.0"
 edition = "2021"
-description = "Sandbox a command for pi-subagent-permission: Landlock for files, a network namespace for the network"
+description = "Sandbox a command for pi-subagent-extend: Landlock for files, a network namespace for the network"
 license = "MIT"
 
 [[bin]]
-name = "pi-subagent-permission-helper"
+name = "pi-subagent-extend-helper"
 path = "src/main.rs"
 
 [dependencies]

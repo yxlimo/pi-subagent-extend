@@ -1,25 +1,32 @@
-# HANDOFF — pi-subagent-permission
+# HANDOFF — pi-subagent-extend
 
 交接文档。后续独立 agent 接手时读这一份 + `README.md` 即可，不必翻本机历史。
 
 | | |
 | --- | --- |
-| 交付物 | 一个 pi 扩展：把子代理可碰的文件限制在父代理指定的任务范围内，范围外 tool_call 一律拒绝 |
-| 位置 | `/home/shay/extensions/pi-subagent-permission/`（独立 git 仓库，本地提交，未推远程） |
-| 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除；包名与绑定命名空间后来从 `pi-allow-reads` 统一改名为 `pi-subagent-permission` |
-| 状态 | 已实现、离线测试通过（15 例）、typecheck 通过；活体验证通过（前台子代理拦截 + 父会话 skill 可见） |
+| 交付物 | 一个 pi 扩展，两件事：把子代理可碰的文件限制在父代理指定的任务范围内（范围外 tool_call 一律拒绝）；把主代理专属上下文挡在子代理提示词之外（`AGENTS.md` 标记 + `.pi/main-only.md`） |
+| 位置 | `/home/shay/extensions/pi-subagent-extend/`（独立 git 仓库，本地提交，未推远程） |
+| 前身 | 原单文件 `~/extensions/pi-allow-reads.ts`（只读白名单版），本仓库是重写 + 迁移，原文件已删除；包名与绑定命名空间改过两次：先 `pi-allow-reads` → `pi-subagent-permission`（2026-11 范围扩展到「子代理权限」），再 → `pi-subagent-extend`（同期收进上下文隔离）；旧名均不再接受 |
+| 状态 | 已实现、离线测试通过（范围 27 例 + 上下文 10 例 + helper 14 例）、typecheck 通过；活体验证通过（前台子代理拦截 + 父会话 skill 可见） |
 
 ## 1. 仓库结构
 
 ```text
-pi-subagent-permission/
+pi-subagent-extend/
 ├── packages/pi-plugin/
-│   ├── src/index.ts            扩展本体
-│   ├── test/extension.test.mjs 离线测试
-│   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-subagent-permission）
-│   ├── package.json            pi 清单（"pi.extensions": ["src/index.ts"]）
-│   ├── skills/pi-subagent-permission/SKILL.md  用法 skill，随扩展注册
+│   ├── src/index.ts            扩展本体（范围 + bash + skill 注册）
+│   ├── src/main-context.ts     主代理侧上下文：注入 main-only、后台子代理里剥标记
+│   ├── src/child-context.ts    子代理侧：剥标记（只由 agent 定义声明）
+│   ├── src/context-scope.ts    前两个入口共用的剥离与注入逻辑
+│   ├── test/extension.test.mjs 离线测试（范围与 bash，27 例）
+│   ├── test/context.test.mjs   离线测试（上下文隔离，10 例）
+│   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-subagent-extend）
+│   ├── package.json            pi 清单（"pi.extensions": ["src/index.ts", "src/main-context.ts"]）
+│   ├── skills/pi-subagent-extend/SKILL.md          用法 skill，随扩展注册
+│   ├── skills/pi-subagent-extend-probes/SKILL.md   探针判据
+│   ├── skills/pi-subagent-extend-context/SKILL.md  上下文隔离
 │   └── tsconfig.json
+├── packages/helper/            沙箱 helper（Rust：Landlock + 命名空间）
 ├── README.md
 └── HANDOFF.md                  本文件
 ```
@@ -32,7 +39,7 @@ pi-subagent-permission/
   （`src/extension/schemas.js`），父代理按次传 JSON，namespace 形如 `包名/版本`。
   pi-subagents 经 `src/runs/shared/child-launch.js` 把它编码进
   `PI_SUBAGENT_EXTENSION_BINDINGS` 环境变量传给子代理。本扩展的 namespace 是
-  `pi-subagent-permission/1`，在 `src/index.ts` 的 `BINDING_NAMESPACE`。
+  `pi-subagent-extend/1`，在 `src/index.ts` 的 `BINDING_NAMESPACE`。
 - **读取时机**：bindings 在扩展激活（factory）时定格。文档
   （pi-subagents `docs/tool-reference.md` 的 extensionBindings 行）明确：前台子代理
   的该环境变量只在会话启动前存在，之后父进程环境恢复，tool_call 里读不到。
@@ -43,7 +50,7 @@ pi-subagent-permission/
   靠全局自动发现。README 推荐前者。
 - **文件来源已删除**：早先按会话 cwd 惰性解析 `.pi/permission.txt` 的路径
   随旧通道一起移除，策略在激活时一次定格。
-- **用法 skill 随扩展加载**：`skills/pi-subagent-permission/SKILL.md`（调用模板、字段表、
+- **用法 skill 随扩展加载**：`skills/pi-subagent-extend/SKILL.md`（调用模板、字段表、
   注意事项）经 `resources_discover` 事件的 `skillPaths` 注册给会话（pi 1.4 的
   `ResourcesDiscoverResult`；目录会被递归扫描找 `SKILL.md`）。扩展被加载到哪个
   会话，该会话就看到 skill——父代理靠它知道 namespace 与传法，不需要写 `AGENTS.md`。
@@ -54,7 +61,7 @@ pi-subagent-permission/
   `powershell`/`codemode` 与未知工具仍然一律拒绝。
 - **bash 白名单 + helper 沙箱**：binding 的 `bash.read` / `bash.write` 给出命令前缀（按
   空白切词逐 token 匹配），命中的命令在 tool_call 里被原地改写成
-  `<helper> --spec ~/.cache/pi-subagent-permission/spec-<pid>.json -- bash -lc '<cmd>'`
+  `<helper> --spec ~/.cache/pi-subagent-extend/spec-<pid>.json -- bash -lc '<cmd>'`
   （pi 的 `ToolCallEventResult` 只能 block，改参数得改 `event.input`）。helper 是
   `packages/helper` 的 Rust 二进制，在 `exec` 前把自身关进沙箱：Landlock 强制文件范围
   （根可读、只有 spec 列出的目录可写），私有网络命名空间断 TCP/UDP/DNS，私有 mount
@@ -74,7 +81,7 @@ pi-subagent-permission/
 | A4 | maxReads 预算、allowTools、缺省 path | ✅ | 第 7–9 例 |
 | A5 | 用法 skill 经 resources_discover 注册；已上锁会话不注册 | ✅ | 第 10–11 例 |
 | A6 | typecheck | ✅ | `pnpm run typecheck` |
-| A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-subagent-permission` |
+| A7 | 活体验证：父会话可见 skill | ✅ | 2026-10-28 buddy-proxy 内 `pi -p` 列 skill，输出含 `pi-subagent-extend` |
 | A8 | 活体验证：带 bindings 的前台子代理被拦截 | ✅ | 同日 `be-core` + scope `package.json` 委派，子代理读 `README.md` 被拒，文案含范围与来源 |
 | A9 | glob 语义回归（`**` 不被 `*` 规则二次改写；`dir/` 与 `dir`、`dir/**` 等价） | ✅ | 第 15 例；活体：`be-core`/`fe` + scope `web/src/features/balance/**` 放行整目录 |
 | A10 | bash 白名单 / 元字符拒绝 / writable / 缺 helper 时 fail closed | ✅ | 第 12–14 例 |
@@ -82,6 +89,9 @@ pi-subagent-permission/
 | A12 | helper 隔离属性 | ✅ | 2026-11-10 端到端：走扩展 `tool_call` 生成命令后真跑，范围外 `touch` 被拒、`curl` 连不上、`getent hosts` 无结果、网卡只剩 `lo`、`2>/dev/null` 正常；`/proc` 只剩 1..7、宿主 pid 不可见、同用户进程 `environ` 读不到、`kill` 报无此进程、`CapEff`/`CapBnd` 为 0 |
 | A13 | 内核能力门槛 | ✅ | `helper --describe` 报 ABI 7 / supported；第 27 例用假 helper 验证 ABI 不足时 bash 被拒 |
 | A14 | 进程生命周期 | ✅ | 命令运行期间 helper 存活；`SIGTERM` 到 helper 后命令结束；`SIGKILL` 到 helper 后不产生孤儿（PDEATHSIG）；退出码 0/7/42 逐级透传 |
+| A15 | 上下文隔离：三个入口各管一半 | ✅ | `node test/context.test.mjs` 第 7–9 例（主会话注入不剥、后台子代理剥且不注入、前台子代理剥且不注入） |
+| A16 | 标记不闭合时降级而非静默 | ✅ | 上下文第 3、10 例：整段保留 + warning |
+| A17 | 主代理专属文件的有无两种情形 | ✅ | 上下文第 5–6 例：有则注入 section，无则不动 sections |
 
 实测记下来的坑：`pi -p -nt`（`noTools: "all"`）不会把 skills 段放进提示词，模型会回答
 「没有可用 skill」。验证 skill 是否注册不要加 `-nt`。
@@ -113,9 +123,14 @@ pi-subagent-permission/
 
 ```text
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
-packages/pi-plugin/test/extension.test.mjs 离线测试（15 例）
+packages/pi-plugin/src/context-scope.ts    上下文隔离逻辑（标记剥离、main-only 注入）
+packages/pi-plugin/src/main-context.ts     环境加载入口：主会话注入 / 后台子代理剥标记
+packages/pi-plugin/src/child-context.ts    agent 声明的入口：子代理剥标记
+packages/pi-plugin/test/extension.test.mjs 离线测试（范围与 bash，27 例）
+packages/pi-plugin/test/context.test.mjs   离线测试（上下文隔离，10 例）
 packages/pi-plugin/install.sh              装/卸
-packages/pi-plugin/skills/pi-subagent-permission/SKILL.md  用法 skill
+packages/helper/src/                       沙箱 helper（spec/namespace/sandbox/supervise）
+packages/pi-plugin/skills/pi-subagent-extend{,-probes,-context}/SKILL.md  三个用法 skill
 ```
 
 ## 6. 相关材料
@@ -172,3 +187,53 @@ packages/pi-plugin/skills/pi-subagent-permission/SKILL.md  用法 skill
    实测同一个任务：带 abort 时最终输出被截断成一行「先确认 typecheck 脚本所在位置」，去掉后是完整汇报。
 2. **也不能用 `terminate: true`**：pi 在工具批次结束时直接结束本轮，模型仍然拿不到一个 turn 写汇报。
    最终方案：停机只置内部状态，之后每个 tool 边界都返回 `block`（不带 terminate），模型失去工具后自然收敛到输出汇报。
+
+## 升级为「子代理全套件」与上下文隔离（2026-11-13）
+
+包名从 `pi-subagent-permission` 改为 `pi-subagent-extend`，定位从「只管权限」扩成「子代理相关的一次收齐」。
+没有兼容别名：旧标识一律拒绝，而不是两套并行。
+
+### 命名改动范围
+
+仓库内 135 处引用（13 个跟踪文件），含 npm 名、helper crate 与二进制名、
+`PI_SUBAGENT_EXTEND_HELPER` 环境变量、`~/.cache/pi-subagent-extend` 缓存目录、`/tmp/.pi-subagent-extend-<pid>`、
+`pi-subagent-extend/1` 绑定命名空间、拒绝文案前缀、两个 skill 目录。三种命名形式都要一起换：
+带连字符的（包名/路径）、带下划线的（crate）、全大写的（环境变量）——只换拼写形式容易漏。
+
+仓库外同步了三处：buddy-proxy 的 9 个 agent 定义（`subagentOnlyExtensions`）、`.pi/README.md`、
+以及 `tools/subagent-watch.ts` 里数拒绝次数的正则（不入 git，但前缀改了会静默失配）。
+项目级软链 `pi-subagent-permission` 悬空后必须重建，否则扩展根本不加载。
+
+### 三个入口按「怎么被加载」分受众
+
+前台子代理同进程、没有 `PI_SUBAGENT_CHILD`，和主会话的环境无法区分；后台子代理是独立进程、有该变量。
+所以「只给主代理」的逻辑不能靠运行时判断，只能靠加载方式定受众：
+
+| 入口 | 加载方式 | 行为 |
+| --- | --- | --- |
+| `src/index.ts` | agent 声明 + 环境加载 | 范围与 bash |
+| `src/main-context.ts` | 只走环境加载 | 主会话注入 `.pi/main-only.md`；后台子代理（`PI_SUBAGENT_CHILD === "1"`）里剥标记 |
+| `src/child-context.ts` | 只由 agent 声明 | 剥标记，永不注入 |
+
+注入用 `sections`（`main_only_instructions`）而不是重写整段 systemPrompt：pi 按 section 做差量，
+只补一条系统消息，提示词缓存仍命中。剥离是就地在 `systemPromptOptions.contextFiles[i].content` 上做，
+标记不闭合时整段保留并给 warning——宁可让子代理多看见一段，也不要因为猜错边界删掉半个文件。
+
+### 顺手清掉的死代码
+
+改后暴露的既有问题：`Probe` 收下 `bashRule` 却从不读（分类早就由调用方完成）——连同
+`ProbeDeps.bashRule`、构造函数赋值、测试里的构造参数一起删；`#schedule` 返回 `unknown` 换成
+`TimerHandle = object | number`（Node 的 Timeout 对象或假时钟的数字）；`status()` 里的嵌套三元改 if/else；
+`as unknown as` 补 SAFETY 注释说明不变量。
+
+### 修正了一个错误的因果解释
+
+README 原写「沙箱里 pnpm 一定用项目内 `.pnpm-store`，因为 bwrap 把项目目录单独 bind 成挂载点，
+跨挂载无法建硬链接」。helper 换掉 bwrap 后这条已经不成立（helper 只做 MS_PRIVATE、私有 /tmp、新 /proc，
+不 bind 项目目录）。实测定位到真正原因：**是写权限不是挂载**——只读根下全局 store 不可写，pnpm 就退回
+`<项目>/node_modules/.pnpm-store`；把 store 写进 `bash.writablePaths` 后 `pnpm store path` 回到
+`~/.local/share/pnpm/store/v11`（沙箱内实测）。两种都能跑测试，因为项目内 store 落在本来就可写的
+`node_modules/` 下。
+
+验证：`pnpm run typecheck` 通过；`node test/extension.test.mjs` 27 例、`node test/context.test.mjs` 10 例、
+`cargo test` 14 例全绿。

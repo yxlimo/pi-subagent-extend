@@ -13,8 +13,6 @@
  * 能保证模型看到文案的地方。abort 用 ctx 的 abort()，不等边界。
  */
 
-import type { BashRule } from "./bash-match.ts";
-
 export interface ProbeConfig {
 	idleWriteMs: number;
 	abortGraceMs: number;
@@ -46,9 +44,15 @@ export interface ProbeHooks {
 	warn: (text: string) => void;
 }
 
+/**
+ * 定时器句柄：Node 返回的 Timeout 对象，或浏览器/假时钟里的数字。探针从不看内容，
+ * 只原样交回宿主的 clearTimeout。
+ */
+export type TimerHandle = object | number;
+
 export interface ProbeHost {
-	setTimeout: (fn: () => void, ms: number) => unknown;
-	clearTimeout: (handle: unknown) => void;
+	setTimeout: (fn: () => void, ms: number) => TimerHandle;
+	clearTimeout: (handle: TimerHandle) => void;
 	now: () => number;
 }
 
@@ -131,9 +135,7 @@ function matchesAny(patterns: string[], text: string): string | undefined {
 
 export interface ProbeDeps {
 	config: ProbeConfig;
-	/** bash 读写归类；没有 bash 规则时传 undefined。 */
-	bashRule?: BashRule;
-	/** 只读任务（pi-subagent-permission 的 readOnly）：跳过判据 1 与 3。 */
+	/** 只读任务（pi-subagent-extend 的 readOnly）：跳过判据 1 与 3。 */
 	readOnly: boolean;
 	hooks: ProbeHooks;
 	host?: ProbeHost;
@@ -148,13 +150,12 @@ const BASH_TEXT_LIMIT = 24_000;
  */
 export class Probe {
 	#cfg: ProbeConfig;
-	#bashRule?: BashRule;
 	#readOnly: boolean;
 	#hooks: ProbeHooks;
 	#host: ProbeHost;
-	#timers = new Set<unknown>();
-	#idleTimer?: unknown;
-	#successTimer?: unknown;
+	#timers = new Set<TimerHandle>();
+	#idleTimer?: TimerHandle;
+	#successTimer?: TimerHandle;
 	#idle: Window = { armed: false, warned: false, message: "", abortAt: 0 };
 	#repeat: Window = { armed: false, warned: false, message: "", abortAt: 0 };
 	#bashCounts = new Map<string, number>();
@@ -165,7 +166,6 @@ export class Probe {
 
 	constructor(deps: ProbeDeps) {
 		this.#cfg = deps.config;
-		this.#bashRule = deps.bashRule;
 		this.#readOnly = deps.readOnly;
 		this.#hooks = deps.hooks;
 		this.#host = deps.host ?? defaultHost();
@@ -234,7 +234,7 @@ export class Probe {
 			if (p.re.test(path)) {
 				return {
 					reason:
-						`pi-subagent-permission: 不允许把 "${path}" 写进仓库（判据：造杂物，命中 forbidWritePatterns "` +
+						`pi-subagent-extend: 不允许把 "${path}" 写进仓库（判据：造杂物，命中 forbidWritePatterns "` +
 						`${p.source}"）。这是调试/临时产物，不要留在工作区；需要临时文件就写到 /tmp。`,
 					stop: false,
 				};
@@ -326,7 +326,7 @@ export class Probe {
 		this.#successArmed = false;
 	}
 
-	#schedule(fn: () => void, ms: number): unknown {
+	#schedule(fn: () => void, ms: number): TimerHandle {
 		const handle = this.#host.setTimeout(() => {
 			this.#timers.delete(handle);
 			fn();
@@ -358,8 +358,14 @@ export class Probe {
 
 	/** 诊断用：当前状态。 */
 	status(): string[] {
+		// 空闲阈值：只读任务不适用；关闭时写「关闭」。
+		let idleLimit = "关闭";
+		if (this.#readOnly) idleLimit = "不适用（只读任务）";
+		else if (this.#cfg.idleWriteMs > 0) {
+			idleLimit = `${ms(this.#cfg.idleWriteMs)} + 宽限 ${ms(this.#cfg.abortGraceMs)}`;
+		}
 		const lines = [
-			`只读空转: ${this.#readOnly ? "不适用（只读任务）" : this.#cfg.idleWriteMs > 0 ? `${ms(this.#cfg.idleWriteMs)} + 宽限 ${ms(this.#cfg.abortGraceMs)}` : "关闭"}`, 
+			`只读空转: ${idleLimit}`,
 			`原地打转: 同一命令第 ${this.#cfg.repeatBash} 次警告、第 ${this.#cfg.repeatBash + 1} 次停止（已记录 ${this.#bashCounts.size} 条命令）`,
 			`早可收工: ${this.#readOnly ? "不适用（只读任务）" : `${ms(this.#cfg.successIdleMs)} 无新改动即停止`}`,
 			`造杂物: ${this.#forbidPatterns.length} 条禁用路径模式`,

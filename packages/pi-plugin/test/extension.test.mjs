@@ -1,4 +1,4 @@
-// Offline test for the pi-subagent-permission extension.
+// Offline test for the pi-subagent-extend extension.
 //
 // Runs the extension against a fake pi API, so the scope contract can be
 // checked without a live pi session. The policy is captured when the extension
@@ -18,11 +18,11 @@ const repo = join(here, "..")
 // The sandbox helper is a Rust binary built by `pnpm run build:helper` (the
 // package's pretest hook). Pointing the environment at it makes these tests
 // exercise the real sandbox instead of a mock.
-const helperBin = join(repo, "bin", "pi-subagent-permission-helper")
+const helperBin = join(repo, "bin", "pi-subagent-extend-helper")
 if (!existsSync(helperBin)) {
   throw new Error(`missing ${helperBin}; run \`pnpm run build:helper\` first`)
 }
-process.env.PI_SUBAGENT_PERMISSION_HELPER = helperBin
+process.env.PI_SUBAGENT_EXTEND_HELPER = helperBin
 
 /** The sandbox spec the extension wrote for a rewritten bash command. */
 function specOf(command) {
@@ -34,7 +34,7 @@ function specOf(command) {
 const { default: activate } = await import(join(repo, "src", "index.ts"))
 
 /** Activate the extension with the given bindings env and return its tool_call handler. */
-async function handler({ bindings, cwd = workdir, clock }) {
+async function handler({ bindings, cwd = workdir }) {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
@@ -114,7 +114,7 @@ const defaultProbe = () => ({
   forbidWritePatterns: [],
 })
 
-const workdir = mkdtempSync(join(tmpdir(), "pi-subagent-permission-test-"))
+const workdir = mkdtempSync(join(tmpdir(), "pi-subagent-extend-test-"))
 mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 1. No bindings: the extension is inert, every call passes.
@@ -131,7 +131,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": { scope: ["src/auth/**", "src/**", "README.md"], maxDenies: 0 },
+      "pi-subagent-extend/1": { scope: ["src/auth/**", "src/**", "README.md"], maxDenies: 0 },
     }),
   })
   assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "in-scope read passes")
@@ -164,7 +164,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 3. readOnly bindings block edit/write even inside the scope.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"], readOnly: true } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read-only read passes")
   const edit = await h.call("edit", { path: "src/a.ts" })
@@ -176,7 +176,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 4. Explicit empty scope denies every file access.
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: [] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: [] } }) })
   const read = await h.call("read", { path: "src/a.ts" })
   assert.equal(read?.block, true, "an explicit empty scope denies reads")
   h.restore()
@@ -204,7 +204,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 7. maxReads caps successful reads.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"], maxReads: 2 } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxReads: 2 } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read 1 passes")
   assert.equal(await h.call("read", { path: "src/b.ts" }), undefined, "read 2 passes")
@@ -219,7 +219,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 8. allowTools opens holes for named non-executor tools.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"], allowTools: ["todo_write"] } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], allowTools: ["todo_write"] } }),
   })
   assert.equal(await h.call("todo_write", { items: [] }), undefined, "allowTools entry passes")
   assert.equal((await h.call("bash", { command: "ls" }))?.block, true, "allowTools cannot re-enable executors")
@@ -229,7 +229,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 9. Search tools without an explicit path default to cwd and get judged on it.
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
   const grep = await h.call("grep", { pattern: "x" })
   assert.equal(grep?.block, true, "pathless grep (cwd) is out of scope here")
   assert.match(grep.reason, /任务范围/, "block reason teaches the scope")
@@ -249,21 +249,25 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(typeof handlers.resources_discover, "function", "the extension registers resources_discover")
   const result = await handlers.resources_discover({ type: "resources_discover", cwd: workdir, reason: "startup" })
   const dirs = result?.skillPaths ?? []
-  assert.equal(dirs.length, 2, "both usage skills are registered")
+  assert.equal(dirs.length, 3, "all usage skills are registered")
   const names = dirs.map((dir) => {
     const path = join(dir, "SKILL.md")
     assert.equal(existsSync(path), true, `${dir} holds a SKILL.md`)
     const frontmatter = readFileSync(path, "utf8").slice(0, 400)
     return frontmatter.match(/name: ([\w-]+)/)?.[1]
   })
-  assert.deepEqual(names.sort(), ["pi-subagent-permission", "pi-subagent-permission-probes"], "scope skill and probe skill")
-  console.log("  ok   两个用法 skill 随扩展经 resources_discover 注册")
+  assert.deepEqual(
+    names.sort(),
+    ["pi-subagent-extend", "pi-subagent-extend-context", "pi-subagent-extend-probes"],
+    "scope, probe and context skills",
+  )
+  console.log("  ok   三个用法 skill 随扩展经 resources_discover 注册")
 }
 
 // 11. A scoped session does not advertise the delegation skill.
 {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
-  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"] } })
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } })
   const handlers = {}
   activate({
     on(event, fn) {
@@ -282,7 +286,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         bash: { read: ["pnpm run typecheck"], write: ["pnpm test"] },
       },
@@ -292,7 +296,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
   assert.match(
     input.command,
-    /^'\/[^']*pi-subagent-permission-helper' '--spec' '\/[^']*spec-[0-9]+\.json' '--' 'bash' '-lc'/,
+    /^'\/[^']*pi-subagent-extend-helper' '--spec' '\/[^']*spec-[0-9]+\.json' '--' 'bash' '-lc'/,
     "command is rewritten to run under the sandbox helper",
   )
   assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
@@ -326,7 +330,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 13. bash without an allowlist stays closed, with a hint about bash.read/bash.write.
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
   const denied = await h.call("bash", { command: "pnpm test" })
   assert.equal(denied?.block, true, "bash is denied when no allowlist is configured")
   assert.match(denied.reason, /bash\.read/, "denial explains how to open it")
@@ -339,7 +343,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         bash: { write: ["node harness.mjs"], writable: true, network: true },
       },
@@ -355,17 +359,17 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
   h.restore()
 
-  const previous = process.env.PI_SUBAGENT_PERMISSION_HELPER
-  process.env.PI_SUBAGENT_PERMISSION_HELPER = "/nonexistent/pi-subagent-permission-helper"
+  const previous = process.env.PI_SUBAGENT_EXTEND_HELPER
+  process.env.PI_SUBAGENT_EXTEND_HELPER = "/nonexistent/pi-subagent-extend-helper"
   const h2 = await handler({
-    bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"], bash: { write: ["node harness.mjs"] } } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["node harness.mjs"] } } }),
   })
   const missing = await h2.call("bash", { command: "node harness.mjs" })
   assert.equal(missing?.block, true, "no helper means no bash, even for a listed command")
   assert.match(missing.reason, /build:helper/, "the denial says how to build the helper")
   h2.restore()
-  if (previous === undefined) delete process.env.PI_SUBAGENT_PERMISSION_HELPER
-  else process.env.PI_SUBAGENT_PERMISSION_HELPER = previous
+  if (previous === undefined) delete process.env.PI_SUBAGENT_EXTEND_HELPER
+  else process.env.PI_SUBAGENT_EXTEND_HELPER = previous
   console.log("  ok   writable/network 选项写进 spec；找不到 helper 时 fail closed")
 }
 
@@ -373,7 +377,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": { scope: ["web/src/**", "lib/**/x.ts", "a?b", "one.ts"] },
+      "pi-subagent-extend/1": { scope: ["web/src/**", "lib/**/x.ts", "a?b", "one.ts"] },
     }),
   })
   const allowed = ["web/src/a.vue", "web/src/x/y/z.vue", "lib/x.ts", "lib/a/b/x.ts", "aXb", "one.ts"]
@@ -387,13 +391,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   h.restore()
 
   // A bare `**` means the whole tree.
-  const all = await handler({ bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["**"] } }) })
+  const all = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["**"] } }) })
   for (const path of ["README.md", "deep/dir/file.ts", "web/src/x/y.vue"]) {
     assert.equal(await all.call("ls", { path }), undefined, `"**" covers "${path}"`)
   }
   all.restore()
   // A trailing slash is just another way to write the directory.
-  const slash = await handler({ bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["web/src/features/balance/"] } }) })
+  const slash = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["web/src/features/balance/"] } }) })
   for (const path of ["web/src/features/balance", "web/src/features/balance/api.ts", "web/src/features/balance/a/b/c.ts"]) {
     assert.equal(await slash.call("ls", { path }), undefined, `"${path}" is inside "web/src/features/balance/"`)
   }
@@ -407,7 +411,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         bash: { read: ["pnpm run typecheck", "re: ^tsc --noEmit$"], write: ["re: ^pnpm -r (test|build)"] },
       },
@@ -429,12 +433,9 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 17. Access classification: a write-listed command resets the idle probe, a read-listed one does not.
 {
   const { Probe } = await import(join(repo, "src", "probe.ts"))
-  const { parseBashRule } = await import(join(repo, "src", "bash-match.ts"))
-  const rule = parseBashRule({ read: ["pnpm run typecheck"], write: ["pnpm test"] })
   const clock = fakeClock()
   const p = new Probe({
     config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 1000 },
-    bashRule: rule,
     readOnly: false,
     hooks: { abort: () => {}, warn: () => {} },
     host: clock.host,
@@ -513,7 +514,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         maxDenies: 2,
         probe: { forbidWritePatterns: ["_tscProbe", ".*\\.src\\.tsx"] },
@@ -553,7 +554,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } },
+      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } },
     }),
   })
   const commands = []
@@ -579,7 +580,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: join(wt, "web"),
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         bash: {
           write: ["pnpm install"],
@@ -619,7 +620,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 23. Missing path must not read as "the child walked to the wrong directory".
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"], maxDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
   })
   const write = await h.call("write", { content: "x" })
   assert.equal(write?.block, true, "write without path is refused")
@@ -645,7 +646,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         bash: { read: ["pnpm run typecheck"], writable: true, writablePaths: ["/tmp"] },
       },
@@ -665,7 +666,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: workdir,
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] }, maxDenies: 0 },
+      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] }, maxDenies: 0 },
     }),
   })
   const denied = await h.call("bash", { command: "pnpm install" })
@@ -682,7 +683,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-permission/1": {
+      "pi-subagent-extend/1": {
         scope: ["src/**"],
         bash: { write: ["pnpm install"], writable: true },
       },
@@ -715,19 +716,19 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     `#!/bin/sh\necho '{"landlock":{"kernel_abi":3,"required_abi":7,"supported":false,"reason":"kernel Landlock ABI is 3, but ABI 7 is required"},"network_namespace":true,"resolver_sockets":[]}'\nexit 76\n`,
   )
   chmodSync(fake, 0o755)
-  const previous = process.env.PI_SUBAGENT_PERMISSION_HELPER
-  process.env.PI_SUBAGENT_PERMISSION_HELPER = fake
+  const previous = process.env.PI_SUBAGENT_EXTEND_HELPER
+  process.env.PI_SUBAGENT_EXTEND_HELPER = fake
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-permission/1": { scope: ["src/**"], bash: { write: ["pnpm test"] } } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"] } } }),
   })
   const denied = await h.call("bash", { command: "pnpm test" })
   assert.equal(denied?.block, true, "an unsupported kernel denies bash")
   assert.match(denied.reason, /ABI 7 is required/, "the denial names the ABI the plugin needs")
   h.restore()
-  if (previous === undefined) delete process.env.PI_SUBAGENT_PERMISSION_HELPER
-  else process.env.PI_SUBAGENT_PERMISSION_HELPER = previous
+  if (previous === undefined) delete process.env.PI_SUBAGENT_EXTEND_HELPER
+  else process.env.PI_SUBAGENT_EXTEND_HELPER = previous
   console.log("  ok   内核 ABI 不足时 bash 被拒绝，文案说清缺的版本")
 }
 
 rmSync(workdir, { recursive: true, force: true })
-console.log("\npi-subagent-permission 测试通过")
+console.log("\npi-subagent-extend 测试通过")

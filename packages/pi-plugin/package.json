@@ -1,7 +1,7 @@
 {
-  "name": "pi-subagent-permission",
+  "name": "pi-subagent-extend",
   "version": "0.1.0",
-  "description": "Scope what a pi session (primarily a subagent) may touch: reject every tool call outside the task scope",
+  "description": "Everything a pi session needs around subagents: scope what a delegated subagent may touch, and keep main-agent-only context out of child prompts",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -9,11 +9,13 @@
     "pi-extension",
     "subagents",
     "sandbox",
-    "allowlist"
+    "allowlist",
+    "agents-md"
   ],
   "pi": {
     "extensions": [
-      "src/index.ts"
+      "src/index.ts",
+      "src/main-context.ts"
     ]
   },
   "engines": {
@@ -22,9 +24,9 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
-    "build:helper": "mkdir -p bin && cargo build --release --manifest-path ../helper/Cargo.toml && cp ../helper/target/release/pi-subagent-permission-helper bin/",
+    "build:helper": "mkdir -p bin && cargo build --release --manifest-path ../helper/Cargo.toml && cp ../helper/target/release/pi-subagent-extend-helper bin/",
     "pretest": "pnpm run build:helper",
-    "test": "node test/extension.test.mjs",
+    "test": "node test/extension.test.mjs && node test/context.test.mjs",
     "prepublishOnly": "pnpm run build"
   },
   "devDependencies": {

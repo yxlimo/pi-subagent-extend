@@ -1,13 +1,13 @@
 ---
-name: pi-subagent-permission
-description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-subagent-permission/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝；需要子代理自己跑测试/typecheck 时用 bash.read / bash.write 点名命令（支持 re: 正则），在沙箱 helper 里执行（Landlock 强制文件范围、默认断网）；worktree 隔离、pnpm/mise 的可写目录用 bash.writablePaths 与 bash.env 处理。
+name: pi-subagent-extend
+description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-subagent-extend/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝；需要子代理自己跑测试/typecheck 时用 bash.read / bash.write 点名命令（支持 re: 正则），在沙箱 helper 里执行（Landlock 强制文件范围、默认断网）；worktree 隔离、pnpm/mise 的可写目录用 bash.writablePaths 与 bash.env 处理。
 ---
 
-# pi-subagent-permission：给子代理限定任务范围
+# pi-subagent-extend：给子代理限定任务范围
 
 委派子代理时通过 `extensionBindings` 传入本次任务的范围。子代理会话里，范围之外的所有 tool_call 一律被拒绝（fail closed）：防止子代理漫无目的地扫仓库。
 
-判据与停机（只读空转、原地打转、早可收工、造杂物、撞权限）见另一个 skill `pi-subagent-permission-probes`。
+判据与停机（只读空转、原地打转、早可收工、造杂物、撞权限）见另一个 skill `pi-subagent-extend-probes`。
 
 委派规则本身（brief 怎么写、等待方式、一个 cwd 一个写者）以 **pi-subagents 自带的 skill** 为准，本 skill 只补「怎么把范围和命令授权绑到一次委派上」这一层。
 
@@ -15,8 +15,8 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 
 被委派的 agent 必须能加载本扩展，二选一：
 
-- agent 定义 frontmatter 里声明 `subagentOnlyExtensions: /home/shay/extensions/pi-subagent-permission/packages/pi-plugin/src/index.ts`（前台、后台子代理都生效，推荐）；
-- 扩展已全局安装（`~/.pi/agent/extensions/pi-subagent-permission`）且本次委派 `async: true`（后台子代理才走 ambient discovery）。
+- agent 定义 frontmatter 里声明 `subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts`（前台、后台子代理都生效，推荐）；
+- 扩展已全局安装（`~/.pi/agent/extensions/pi-subagent-extend`）且本次委派 `async: true`（后台子代理才走 ambient discovery）。
 
 扩展没加载时 bindings 传了也没用，拦截不会发生。
 
@@ -30,7 +30,7 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 subagent(
   agent: "<agent-name>",
   task: "<任务描述>",
-  extensionBindings: { "pi-subagent-permission/1": { "scope": ["<文件/目录 glob>", "..."] } }
+  extensionBindings: { "pi-subagent-extend/1": { "scope": ["<文件/目录 glob>", "..."] } }
 )
 ```
 
@@ -41,7 +41,7 @@ subagent(
   agent: "<agent-name>",
   task: "<任务描述>，完成后跑 typecheck 并报告结果",
   extensionBindings: {
-    "pi-subagent-permission/1": {
+    "pi-subagent-extend/1": {
       "scope": ["<文件/目录 glob>"],
       "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] }
     }
@@ -49,7 +49,7 @@ subagent(
 )
 ```
 
-namespace 固定为 `pi-subagent-permission/1`。每次委派都要传，scope 按本任务实际涉及的文件/目录收窄，不要默认给整个仓库。
+namespace 固定为 `pi-subagent-extend/1`。每次委派都要传，scope 按本任务实际涉及的文件/目录收窄，不要默认给整个仓库。
 
 子代理在 worktree 里跑（`worktree: true`）且需要装依赖或跑验证时：
 
@@ -59,7 +59,7 @@ subagent(
   task: "<任务描述>",
   options: { worktree: true },
   extensionBindings: {
-    "pi-subagent-permission/1": {
+    "pi-subagent-extend/1": {
       "scope": ["web/src/features/balance/**"],
       "bash": {
         "read": ["pnpm run typecheck"],
