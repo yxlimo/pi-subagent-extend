@@ -167,7 +167,7 @@ packages/pi-plugin/skills/pi-subagent-extend{,-probes,-context}/SKILL.md  三个
 
 ### 撞权限（src/deny-count.ts）
 
-`maxDenies`（缺省 0 = 关闭）：第 N 次被拒 warn 并提示「向父代理报告缺什么」，第 N+1 次 abort。
+`maxDenies`（缺省 3，写 0 关闭）：第 N 次被拒 warn 并提示「向父代理报告缺什么」，第 N+1 次停。
 
 ### 验收
 

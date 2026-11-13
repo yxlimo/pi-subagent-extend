@@ -9,6 +9,8 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 
 判据与停机（只读空转、原地打转、早可收工、造杂物、撞权限）见另一个 skill `pi-subagent-extend-probes`。
 
+上下文隔离（`AGENTS.md` 里 `<!-- main-agent-only:start -->` 圈出的段落、`.pi/main-only.md`）是同一个包的另一半，见 skill `pi-subagent-extend-context`。它由 agent 定义里声明的入口决定，跟 bindings 无关——委派时不需要为它传任何字段。
+
 委派规则本身（brief 怎么写、等待方式、一个 cwd 一个写者）以 **pi-subagents 自带的 skill** 为准，本 skill 只补「怎么把范围和命令授权绑到一次委派上」这一层。
 
 ## 前置条件
@@ -19,6 +21,8 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 - 扩展已全局安装（`~/.pi/agent/extensions/pi-subagent-extend`）且本次委派 `async: true`（后台子代理才走 ambient discovery）。
 
 扩展没加载时 bindings 传了也没用，拦截不会发生。
+
+项目若用 `<!-- main-agent-only:start -->` 标记，同一行还要加 `, …/src/child-context.ts`，否则子代理会读到主代理专属段落（见 skill `pi-subagent-extend-context`）。
 
 `bash.read` / `bash.write` 里的命令靠沙箱 helper（`packages/helper` 的 Rust 二进制）跑：文件范围由 Landlock 强制，默认断网（TCP/UDP/DNS 全断），进程与 capability 也一并隔离（看不到宿主进程、命令无任何 capability）。宿主需要 Landlock ABI 7（Linux 6.15+）；helper 缺失或内核不够时 bash 保持关闭（其余功能不受影响）。
 
@@ -93,9 +97,9 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 | `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
 | `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；算作「写入活动」 |
 | `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
-| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照）；worktree 场景下 worktree 根也会被绑成可写 |
-| `bash.writablePaths` | `string[]` | 额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
-| `bash.env` | `object` | 注入沙箱的环境变量（`--setenv`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
+| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照）；worktree 场景下 worktree 根也会放开写权限 |
+| `bash.writablePaths` | `string[]` | 额外放开写权限的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
+| `bash.env` | `object` | 注入沙箱的环境变量（写进 spec 的 `env`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
 | `bash.gitExcludes` | `boolean` | 默认 `true`。给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`），防止 `git add -A` 把依赖目录吸进索引 |
 
 白名单外的 bash 命令，拒绝文案里会带上探测到的 pnpm store 路径——模型看得见，能把它和「父代理要写什么」一起汇报上来。扩展只探测不自动放行。
@@ -111,8 +115,8 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 - **worktree 的 `node_modules` 是指向主仓的符号链接**，所以 `pnpm install` 在 worktree 里必然失败（pnpm 需要真实的 hoist 目录）。依赖已经就位时不要让子代理装依赖；让 `pnpm run` 不做前置安装（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`）就能正常跑验证。
 - **pnpm 与 mise 都要写沙箱外的地方**：pnpm 的锁目录在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`），mise 要把 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`。扩展默认把这两处指到沙箱私有 /tmp，所以这两个失败已经不用管；pnpm store 这类真正需要持久可写的地方，用 `bash.writablePaths` 显式给出。
-- **沙箱里 pnpm 一定用项目内的 `.pnpm-store`**：项目目录被单独 bind 成挂载点，跨挂载不能建硬链接，pnpm 只能退回项目内 store。扩展已经用 git 全局排除规则保证它进不了索引，但项目自己的 `.gitignore` 也应忽略 `node_modules/`。
-- **沙箱里装依赖需要开网络**（`"network": true`）：项目内的 store 是空的，只能从 registry 下载。默认断网时 `pnpm install` 必然失败。
+- **沙箱里 pnpm 用哪个 store 取决于写权限**：全局 store（`~/.local/share/pnpm/store`）在只读根下不可写时，pnpm 探测到就退回 `<项目>/node_modules/.pnpm-store`；把 store 目录写进 `bash.writablePaths`，`pnpm store path` 就仍指向全局 store（实测）。两种都能跑测试——项目内 store 落在本来就可写的 `node_modules/` 下。扩展用 git 全局排除规则保证它进不了索引，但项目自己的 `.gitignore` 也应忽略 `node_modules/`。
+- **沙箱里装依赖需要开网络**（`"network": true`）：无论用哪个 store，装新包都得访问 registry。默认断网时 `pnpm install` 必然失败。
 
 ## 生效后的规则
 
@@ -134,4 +138,4 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 - 沙箱挡越界写与联网，不挡读：跑测试要读整棵树，所以白名单命令在沙箱里仍可 `cat` 范围外文件。不要把 bash 白名单当成「连读也锁住」的手段。
 - 子代理报「bash 命令不在白名单内」时，先判断这条命令是否本任务必需：必需就把它加进对应列重派；不必要就改任务描述，别让它反复试。拒绝文案里会带 pnpm store 的路径——子代理要装依赖时把它抄进 `bash.writablePaths` 即可，不要让它自己去装。
 - 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
-- bindings 总量上限 16 KiB，scope 用简洁 glob 即可；两个 skill 的字段共用同一个 namespace，总量一起算。
+- bindings 总量上限 16 KiB，scope 用简洁 glob 即可；三个 skill 的字段共用同一个 namespace，总量一起算。
