@@ -1,6 +1,6 @@
 ---
 name: pi-subagent-extend-context
-description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看的规则（怎么委派、怎么等结果、汇报口径、主代理专属的写权限边界），用这个 skill 把子代理侧的提示词裁干净：一部分留在 AGENTS.md 里用 <!-- main-only --> 标记圈掉，主代理专属的整段放 .pi/main-only.md 只注入主会话。含两个入口的分工、标记写法、不闭合时的降级行为，以及和 inheritProjectContext 全有全无开关的取舍。
+description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看的规则（怎么委派、怎么等结果、汇报口径、主代理专属的写权限边界），用这个 skill 把子代理侧的提示词裁干净：一部分留在 AGENTS.md 里用 <!-- main-agent-only:start --> 标记圈掉，主代理专属的整段放 .pi/main-only.md 只注入主会话。含三个入口的分工、标记写法、不闭合时的降级行为，以及和 inheritProjectContext 全有全无开关的取舍。
 ---
 
 # 上下文隔离：让 AGENTS.md 只喂该喂的那部分
@@ -16,7 +16,7 @@ description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看�
 | 内容 | 放哪 | 子代理看得见吗 |
 | --- | --- | --- |
 | 子代理也该遵守的（术语、验收命令、禁推 git、代码风格） | `AGENTS.md` 普通段落 | 看得见 |
-| 只有主代理该知道的，但和仓库规则写在一起更顺 | `AGENTS.md` 里用 `<!-- main-only -->` 圈起来 | 看不见（被剥掉） |
+| 只有主代理该知道的，但和仓库规则写在一起更顺 | `AGENTS.md` 里用 `<!-- main-agent-only:start -->` 圈起来 | 看不见（被剥掉） |
 | 整段都只给主代理（委派方式、等待与追问节奏、和用户的交互口径） | `.pi/main-only.md` | 看不见（只注入主会话） |
 
 三者可以混用。判断标准很简单：**子代理照着做会不会做错事**——会，就圈起来或挪走。
@@ -30,12 +30,12 @@ description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看�
 
 **Upstream**：指上游的 API。
 
-<!-- main-only -->
+<!-- main-agent-only:start -->
 ## 委派
 
 用 `subagent` 工具委派，等它的结果再决定下一步。汇报口径：改了哪些文件、跑了什么、
 结果如何。
-<!-- /main-only -->
+<!-- main-agent-only:end -->
 
 ## 验收
 
@@ -62,7 +62,7 @@ description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看�
 
 内容按原样进提示词，不加工、不加标题——想让它长什么样就写什么样。
 
-## 两个入口的分工（改动 agent 定义时看这段）
+## 三个入口的分工（改动 agent 定义时看这段）
 
 包装了三个入口，加载方式不同，**不要混着声明**：
 
@@ -98,4 +98,4 @@ pi-subagents 有现成开关：`inheritProjectContext: false` 让子代理**完�
 | 子代理还是读到了标记里的内容 | agent 定义没声明 `child-context.ts`；或者那次是 fork context |
 | 子代理读到了 `.pi/main-only.md` | 这个文件被放进了 AGENTS.md 或某个 skill，它不是自动扩散的；或者 agent 用了 fork context |
 | 主会话看不到 `.pi/main-only.md` | 扩展没走环境加载（只声明在 `subagentOnlyExtensions` 里就不会在主会话加载） |
-| 看到「没有闭合，该段未剥离」 | 标记少了一半，补上 `<!-- /main-only -->` |
+| 看到「没有闭合，该段未剥离」 | 标记少了一半，补上 `<!-- main-agent-only:end -->` |

@@ -3,7 +3,7 @@
  *
  * 两个方向，都由项目自己的文件驱动，不引入新配置项：
  *
- * - AGENTS.md 里用 `<!-- main-only -->` … `<!-- /main-only -->` 圈出的段落，在子代理
+ * - AGENTS.md 里用 `<!-- main-agent-only:start -->` … `<!-- main-agent-only:end -->` 圈出的段落，在子代理
  *   的提示词里被删掉；主代理照常读整份文件。
  * - `.pi/main-only.md` 只注入主代理的提示词，不进子代理。
  *
@@ -29,10 +29,10 @@ export const MAIN_ONLY_FILE = ".pi/main-only.md";
 const SECTION_TAG = "main_only_instructions";
 
 /** 成对的标记块；整段连同前后空行一起删。 */
-const MARKED_BLOCK = /<!--\s*main-only\s*-->[\s\S]*?<!--\s*\/main-only\s*-->\s*/g;
+const MARKED_BLOCK = /<!--\s*main-agent-only:start\s*-->[\s\S]*?<!--\s*main-agent-only:end\s*-->\s*/g;
 
 /** 剥完之后还剩标记，说明有一侧没闭合。 */
-const ANY_MARKER = /<!--\s*\/?\s*main-only\s*-->/i;
+const ANY_MARKER = /<!--\s*\/?\s*main-agent-only:(start|end)\s*-->/i;
 
 export type StripResult = {
 	/** 真正被改动过的文件数。 */
@@ -89,5 +89,5 @@ export function injectMainOnly(options: { sections?: Record<string, string> }, c
  */
 export function unbalancedWarning(result: StripResult): string | undefined {
 	if (!result.unbalanced.length) return undefined;
-	return `${result.unbalanced.join(", ")} 里的 <!-- main-only --> 没有闭合，该段未剥离`;
+	return `${result.unbalanced.join(", ")} 里的 <!-- main-agent-only:start --> 没有闭合，该段未剥离`;
 }

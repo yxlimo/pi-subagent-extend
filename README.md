@@ -4,7 +4,7 @@
 
 pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任务范围内。父代理委派时指定本次任务的文件/目录，子代理会话里范围之外的 tool_call 一律拒绝，防止子代理漫无目的地扫仓库。
 
-同一个包还管第二件事：**上下文隔离**。`AGENTS.md` 里用 `<!-- main-only -->` 圈出的段落不进子代理提示词，整段只给主代理的内容放 `.pi/main-only.md` 只注入主会话。两件事互不依赖，可以只用一个（见「上下文隔离」）。
+同一个包还管第二件事：**上下文隔离**。`AGENTS.md` 里用 `<!-- main-agent-only:start -->` 圈出的段落不进子代理提示词，整段只给主代理的内容放 `.pi/main-only.md` 只注入主会话。两件事互不依赖，可以只用一个（见「上下文隔离」）。
 
 | npm package | directory | host | what it does |
 | --- | --- | --- | --- |
@@ -110,7 +110,7 @@ pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接*
 | 内容 | 放哪 | 子代理看得见吗 |
 | --- | --- | --- |
 | 子代理也该遵守的（术语、验收命令、代码风格） | `AGENTS.md` 普通段落 | 看得见 |
-| 和仓库规则写在一起更顺、但只给主代理 | `AGENTS.md` 里用 `<!-- main-only -->` 圈起来 | 看不见 |
+| 和仓库规则写在一起更顺、但只给主代理 | `AGENTS.md` 里用 `<!-- main-agent-only:start -->` 圈起来 | 看不见 |
 | 整段都只给主代理 | `.pi/main-only.md` | 看不见 |
 
 ```markdown
@@ -118,11 +118,11 @@ pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接*
 
 **Upstream**：指上游的 API。
 
-<!-- main-only -->
+<!-- main-agent-only:start -->
 ## 委派
 
 用 `subagent` 工具委派，等结果再决定下一步。汇报口径：改了哪些文件、跑了什么、结果如何。
-<!-- /main-only -->
+<!-- main-agent-only:end -->
 ```
 
 成对标记之间的整段（含两个注释和尾随空行）在子代理的提示词里被删除，主代理照常读。标记不闭合时**整段保留不剥**，并在会话里记一条 warning：宁可让子代理多看见一段，也不要因为猜错边界删掉半个文件。
@@ -190,7 +190,7 @@ namespace 是 `pi-subagent-extend/1`。pi-subagents 把 bindings 编码进 `PI_S
 | --- | --- |
 | `skills/pi-subagent-extend` | 文件范围、bash 两列与 `re:` 正则、沙箱、调用模板 |
 | `skills/pi-subagent-extend-probes` | 四条探针判据、撞权限计数、warn/stop 语义、被停后怎么读汇报 |
-| `skills/pi-subagent-extend-context` | `<!-- main-only -->` 标记、`.pi/main-only.md`、三个入口的分工 |
+| `skills/pi-subagent-extend-context` | `<!-- main-agent-only:start -->` 标记、`.pi/main-only.md`、三个入口的分工 |
 
 扩展用 `resources_discover` 把三个目录一起注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到对应那份。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-subagent-extend`、`/skill:pi-subagent-extend-probes`、`/skill:pi-subagent-extend-context` 可手动加载。
 
@@ -222,7 +222,19 @@ cd packages/pi-plugin
 cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 ```
 
-离线测试不调模型，只验证范围判定与上下文隔离：`node test/extension.test.mjs`、`node test/context.test.mjs`（`pnpm test` 两个都跑）。
+`pnpm test` 是离线的（假 pi，不联网）：范围 27 例 + 上下文 10 例。端到端另有一个 script，跑真会话真模型：
+
+```bash
+pnpm run test:e2e                     # 默认模型 buddy/coder-a
+PI_E2E_MODEL=buddy/coder-b pnpm run test:e2e
+PI_E2E_KEEP=1 pnpm run test:e2e       # 保留临时工程，翻会话记录用
+```
+
+它建一个一次性工程（AGENTS.md 带标记、`.pi/main-only.md`、`.pi/extensions/` 软链、两个 agent 定义），然后跑四种会话：主会话、前台子代理（`async:false`）、后台子代理（`async:true`）、以及不装扩展的对照组。判定靠「code 只存在于被隔离的内容里」：主会话与对照组必须答得出，两个子代理必须答 `NONE`。
+
+为什么不是 `pi -p`：`-p` 在父代理空闲时就退出，后台子代理还在跑时进程就没了。它用官方导出的 `RpcClient`（RPC 模式），会话是长寿子进程，父轮不会提前结束，取证由测试自己控制。后台子代理那条的答案由子代理自己写文件，不依赖父轮是否被唤醒。
+
+离线测试不调模型，只验证范围判定与上下文隔离：`node test/extension.test.mjs`、`node test/context.test.mjs`（`pnpm test` 两个都跑）；`node test/e2e.test.mjs` 是真会话验证（见下）。
 
 ## 边界与注意
 

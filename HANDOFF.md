@@ -20,6 +20,7 @@ pi-subagent-extend/
 │   ├── src/context-scope.ts    前两个入口共用的剥离与注入逻辑
 │   ├── test/extension.test.mjs 离线测试（范围与 bash，27 例）
 │   ├── test/context.test.mjs   离线测试（上下文隔离，10 例）
+│   ├── test/e2e.test.mjs       端到端（真会话真模型，4 例，需要模型）
 │   ├── install.sh              装/卸（软链 ~/.pi/agent/extensions/pi-subagent-extend）
 │   ├── package.json            pi 清单（"pi.extensions": ["src/index.ts", "src/main-context.ts"]）
 │   ├── skills/pi-subagent-extend/SKILL.md          用法 skill，随扩展注册
@@ -92,6 +93,8 @@ pi-subagent-extend/
 | A15 | 上下文隔离：三个入口各管一半 | ✅ | `node test/context.test.mjs` 第 7–9 例（主会话注入不剥、后台子代理剥且不注入、前台子代理剥且不注入） |
 | A16 | 标记不闭合时降级而非静默 | ✅ | 上下文第 3、10 例：整段保留 + warning |
 | A17 | 主代理专属文件的有无两种情形 | ✅ | 上下文第 5–6 例：有则注入 section，无则不动 sections |
+| A18 | 端到端：四种会话（主 / 前台子代理 / 后台子代理 / 对照） | ✅ | `pnpm run test:e2e` 4 例；主会话与对照组答出 code，两个子代理答 `NONE`；后台子代理的答案由它自己写的文件取证 |
+| A19 | 真实工程（buddy-proxy）的标记剥离 | ✅ | 用 `stripMarkedSections` 跑其 `AGENTS.md`：删 894 字符、33 行，无不闭合、无标记残留；被剥的正是「派单纪律」与「提交前的隐私审查」 |
 
 实测记下来的坑：`pi -p -nt`（`noTools: "all"`）不会把 skills 段放进提示词，模型会回答
 「没有可用 skill」。验证 skill 是否注册不要加 `-nt`。
@@ -236,4 +239,29 @@ README 原写「沙箱里 pnpm 一定用项目内 `.pnpm-store`，因为 bwrap �
 `node_modules/` 下。
 
 验证：`pnpm run typecheck` 通过；`node test/extension.test.mjs` 27 例、`node test/context.test.mjs` 10 例、
-`cargo test` 14 例全绿。
+`cargo test` 14 例全绿；`node test/e2e.test.mjs` 4 例真会话全绿（含真实 `async:true` 后台子代理）。
+
+### 端到端测试的形状（为什么不用 `pi -p`）
+
+`pi -p` 在父代理空闲时退出。后台子代理（`async:true`）还在跑的时候父进程没了，取证只能靠事后翻文件，
+而「父轮提前结束」本身就是被测行为的一部分。改用 pi 官方导出的 `RpcClient`（`--mode rpc`）：
+会话是长寿子进程，什么时候结束由测试决定。
+
+两个使用要点：
+
+- `RpcClient` 缺省的 `cliPath` 是相对 **cwd** 的 `dist/cli.js`，而测试的 cwd 是临时工程，会直接报
+  `Cannot find module '<工程>/dist/cli.js'`。用 `import.meta.resolve("@earendil-works/pi-coding-agent")`
+  解析出包入口，再取同目录的 `cli.js` 显式传入。
+- 取证不依赖父轮被唤醒：后台子代理的 task 要求它把答案写进 `.pi/child-answer.txt`，测试轮询该文件。
+  因为答案里若出现 code 就说明泄露，而父代理**看得见** code（它若代笔就会写成真 code），
+  所以「文件里是 NONE」本身就证明是子代理写的。
+
+判定设计：提问里不含任何 code，code 只存在于被隔离的内容里；再加一个不装扩展的对照组，
+它必须答得出 code——否则「答 NONE」就分不清是剥离生效还是模型没找到内容。
+
+### 标记改用 `main-agent-only:start/end`（2026-11-13）
+
+原本用自定义的 `<!-- main-only -->`，但 buddy-proxy 的 `AGENTS.md` 早已圈好了一段，用的是
+`<!-- main-agent-only:start -->` … `<!-- main-agent-only:end -->`。按实际在用的那套统一，
+不再维护第二种写法（旧标记现在不识别，也不做兼容）。文件名 `.pi/main-only.md` 保持不变——
+那是「整段只给主代理」的第二个机制，与标记不是一回事。

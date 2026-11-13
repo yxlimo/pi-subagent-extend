@@ -35,9 +35,9 @@ const AGENTS = [
   "",
   "Token shared to everyone: SHARED_ALPHA",
   "",
-  "<!-- main-only -->",
+  "<!-- main-agent-only:start -->",
   "Token only for the main agent: MARK_MAIN_ONLY_A",
-  "<!-- /main-only -->",
+  "<!-- main-agent-only:end -->",
   "",
   "## 验收",
   "",
@@ -93,7 +93,7 @@ console.log("pi-subagent-extend context");
   assert.equal(list[0].content.includes("MARK_MAIN_ONLY_A"), false, "标记段被删掉");
   assert.equal(list[0].content.includes("SHARED_ALPHA"), true, "共享段落保留");
   assert.equal(list[0].content.includes("mise run test 全绿"), true, "标记之后的内容保留");
-  assert.equal(list[0].content.includes("<!-- /main-only -->"), false, "标记本身也删掉");
+  assert.equal(list[0].content.includes("<!-- main-agent-only:end -->"), false, "标记本身也删掉");
   assert.equal(result.files, 1);
   assert.ok(result.removedChars > 0);
   assert.deepEqual(result.unbalanced, []);
@@ -112,7 +112,7 @@ console.log("pi-subagent-extend context");
 
 // 3. 标记不闭合时整段保留，并报告出来。
 {
-  const broken = [{ path: "/proj/AGENTS.md", content: "前\n<!-- main-only -->\n只给主代理\n" }];
+  const broken = [{ path: "/proj/AGENTS.md", content: "前\n<!-- main-agent-only:start -->\n只给主代理\n" }];
   const result = stripMarkedSections(broken);
   assert.match(broken[0].content, /只给主代理/, "不闭合时不能删内容");
   assert.deepEqual(result.unbalanced, ["/proj/AGENTS.md"]);
@@ -188,7 +188,7 @@ console.log("pi-subagent-extend context");
 {
   const dir = project(undefined);
   const h = harness(activateChild);
-  const broken = [{ path: "/proj/AGENTS.md", content: "<!-- main-only -->\n漏了闭合\n" }];
+  const broken = [{ path: "/proj/AGENTS.md", content: "<!-- main-agent-only:start -->\n漏了闭合\n" }];
   h.turn(dir, broken);
   assert.equal(h.notes.length, 1, "应当有一条提示");
   assert.match(h.notes[0].message, /没有闭合/);

@@ -3,7 +3,7 @@
  * 说明当前会话是子代理——不需要判断环境变量，前台子代理（同进程、没有
  * PI_SUBAGENT_CHILD）也覆盖得到。
  *
- * 作用只有一件：把 AGENTS.md 里 `<!-- main-only -->` … `<!-- /main-only -->` 圈出的
+ * 作用只有一件：把 AGENTS.md 里 `<!-- main-agent-only:start -->` … `<!-- main-agent-only:end -->` 圈出的
  * 段落从本轮提示词里删掉。其余内容不动。
  *
  * agent 定义里和权限入口一起声明：
