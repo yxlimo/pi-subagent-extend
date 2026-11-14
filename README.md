@@ -15,9 +15,41 @@ pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任�
 ```text
 packages/pi-plugin       pi 扩展   (src/, test/{extension,context}.test.mjs, install.sh, skills/pi-subagent-extend{,-probes,-context}/SKILL.md)
 packages/helper          沙箱 helper (Rust：Landlock + 网络/挂载命名空间，构建产物落到 packages/pi-plugin/bin/)
+scripts/worktree-setup.mjs  pi-subagents 的 worktreeSetupHook（与扩展无关，见「worktree 建好先装依赖」）
 ```
 
 `src/` 下三个入口：`index.ts`（范围与 bash）、`main-context.ts`（主代理侧上下文，随环境加载）、`child-context.ts`（子代理侧剥标记，由 agent 定义声明）。
+
+## worktree 建好先装依赖（worktreeSetupHook）
+
+`subagent({ worktree: true })` 建出的工作树里没有 `node_modules`（被 gitignore），而工作树里那份**指向主仓的符号链接**会让 pnpm 顺着链接装进主仓，链接本身不被替换，层级依旧是错的——`tsc` 因此找不到包。这个故障在子代理启动后才发现，等于白跑一轮。
+
+pi-subagents 官方提供了 `worktreeSetupHook`：每个 worktree 创建后、子代理启动前跑一次。`scripts/worktree-setup.mjs` 就是给它的脚本，配在 `~/.pi/agent/extensions/subagent/config.json`：
+
+```json
+{
+  "worktreeSetupHook": "~/extensions/pi-subagent-extend/scripts/worktree-setup.mjs",
+  "worktreeSetupHookTimeoutMs": 300000
+}
+```
+
+行为（**先探测再装**，健康的树不会被每次 launch 重装）：
+
+| 探测结果 | 动作 |
+| --- | --- |
+| `node_modules` 是真实目录、且（有 tsconfig 时）`tsc --noEmit` 通过 | 跳过 |
+| `node_modules` 缺失 / 是符号链接 / 为空 / `tsc` 不过 | 先 unlink 掉符号链接，再装 |
+
+安装根：根有 `package.json` 或 `pnpm-workspace.yaml` 就装根；否则有界向下（≤2 层）找独立包，跳过 `node_modules` 与点目录——本仓没有根 manifest，包在 `packages/pi-plugin`。锁文件决定包管理器（`pnpm-lock.yaml` → pnpm，`package-lock.json` → npm）。
+
+两个判据上的取舍，都是实测出来的：
+
+- **探针是判据，安装器的退出码只进日志。** pnpm 12 把「有依赖的 build script 没被批准」当作非零退出（`ERR_PNPM_IGNORED_BUILDS`），而依赖其实已装好、`tsc` 也通过；按退出码判失败会误拒每一次 launch。
+- **符号链接必须先 unlink。** 不删链接直接 install，pnpm 会顺着链接写进目标目录，链接本身保留，问题原样存在。
+
+setup 失败时脚本以非零退出并打印路径，启动被拒——宁可不出这一单，也不让子代理在依赖解析不了的树里跑。每次运行的日志在 `~/.cache/pi-worktree-setup/<runId>.log`。
+
+这个脚本服务的是 pi-subagents 的启动流程，跟本扩展的权限/上下文无关，只是恰好维护在同一仓库里。
 
 ## 行为
 

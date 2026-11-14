@@ -192,6 +192,22 @@ packages/pi-plugin/skills/pi-subagent-extend{,-probes,-context}/SKILL.md  三个
 2. **也不能用 `terminate: true`**：pi 在工具批次结束时直接结束本轮，模型仍然拿不到一个 turn 写汇报。
    最终方案：停机只置内部状态，之后每个 tool 边界都返回 `block`（不带 terminate），模型失去工具后自然收敛到输出汇报。
 
+## worktree setup hook（2026-11-14）
+
+需求：worktree 里的 `node_modules` 是指向主仓的符号链接，pnpm 会把它重建成层级错误的相对链接，导致 tsc 找不到包；希望子代理启动前在工作树里先跑特定命令。
+
+查过：pi-subagents 已经官方支持这条，不需要新造——`worktreeSetupHook` + `worktreeSetupHookTimeoutMs`，配在 `~/.pi/agent/extensions/subagent/config.json`，每个 worktree 创建后跑一次，stdin 给 `{repoRoot, worktreePath, agentCwd, branch, index, runId, baseCommit}`，stdout 必须是一个 JSON（`syntheticPaths` 在 diff 前删掉）。
+
+实现：`scripts/worktree-setup.mjs`，先探测再装。三条实测结论：
+
+1. **符号链接必须先 unlink。** 直接 `pnpm install` 会顺着链接装进目标，链接本身不被替换，故障原样存在（同目录下实测确认）。
+2. **探针是判据，安装器退出码只进日志。** pnpm 12 装完所有依赖后仍因 `ERR_PNPM_IGNORED_BUILDS` 返回 1，按退出码判失败会误拒每次 launch。
+3. **安装根要能处理没有根 manifest 的仓。** 本仓包在 `packages/pi-plugin`，只扫一层会扫到 `packages/`（无 package.json）而放过真正的包——改成 ≤2 层有界扫描。
+
+真机验证（本仓，`worktree: true`）：worktree 内 `packages/pi-plugin/node_modules` 是真实目录，`typescript` 解析路径落在 worktree 内部（非主仓），`tsc --noEmit` 退出码 0；hook 日志 `~/.cache/pi-worktree-setup/<runId>.log` 记录 `ready <worktree>/packages/pi-plugin`。
+
+一个容易误判的现象：在 worktree **根**执行 `ls node_modules` / `require.resolve('typescript')` 会失败，因为本仓根本没有根 manifest；判据要放在 `packages/pi-plugin` 下。第一轮实验就是撞了这个，差点误判成 hook 没生效。
+
 ## Agent profile：角色默认值（2026-11-14）
 
 ### 要解决的问题
