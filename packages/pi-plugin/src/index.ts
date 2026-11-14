@@ -4,13 +4,18 @@
  * 设计目标：父代理委派子代理时指定本次任务的文件/目录范围，子代理会话里
  * 范围之外的 tool_call 一律拒绝（fail closed），防止子代理漫无目的地扫仓库。
  *
- * 配置只来自 pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
+ * 配置有两条来源：
+ * 1. pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
  *      extensionBindings: { "pi-subagent-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
- * pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
- * 激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
- * 之后父进程环境被恢复，所以不能在 tool_call 里懒读。
+ *    pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
+ *    激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
+ *    之后父进程环境被恢复，所以不能在 tool_call 里懒读。
+ * 2. agent profile（src/profile.ts）：agent 定义里声明一份两行 loader，角色默认值
+ *    写在项目 .pi/subagent-bindings.json。调用方的 bindings 按 key 覆盖默认值，但
+ *    bash.deny 取并集、不可放宽。profile 是文件，按会话 cwd 读，所以在 session_start
+ *    解析。
  *
- * 没有 bindings 时扩展不生效：父会话和未绑定范围的子代理不受影响。
+ * 两条都没有时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
  * 扩展还随包带一个用法 skill（../skills/pi-subagent-extend），经 resources_discover
  * 注册给会话：扩展加载到哪个会话，父代理侧就能看到「委派时如何传 bindings」的约定，
@@ -38,12 +43,14 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileS
 import { homedir, tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, parseBashRule, type BashRule } from "./bash-match.ts";
+import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-subagent-extend";
+/** agent 角色默认 bindings 的默认位置（相对会话 cwd）。 */
+const PROFILE_FILE = ".pi/subagent-bindings.json";
 /**
  * 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。
  * 三个：范围与 bash 白名单、探针判据与停机语义、上下文隔离（AGENTS.md 标记与主代理专属文件）。
@@ -159,43 +166,95 @@ function positiveInt(value: unknown): number {
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
-/** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace；没有则返回 undefined。 */
-function bindingsPolicy(raw: string | undefined): Policy | undefined {
-	if (!raw?.trim()) return undefined;
+/** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace 配置对象。 */
+function extractCallConfig(raw: string | undefined): { config?: Record<string, unknown>; error?: string } {
+	if (!raw?.trim()) return {};
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch (error) {
-		return denyAll(
-			`${BINDINGS_ENV} 不是合法 JSON（${error instanceof Error ? error.message : String(error)}），全部拒绝`,
-		);
+		return {
+			error: `${BINDINGS_ENV} 不是合法 JSON（${error instanceof Error ? error.message : String(error)}），全部拒绝`,
+		};
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		return denyAll(`${BINDINGS_ENV} 不是 JSON 对象，全部拒绝`);
+		return { error: `${BINDINGS_ENV} 不是 JSON 对象，全部拒绝` };
 	}
 	const record = parsed as Record<string, unknown>;
 	const key = Object.keys(record).find(
 		(k) => k === `${BINDING_NAMESPACE}/1` || k.startsWith(`${BINDING_NAMESPACE}/`),
 	);
 	// 绑定是给别的扩展的，本扩展不参与。
-	if (!key) return undefined;
+	if (!key) return {};
 	const cfg = record[key];
 	if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
-		return denyAll(`extensionBindings ${key} 的配置不是对象，全部拒绝`);
+		return { error: `extensionBindings ${key} 的配置不是对象，全部拒绝` };
 	}
-	const config = cfg as Record<string, unknown>;
+	return { config: cfg as Record<string, unknown> };
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
+/** bash 里的 deny 条目（字符串且非空）。 */
+function bashDenyEntries(bash: unknown): string[] {
+	const cfg = asObject(bash);
+	const deny = cfg?.deny;
+	if (!Array.isArray(deny)) return [];
+	return deny.filter((d): d is string => typeof d === "string" && d.trim() !== "").map((d) => d.trim());
+}
+
+/**
+ * 合并两层配置（profile 默认值与本次调用的 bindings）：调用方的键覆盖默认值的键，
+ * `bash` 整个对象覆盖。但 `bash.deny` 取并集——deny 是限制，调用方不能靠重写 bash
+ * 把项目禁掉的命令要回来。
+ */
+function mergeConfig(
+	base: Record<string, unknown> | undefined,
+	over: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (!base) return over;
+	if (!over) return base;
+	const merged: Record<string, unknown> = { ...base, ...over };
+	const deny = [...new Set([...bashDenyEntries(base.bash), ...bashDenyEntries(over.bash)])];
+	if (deny.length > 0) {
+		const bash = asObject(over.bash) ?? asObject(base.bash) ?? {};
+		merged.bash = { ...bash, deny };
+	}
+	return merged;
+}
+
+/**
+ * 配置对象 → 策略。
+ *
+ * `requireScope` 为 true 时（本次调用的 bindings）scope 必须写成字符串数组，写错
+ * 就全拒；为 false 时（agent profile 的默认值）允许不写 scope：角色的默认值不知道
+ * 本次任务管哪些路径，此时文件访问全拒但 bash 白名单照常可用——漏传 bindings 是
+ * 「响的」失败，不是「什么限制都没有」。
+ */
+function parsePolicyObject(
+	config: Record<string, unknown>,
+	source: string,
+	options: { requireScope: boolean },
+): Policy {
 	const scope = config.scope;
-	if (!Array.isArray(scope) || scope.some((g) => typeof g !== "string" || !g.trim())) {
-		return denyAll(`extensionBindings ${key}.scope 必须是非空字符串数组，全部拒绝`);
+	const scopeGiven = scope !== undefined;
+	if (scopeGiven && (!Array.isArray(scope) || scope.some((g) => typeof g !== "string" || !g.trim()))) {
+		return denyAll(`${source}.scope 必须是字符串数组，全部拒绝`);
 	}
-	const globs = (scope as string[]).map((g) => g.trim()).filter(Boolean);
+	if (!scopeGiven && options.requireScope) {
+		return denyAll(`${source}.scope 缺失，全部拒绝`);
+	}
+	const globs = scopeGiven ? (scope as string[]).map((g) => g.trim()).filter(Boolean) : [];
 	const allowTools = Array.isArray(config.allowTools)
 		? (config.allowTools as unknown[]).filter((t): t is string => typeof t === "string" && t.trim() !== "")
 		: [];
 	return {
 		globs,
 		regexps: compile(globs),
-		source: `extensionBindings ${key}`,
+		source,
 		readOnly: config.readOnly === true,
 		maxReads: positiveInt(config.maxReads),
 		allowTools,
@@ -515,13 +574,72 @@ function preview(globs: string[]): string {
 	return globs.length > 12 ? `${shown} …` : shown;
 }
 
-export default function (pi: ExtensionAPI) {
+export interface ActivateOptions {
+	/** agent 角色的默认 bindings 名；由 profile() 传入。 */
+	profileName?: string;
+	/** profile 文件路径，默认 .pi/subagent-bindings.json（相对会话 cwd）。 */
+	profileFile?: string;
+}
+
+/**
+ * 读 agent 角色的默认 bindings：先取文件里的 "default"，再用该角色名那一层覆盖。
+ * 声明了 profile 却拿不到默认值（文件缺失、JSON 坏、两个键都没有）时返回 error，
+ * 由调用方转成全拒——沉默地退回不设限是最坏的降级。
+ */
+function readProfile(
+	cwd: string,
+	name: string,
+	file?: string,
+): { config?: Record<string, unknown>; source: string; error?: string } {
+	const path = resolve(cwd, file ?? PROFILE_FILE);
+	const shown = path.startsWith(`${cwd}/`) ? relative(cwd, path) : path;
+	const source = `profile ${name}（${shown}）`;
+	if (!existsSync(path)) return { source, error: `${source}：找不到 ${shown}` };
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return { source, error: `${source}：${shown} 不是合法 JSON（${detail}）` };
+	}
+	const table = asObject(parsed);
+	if (!table) return { source, error: `${source}：${shown} 不是 JSON 对象` };
+	if (!("default" in table) && !(name in table)) {
+		return { source, error: `${source}：${shown} 里既没有 "default" 也没有 "${name}"` };
+	}
+	const config = mergeConfig(asObject(table.default), asObject(table[name]));
+	if (!config) return { source, error: `${source}：${shown} 里 "${name}" 与 "default" 都不是对象` };
+	return { config, source };
+}
+
+/**
+ * profile 定下的策略：默认值打底，本次调用的 bindings 覆盖。本次 bindings 自己
+ * 写坏时返回 undefined，由调用方保持全拒——不让 profile 把错误掩盖成「可用」。
+ */
+function profilePolicy(
+	cwd: string,
+	options: ActivateOptions,
+	call: Record<string, unknown> | undefined,
+	callBroken: boolean,
+): Policy | undefined {
+	if (!options.profileName || callBroken) return undefined;
+	const resolved = readProfile(cwd, options.profileName, options.profileFile);
+	if (resolved.error) return denyAll(resolved.error);
+	const merged = mergeConfig(resolved.config, call) ?? {};
+	return parsePolicyObject(merged, resolved.source, { requireScope: false });
+}
+
+export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// bindings 在激活时定格：前台子代理的 bindings 环境变量只在会话启动前存在，
-	// tool_call 里读不到，必须在这里取。
-	const rawBindings = process.env[BINDINGS_ENV];
-	const policy = bindingsPolicy(rawBindings) ?? INACTIVE;
-	const probeCfg = parseProbeConfig(policy.probe);
-	const denyCounter = new DenyCounter(policy.maxDenies);
+	// tool_call 里读不到，必须在这里取。profile 的文件反过来——要按会话 cwd 读，
+	// 所以在 session_start 里解析。
+	const call = extractCallConfig(process.env[BINDINGS_ENV]);
+	let policy: Policy = call.error
+		? denyAll(call.error)
+		: call.config
+			? parsePolicyObject(call.config, `extensionBindings ${BINDING_NAMESPACE}`, { requireScope: true })
+			: INACTIVE;
+	let denyCounter = new DenyCounter(policy.maxDenies);
 	let allowedReads = 0;
 	// 探针要停本轮：abort 是 hard stop，同一个动作可能触发多次，只做一次。
 	let aborted = false;
@@ -535,20 +653,26 @@ export default function (pi: ExtensionAPI) {
 		aborted = true;
 	};
 	let currentCtx: { cwd?: string; actions?: unknown; ui?: unknown } | undefined;
-	const probe =
-		policy.active && probeCfg
-			? new Probe({
-				config: probeCfg,
-				readOnly: policy.readOnly,
-				hooks: {
-					abort: abortNow,
-					warn: (text) => {
-						const ui = currentCtx?.ui as { notify?: (m: string, t?: string) => void } | undefined;
-						ui?.notify?.(`pi-subagent-extend: ${text}`, "warning");
+	let probe: Probe | undefined;
+	/** 按当前 policy 建探针。profile 要到 session_start 才读出，所以这里可重跑。 */
+	const armProbe = () => {
+		const probeCfg = parseProbeConfig(policy.probe);
+		probe =
+			policy.active && probeCfg
+				? new Probe({
+					config: probeCfg,
+					readOnly: policy.readOnly,
+					hooks: {
+						abort: abortNow,
+						warn: (text) => {
+							const ui = currentCtx?.ui as { notify?: (m: string, t?: string) => void } | undefined;
+							ui?.notify?.(`pi-subagent-extend: ${text}`, "warning");
+						},
 					},
-				},
-			})
-			: undefined;
+				})
+				: undefined;
+	};
+	armProbe();
 
 	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
 	// 可用列表；父代理据此知道委派时传 extensionBindings。已上锁的会话不注册——
@@ -557,13 +681,24 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
+		const cwd = ctx.cwd ?? process.cwd();
+		// profile 只在声明了它的入口里生效：agent 的 subagentOnlyExtensions 会加载
+		// 那份两行 loader，主会话不会加载，所以主会话不会被项目默认值误锁。
+		const resolved = profilePolicy(cwd, options, call.config, Boolean(call.error));
+		if (resolved) {
+			probe?.dispose();
+			policy = resolved;
+			denyCounter = new DenyCounter(policy.maxDenies);
+			allowedReads = 0;
+			armProbe();
+		}
 		if (!policy.active) return;
 		const budget = policy.maxReads > 0 ? `，read 预算 ${policy.maxReads} 次` : "";
 		const bash = policy.bash
 			? `，bash ${policy.bash.read.length} 读 / ${policy.bash.write.length} 写`
 			: "，bash 关闭";
 		const probeLine = probe ? "，探针开启" : "";
-		const storeLine = policy.bash ? `，pnpm store ${detectPnpmStore(ctx.cwd ?? process.cwd()).path ?? "探测失败"}` : "";
+		const storeLine = policy.bash ? `，pnpm store ${detectPnpmStore(cwd).path ?? "探测失败"}` : "";
 		const mode = policy.readOnly ? "只读" : "读写";
 		const msg = policy.globs.length
 			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}${probeLine}${storeLine}）`
@@ -628,6 +763,13 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 			if (!command) return deny("pi-subagent-extend: 空的 bash 命令");
+			// 禁止列表先于一切判定：它来自项目 profile，调用方的白名单不能放宽它。
+			const forbidden = deniedEntry(rule, command);
+			if (forbidden) {
+				return deny(
+					`pi-subagent-extend: bash 命令被项目 profile 禁掉："${forbidden}"（来源：${policy.source}）。这条禁令不受 extensionBindings 的白名单影响`,
+				);
+			}
 			if (SHELL_META.test(command)) {
 				return deny(
 					`pi-subagent-extend: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(allEntries(rule))}`,
@@ -736,6 +878,9 @@ export default function (pi: ExtensionAPI) {
 						? `bash 读: ${policy.bash.read.join(" | ") || "（无）"}`
 						: "bash: 关闭",
 					policy.bash ? `bash 写: ${policy.bash.write.join(" | ") || "（无）"}` : undefined,
+					policy.bash && policy.bash.deny.length > 0
+						? `bash 禁（不可放宽）: ${policy.bash.deny.join(" | ")}`
+						: undefined,
 					policy.bash
 						? `沙箱: ${policy.bash.network ? "有网" : "断网"}，${policy.bash.writable ? "scope 可写" : "只读根"}`
 						: undefined,
@@ -752,10 +897,14 @@ export default function (pi: ExtensionAPI) {
 					...(probe ? probe.status() : ["探针: 关闭"]),
 					...policy.globs.map((g) => `  ${g}`),
 				].filter((l): l is string => Boolean(l))
-				: ["未生效（本会话没有 pi-subagent-extend 的 extensionBindings）"];
+				: ["未生效（本会话没有 pi-subagent-extend 的 extensionBindings，也没有声明 profile）"];
 			ctx.ui.notify(`pi-subagent-extend:\n${lines.join("\n")}`, "info");
 		},
 	});
+}
+
+export default function (pi: ExtensionAPI) {
+	activate(pi);
 }
 
 /** 从 tool_result 的 content/result 里抽纯文本。 */

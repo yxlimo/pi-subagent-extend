@@ -31,10 +31,13 @@ function specOf(command) {
   return JSON.parse(readFileSync(match[1], "utf8"))
 }
 
-const { default: activate } = await import(join(repo, "src", "index.ts"))
+const ext = await import(join(repo, "src", "index.ts"))
 
-/** Activate the extension with the given bindings env and return its tool_call handler. */
-async function handler({ bindings, cwd = workdir }) {
+/**
+ * Activate the extension with the given bindings env and return its tool_call handler.
+ * Pass `profile` to activate through the profile loader (per-role defaults).
+ */
+async function handler({ bindings, cwd = workdir, profile, profileFile } = {}) {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
@@ -42,14 +45,14 @@ async function handler({ bindings, cwd = workdir }) {
   const handlers = {}
   const commands = {}
   const ui = []
-  activate({
+  ext.activate({
     on(event, fn) {
       handlers[event] = fn
     },
     registerCommand(name, spec) {
       commands[name] = spec
     },
-  })
+  }, profile ? { profileName: profile, profileFile } : {})
 
   const ctx = { cwd, ui: { notify: (message) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
   const aborts = []
@@ -240,7 +243,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 10. The bundled usage skill ships with the extension via resources_discover.
 {
   const handlers = {}
-  activate({
+  ext.activate({
     on(event, fn) {
       handlers[event] = fn
     },
@@ -269,7 +272,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } })
   const handlers = {}
-  activate({
+  ext.activate({
     on(event, fn) {
       handlers[event] = fn
     },
@@ -728,6 +731,123 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   if (previous === undefined) delete process.env.PI_SUBAGENT_EXTEND_HELPER
   else process.env.PI_SUBAGENT_EXTEND_HELPER = previous
   console.log("  ok   内核 ABI 不足时 bash 被拒绝，文案说清缺的版本")
+}
+
+// 28. A declared profile supplies defaults when the call passes no bindings: file access
+// is denied (the role does not know the task's paths) but its bash allowlist still works.
+{
+  const proj = join(workdir, "proj-profile")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  mkdirSync(join(proj, "src"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({
+      default: { bash: { read: ["mise run typecheck"], write: ["mise run fix"] } },
+      impl: { bash: { read: ["mise run test"], write: ["mise run fix"] } },
+    }),
+  )
+  const h = await handler({ cwd: proj, profile: "impl" })
+  const blocked = await h.call("read", { path: "src/a.ts" })
+  assert.equal(blocked?.block, true, "a profile without scope denies file access")
+  assert.match(blocked.reason, /profile impl/, "the denial names the profile as the source")
+  const input = { command: "mise run test" }
+  assert.equal(await h.call("bash", input), undefined, "the profile's allowlist applies with no bindings")
+  assert.match(input.command, /--spec/, "allowed commands still run under the sandbox")
+  const outside = await h.call("bash", { command: "curl https://example.com" })
+  assert.equal(outside?.block, true, "commands outside the profile allowlist are denied")
+  h.restore()
+  console.log("  ok   profile 默认值：漏传 bindings 时文件全拒、命令只放白名单")
+}
+
+// 29. Profile defaults and the call's bindings merge per key.
+{
+  const proj = join(workdir, "proj-profile")
+  const h = await handler({
+    cwd: proj,
+    profile: "impl",
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
+  })
+  assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "the call's scope applies")
+  const out = await h.call("read", { path: "docs/x.md" })
+  assert.equal(out?.block, true, "the call's scope still bounds reads")
+  assert.match(out.reason, /profile impl/, "source names the profile that supplied defaults")
+  const input = { command: "mise run test" }
+  assert.equal(await h.call("bash", input), undefined, "profile bash applies alongside the call's scope")
+  h.restore()
+  console.log("  ok   profile 与 bindings 按 key 合并")
+}
+
+// 30. The call's bash replaces the profile's bash as a whole object (documented, so that
+// a caller never silently inherits commands it did not write).
+{
+  const proj = join(workdir, "proj-profile")
+  const h = await handler({
+    cwd: proj,
+    profile: "impl",
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0, bash: { read: ["pnpm test"] } },
+    }),
+  })
+  const input = { command: "pnpm test" }
+  assert.equal(await h.call("bash", input), undefined, "the call's allowlist wins")
+  const replaced = await h.call("bash", { command: "mise run test" })
+  assert.equal(replaced?.block, true, "the profile's command is replaced, not merged")
+  h.restore()
+  console.log("  ok   调用方的 bash 整体覆盖 profile 的 bash")
+}
+
+// 31. `bash.deny` is a restriction: it unions across layers and no allowlist re-allows it.
+{
+  const proj = join(workdir, "proj-deny")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({ default: { bash: { read: ["git diff"], deny: ["git stash", "git checkout"] } } }),
+  )
+  const h = await handler({
+    cwd: proj,
+    profile: "review",
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": {
+        scope: ["src/**"],
+        maxDenies: 0,
+        bash: { write: ["git stash", "git checkout --"] },
+      },
+    }),
+  })
+  const stash = await h.call("bash", { command: "git stash" })
+  assert.equal(stash?.block, true, "a deny entry cannot be re-allowed by the caller")
+  assert.match(stash.reason, /禁掉/, "the denial says the command is forbidden")
+  const checkout = await h.call("bash", { command: "git checkout -- src/a.ts" })
+  assert.equal(checkout?.block, true, "deny entries use the same prefix matching")
+  h.restore()
+
+  // Without a call-side bash the profile's own allowlist survives, so its read entries work.
+  const plain = await handler({ cwd: proj, profile: "review" })
+  const diff = await plain.call("bash", { command: "git diff" })
+  assert.equal(diff, undefined, "the profile's own read entry passes when the call sends no bash")
+  const plainStash = await plain.call("bash", { command: "git stash" })
+  assert.equal(plainStash?.block, true, "deny still applies")
+
+  const messages = []
+  await plain.commands.permission.handler("", { cwd: proj, ui: { notify: (m) => messages.push(m) } })
+  assert.match(messages.join("\n"), /bash 禁（不可放宽）/, "/permission shows the non-overridable list")
+  plain.restore()
+  console.log("  ok   bash.deny 不可被 bindings 放宽（含 /permission 可见）")
+}
+
+// 32. A declared profile that cannot be resolved fails closed instead of running open.
+{
+  const proj = join(workdir, "proj-missing")
+  mkdirSync(proj, { recursive: true })
+  const h = await handler({ cwd: proj, profile: "impl" })
+  const blocked = await h.call("read", { path: "a.ts" })
+  assert.equal(blocked?.block, true, "a broken profile denies everything")
+  assert.match(blocked.reason, /找不到/, "the denial says the profile file is missing")
+  const brokenBash = await h.call("bash", { command: "ls" })
+  assert.equal(brokenBash?.block, true, "bash is refused too")
+  h.restore()
+  console.log("  ok   profile 缺失时失败关闭，不是退回不设限")
 }
 
 rmSync(workdir, { recursive: true, force: true })

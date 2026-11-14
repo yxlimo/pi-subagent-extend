@@ -126,10 +126,11 @@ pi-subagent-extend/
 
 ```text
 packages/pi-plugin/src/index.ts            扩展本体（策略解析 + tool_call 拦截 + skill 注册）
+packages/pi-plugin/src/profile.ts          agent 角色默认值入口（profile("writer")）
 packages/pi-plugin/src/context-scope.ts    上下文隔离逻辑（标记剥离、main-only 注入）
 packages/pi-plugin/src/main-context.ts     环境加载入口：主会话注入 / 后台子代理剥标记
 packages/pi-plugin/src/child-context.ts    agent 声明的入口：子代理剥标记
-packages/pi-plugin/test/extension.test.mjs 离线测试（范围与 bash，27 例）
+packages/pi-plugin/test/extension.test.mjs 离线测试（范围、bash、profile，32 例）
 packages/pi-plugin/test/context.test.mjs   离线测试（上下文隔离，10 例）
 packages/pi-plugin/install.sh              装/卸
 packages/helper/src/                       沙箱 helper（spec/namespace/sandbox/supervise）
@@ -190,6 +191,44 @@ packages/pi-plugin/skills/pi-subagent-extend{,-probes,-context}/SKILL.md  三个
    实测同一个任务：带 abort 时最终输出被截断成一行「先确认 typecheck 脚本所在位置」，去掉后是完整汇报。
 2. **也不能用 `terminate: true`**：pi 在工具批次结束时直接结束本轮，模型仍然拿不到一个 turn 写汇报。
    最终方案：停机只置内部状态，之后每个 tool 边界都返回 `block`（不带 terminate），模型失去工具后自然收敛到输出汇报。
+
+## Agent profile：角色默认值（2026-11-14）
+
+### 要解决的问题
+
+`extensionBindings` 只有「每次派单时手写」一个入口。忘了传不是少几条命令的禁令，而是 `tool_call` 开头 `if (!policy.active) return`——**全部限制消失**。授权面于是依赖父代理每次记得写全。
+
+### 为什么不能「项目级运行时自动检测」
+
+查过上游，官方没有声明默认值的位置：
+
+- `docs/agents.md` 的 agent 字段表（到 `memory` 为止）有 `tools`/`excludeTools`/`extensions`/`subagentOnlyExtensions`/`toolBudget`/`acceptance`……**没有 bindings**。
+- `docs/configuration.md` 里 `extension-bindings` 只出现在 `disabledFeatures` 表——那是「禁掉这个 per-call 参数」的开关，不是默认值。
+- 子代理进程能拿到的身份仅三个变量，且都不是通用信号：`PI_SUBAGENT_EXTENSION_BINDINGS`（**只在真传了 bindings 时才设**，`encodeExtensionBindings(undefined) → undefined`）、`PI_SUBAGENT_CHILD` 与 `PI_SUBAGENT_PARENT_SESSION`（**只给后台 runner**，`async-execution.js:555` 是唯一赋值处）。没有 agent 名的环境变量，也没有 `--name`。
+
+所以「忘了传 bindings 的前台子代理」与主会话在环境上**完全一样**，`session_start` 读 `.pi/subagent-bindings.json` 自动生效会连主会话一起锁。受众只能靠加载方式区分。
+
+### 做法
+
+`src/profile.ts` 导出 `profile(name)`，返回一个扩展工厂；agent 在 `subagentOnlyExtensions` 里声明这份两行 loader，主会话不加载，天然 child-only。默认值数据放项目 `.pi/subagent-bindings.json`，按角色分键。
+
+合并语义（`mergeConfig` / `parsePolicyObject`）：
+
+- 调用方的键覆盖 profile，`bash` **整个对象**覆盖（不合并数组，避免静默扩权）。
+- `bash.deny` 取并集，**调用方无法放宽**——这才是用户要的「结构性禁掉」，因为纯默认值会被显式 bindings 覆盖。
+- profile 允许不写 `scope`：文件全拒、命令白名单照用，漏传是响的失败。
+- profile 读不到（文件/JSON/两个键都没有）→ `denyAll`，不退回不设限。
+- 本次 bindings 自己写坏时保持全拒，不让 profile 把它盖成「可用」。
+
+### 实现上的接缝
+
+bindings 必须在 factory 定格（前台子代理的 env 只在会话启动前存在），profile 却是文件、要按会话 `cwd` 读，所以在 `session_start` 解析，并把 `policy`/`probe`/`denyCounter` 从 `const` 改为可重建（`armProbe()`）。
+
+### 验收
+
+离线 32 例（新增 5 例：profile 默认值生效、与 bindings 合并、调用方覆盖 bash、deny 不可放宽含 `/permission` 可见、profile 缺失时失败关闭）。
+
+写测试踩的一个坑：`await plain.call(...)?.block` 会被解析成 `await (promise?.block)`—— `?.` 先绑在 Promise 上，永远得 `undefined`，看起来像策略失效。先 `const r = await …` 再判。
 
 ## 升级为「子代理全套件」与上下文隔离（2026-11-13）
 

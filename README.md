@@ -145,9 +145,55 @@ pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接*
 
 ## 配置来源
 
-只有一条：pi-subagents 的 `extensionBindings`。没有 bindings 时扩展不生效，父会话与未绑定范围的子代理不受影响。已上锁的会话也不再注册下面的用法 skill。
+两条：pi-subagents 的 `extensionBindings`（每次派单时传），以及 agent profile（角色默认值，随 agent 定义声明一次）。都没有时扩展不生效，父会话与未绑定范围的子代理不受影响。已上锁的会话也不再注册下面的用法 skill。
 
 通配符：`**` 任意层目录、`*` 单层内任意字符、`?` 单字符。纯路径 glob 额外匹配该目录自身与其下所有内容：范围写 `src` 或 `src/**` 都覆盖 `src` 全目录。
+
+## Agent profile（角色默认值）
+
+`extensionBindings` 有一个实际的缺口：它只能**每次派单时**由父代理手写，agent 定义里没有声明默认值的地方（pi-subagents 的 frontmatter 字段表里没有 bindings，设置文件里也没有）。忘了传不是「少了三条命令的禁令」，而是 `tool_call` 开头就 `return`——**全部限制消失**。
+
+profile 把默认值挂在「agent 声明了哪个入口」上，因为受众只能靠加载方式区分（前台子代理和主会话在进程内无法区分，见上一节）。
+
+**1. 在项目里写角色默认值** `.pi/subagent-bindings.json`（相对项目根）：
+
+```json
+{
+  "default": { "maxDenies": 3 },
+  "writer": {
+    "bash": {
+      "read": ["git status", "git diff", "git log", "mise run typecheck"],
+      "write": ["mise run test", "mise run check:routing"],
+      "writable": true,
+      "deny": ["git stash", "git checkout", "git reset", "git clean"]
+    }
+  },
+  "review": { "readOnly": true, "bash": { "read": ["git diff", "rg"], "deny": ["git stash"] } }
+}
+```
+
+**2. 每个角色一个两行的 loader**，声明角色名：
+
+```ts
+// .pi/agent-profiles/writer.ts
+import { profile } from "/home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+export default profile("writer");
+```
+
+**3. agent 定义里把它和主入口一起声明**：
+
+```markdown
+subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
+```
+
+合并规则：
+
+- 本次调用的 `extensionBindings` 按 key 覆盖 profile 的默认值；`bash` **整个对象**覆盖（不合并数组，避免静默扩权）。
+- `bash.deny` 取并集，**调用方无法放宽**：项目的骨架命令（`git stash`、`git reset` 之类）即便被写进 `bash.read`/`bash.write` 也进不来。这是「结构性禁掉」和普通白名单的区别。
+- profile 不写 `scope` 是合法的（角色不知道本次任务的路径）：此时文件访问全拒、`bash` 白名单照常可用——漏传 bindings 是**响的**失败，子代理第一次读就被拦并汇报缺什么。
+- 声明了 profile 却读不到（文件缺失、JSON 坏、既无 `default` 也无该角色名）时**全拒**，不会退回「什么限制都没」。
+
+主会话永远不加载这些 loader，所以项目默认值不会误锁主代理。
 
 ## 与 pi-subagents 配合（推荐用法）
 

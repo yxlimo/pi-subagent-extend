@@ -26,8 +26,13 @@ export interface BashRule {
 	 * pnpm store、mise 的 state 目录这类全局可写区，不在 scope 里，但工具链要写。
 	 */
 	writablePaths: string[];
-	/** 注入到沙箱里的环境变量（--setenv）。 */
+	/** 注入到沙箱里的环境变量（写进 spec 的 env 字段）。 */
 	env: Record<string, string>;
+	/**
+	 * 结构性禁掉的命令，**不可被 bindings 放宽**。来自项目 profile 的 bash.deny，
+	 * 与调用方写的 read/write 取并集：即便调用方把同一条命令列进白名单也进不来。
+	 */
+	deny: string[];
 	/**
 	 * 是否给沙箱里的 git 注入全局排除规则（node_modules/、.pnpm-store/）。
 	 * 默认开：防止子代理 `git add -A` 把依赖目录吸进索引。
@@ -85,6 +90,11 @@ export function allEntries(rule: BashRule): string[] {
 	return [...rule.read, ...rule.write];
 }
 
+/** 命中禁止列表时返回该条目原文，否则 undefined。 */
+export function deniedEntry(rule: BashRule, command: string): string | undefined {
+	return rule.deny.find((entry) => commandMatches(entry, command));
+}
+
 function stringList(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return (value as unknown[])
@@ -121,5 +131,6 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 		writablePaths: stringList(cfg.writablePaths),
 		env: stringMap(cfg.env),
 		gitExcludes: cfg.gitExcludes !== false,
+		deny: stringList(cfg.deny),
 	};
 }

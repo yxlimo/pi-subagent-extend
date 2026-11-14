@@ -101,6 +101,7 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 | `bash.writablePaths` | `string[]` | 额外放开写权限的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
 | `bash.env` | `object` | 注入沙箱的环境变量（写进 spec 的 `env`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
 | `bash.gitExcludes` | `boolean` | 默认 `true`。给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`），防止 `git add -A` 把依赖目录吸进索引 |
+| `bash.deny` | `string[]` | 匹配规则同 read/write，但语义相反：命中的命令**一律拒绝，调用方的白名单无法放宽**。通常写在 agent profile 里做项目骨架（`git stash`、`git reset`） |
 
 白名单外的 bash 命令，拒绝文案里会带上探测到的 pnpm store 路径——模型看得见，能把它和「父代理要写什么」一起汇报上来。扩展只探测不自动放行。
 
@@ -108,6 +109,40 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 - 字面量：按空白切词逐 token 前缀匹配。`"pnpm test"` 放行 `pnpm test -t foo`，不放行 `pnpm publish`。
 - `re:` 前缀：正则，整串锚定。`"re: ^pnpm -r (test|build)$"`。不自动猜正则——命令参数常含 `*`、`.`，猜错方向是误授权。
+
+## profile（角色默认值，不用每次传）
+
+`extensionBindings` 只能每次派单时手写，agent 定义里没有声明默认值的位置；忘了传就等于**完全不设限**。profile 让默认值跟 agent 定义走：
+
+```ts
+// .pi/agent-profiles/writer.ts（两行）
+import { profile } from "~/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+export default profile("writer");
+```
+
+```markdown
+---
+name: be-core
+subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
+---
+```
+
+```json
+// .pi/subagent-bindings.json（项目根）
+{
+  "default": { "maxDenies": 3 },
+  "writer": { "bash": { "read": ["mise run typecheck"], "write": ["mise run test"], "writable": true } },
+  "review": { "readOnly": true, "bash": { "read": ["git diff", "rg"], "deny": ["git stash"] } }
+}
+```
+
+规则：
+
+- 本次调用的 bindings 按 key 覆盖 profile；`bash` 整个对象覆盖（不合并数组）。
+- `bash.deny` 取并集且**不可被调用方放宽**——「结构性禁掉」靠它，不靠默认值。
+- profile 可以不写 `scope`：此时文件全拒、命令白名单照常生效（漏传 bindings 是响的失败）。
+- profile 读不到时全拒，不退回不设限。
+- 主会话不加载这些 loader，所以不会误锁主代理。
 
 ## worktree 里的 bash
 
