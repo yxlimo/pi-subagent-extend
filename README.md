@@ -35,58 +35,70 @@ the markers in subagents (declared by the agent definition).
 
 ## worktree initialisation hook (packages/worktree-setup)
 
-This script serves pi-subagents' `worktreeSetupHook`: once a worktree exists and before the
-subagent starts, it runs a command the project declares. It exists because pi-subagents
-links the main checkout's `node_modules` into a new worktree through
-`linkNodeModulesIfPresent`, and pnpm installs through that link, which leaves the virtual
-store at the wrong depth.
+pi-subagents can run a setup hook once a worktree exists and before the subagent starts. This
+repository ships one: a POSIX shell script that runs whatever the project declares. It exists
+because pi-subagents links the main checkout's `node_modules` into a new worktree through
+`linkNodeModulesIfPresent`, and pnpm installs through that link, which leaves the virtual store
+at the wrong depth. Replacing the link with a real install is the fix, and it is the project's
+business, not the tool's.
 
-Only a symlink is installed globally; the script itself is versioned here, since it may
-become an extension:
+Only a symlink is installed globally; the script itself is versioned here:
 
 ```text
-~/.pi/agent/extensions/subagent/worktree-setup.mjs -> packages/worktree-setup/worktree-setup.mjs
+~/.pi/agent/extensions/subagent/worktree-setup.sh -> packages/worktree-setup/worktree-setup.sh
 ```
 
 ```json
 // ~/.pi/agent/extensions/subagent/config.json
 {
-  "worktreeSetupHook": "~/.pi/agent/extensions/subagent/worktree-setup.mjs",
+  "worktreeSetupHook": "~/.pi/agent/extensions/subagent/worktree-setup.sh",
   "worktreeSetupHookTimeoutMs": 300000,
   "worktreeBaseDir": "~/.pi/worktrees"
 }
 ```
 
-**The gate is the project's own file.** The hook runs only when `<repoRoot>/.pi/worktree-setup.json`
-exists; otherwise it exits immediately without doing anything. One global script therefore
-serves every project, and no forwarding layer is needed.
+**A project opts in by committing `.pi/worktree-setup.sh`.** Without that file the hook exits
+immediately and changes nothing, which is why a single global script serves every project. The
+hook runs with the worktree root as its working directory, so the declaration is simply
+sourced there as a script:
 
-```json
-// single-package repository (package.json at the root): cwd is unnecessary
-{ "command": ["pnpm", "install", "--prefer-offline"] }
-
-// multiple packages without a root manifest (this repository): cwd names the directory to install in
-{ "command": ["pnpm", "install", "--prefer-offline"], "cwd": "packages/pi-plugin" }
+```sh
+#!/bin/sh
+# .pi/worktree-setup.sh — single-package repository
+set -eu
+pnpm install --prefer-offline
 ```
 
-`cwd` is not a redundant switch: pnpm fails with `ERR_PNPM_NO_PKG_MANIFEST` when the
-directory has no `package.json`.
+```sh
+#!/bin/sh
+# .pi/worktree-setup.sh — this repository: the manifest lives in packages/pi-plugin, and
+# pnpm fails with ERR_PNPM_NO_PKG_MANIFEST in a directory that has no package.json
+set -eu
+cd packages/pi-plugin
+pnpm install --prefer-offline
+```
 
-The verdict is whether **the tree is usable**, not the command's exit code: `node_modules`
-must be a real directory and the declared dependencies must resolve. pnpm 12 installs every
-package and can still exit with one because of `ERR_PNPM_IGNORED_BUILDS`, and judging by the
-exit code would refuse every launch; this was reproduced.
+Because it is an ordinary shell script, `cd`, conditionals and environment variables need no
+support from the hook.
 
-Two environment facts:
+**The exit code is the whole contract.** The hook does not second-guess what a usable worktree
+is: the declared script decides, and exits non-zero when it did not get one. That matters in
+practice, because pnpm 12 installs every package and then exits non-zero for dependency build
+scripts it was not allowed to run (`ERR_PNPM_IGNORED_BUILDS`); a project that hits this says so
+in its own script rather than relying on the hook to guess.
 
-- The shebang names a concrete node binary rather than `#!/usr/bin/env node`. The `node` on
-  PATH is a mise shim, and when a new worktree's `mise.toml` is not trusted the shim exits
-  at once, so the script never executes a single line and leaves no log. This line must be
-  adjusted on another machine.
-- mise trust is the project's responsibility (`trusted_config_paths`). The script only
-  surfaces the `not trusted` output verbatim; it does not compensate for it.
+On failure the hook prints the last 20 lines of the script's output and the log path. Output is
+kept in `~/.cache/pi-worktree-setup/<worktree directory name>.log`.
 
-Runs are logged to `~/.cache/pi-worktree-setup/<runId>.log`.
+Two boundary notes:
+
+- The hook is POSIX shell, so it runs where a shebang is honoured: Linux, macOS, the BSDs. A
+  Windows hook would have to be a native executable, because pi-subagents starts it with
+  `spawn(hookPath, [], { shell: false })` and Node refuses to run `.cmd`/`.bat` that way.
+- mise trust is the project's responsibility (`trusted_config_paths`). When a worktree's
+  configuration is not trusted, every shimmed command there fails, including `pnpm` in the
+declared script; the hook only names that cause when it sees `not trusted` in the output.
+
 
 ## Behaviour
 
@@ -234,51 +246,24 @@ after it has been rewritten. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary pa
   configuration files included, so inside the sandbox `cat` can still read files outside the
   scope. Read confinement remains the responsibility of `read`, `grep` and their peers.
 
-## Known boundaries between worktrees and pnpm
+## Worktrees, pnpm and mise
 
-pi-subagents links the main checkout's `node_modules` **as a symlink** into a managed
-worktree (`src/runs/shared/worktree.js`, `linkNodeModulesIfPresent`). Consequently:
+A managed worktree is a fresh checkout, so tooling that resolves dependencies per directory
+fails there in ways that stay invisible until a subagent runs something. The symptoms and
+their handling:
 
-- The symlink must be **removed before installing**. pnpm installs through the link into the
-  main checkout and never replaces the link, so the depth stays wrong and `tsc` cannot find
-  its packages. Once the link is gone, installing works: measured in a repository that sets
-  `virtualStoreType: global`, a cold install takes **124 ms** and the symlink case **118 ms**,
-  because a worktree only needs links into the global store.
-- In a project that sets `virtualStoreType: global`, a worktree's `node_modules` holds only
-  symlinks and `node_modules/.pnpm` keeps little more than `lock.yaml`. A project without
-  that setting installs as well, but hardlinks the packages into its own `.pnpm` and is
-  slower.
-- Verifying with dependencies already present works if `pnpm run` skips its pre-install
-  check, which pnpm 12 reads only from `pnpm-workspace.yaml`: set `verifyDepsBeforeRun:
-  false` there.
-- pnpm 12 keeps its lock directory under `XDG_RUNTIME_DIR` (`/run/user/<uid>`) rather than in
-  the store, so under a read-only root even `pnpm run` fails to start. The extension points
-  `XDG_RUNTIME_DIR` at the sandbox's private `/tmp`, which resolves it.
-- mise records a new worktree's `mise.toml` in `~/.local/state/mise/trusted-configs`, and
-  under a read-only root that fails while the configuration is still being parsed. In a
-  worktree the extension points `MISE_STATE_DIR` at the sandbox's private `/tmp`, which
-  avoids the registration.
-- **The host side is blocked by mise as well**, outside any sandbox. When a new worktree's
-  `mise.toml` is not trusted, the shimmed tools such as `node` and `pnpm` all print
-  `Config files in ... are not trusted` and exit. Anything that runs a command in a worktree
-  therefore fails, including the pi-subagents `worktreeSetupHook`, whose own shebang
-  (`#!/usr/bin/env node`) does not survive it: the process dies before executing a line and
-  all that remains is an unverified process tree. The declarative remedy is
-  `trusted_config_paths = ["<worktree root>"]` in `~/.config/mise/config.toml`; the official
-  documentation states that it covers the configuration files at or below each path,
-  including projects created there later.
-- **Inside the sandbox pnpm uses a project-local store by default.** The global store under
-  `~/.local/share/pnpm/store` is not writable under a read-only root, so pnpm detects that
-  and falls back to `<project>/node_modules/.pnpm-store`. Adding the store directory to
-  `bash.writablePaths` makes `pnpm store path` report the global store again; measured, the
-  allowed case returns `~/.local/share/pnpm/store/v11`. Tests pass in either mode, since the
-  project-local store lands in `node_modules`, which is already writable.
-- The side effect is a `.pnpm-store` of tens of megabytes in the project. The extension
-  guarantees through `core.excludesFile` that it cannot enter the git index, and a project
-  should still ignore `node_modules/` in its own `.gitignore`.
-- **Installing dependencies requires network access.** Inside the sandbox pnpm uses the empty
-  project-local store and can only download from the registry, while `bash.network` is off by
-  default, so `pnpm install` cannot succeed in the sandbox unless networking is granted.
+| Symptom | Cause | Handling |
+| --- | --- | --- |
+| `tsc` cannot find its packages after installing in a worktree | pi-subagents links the main checkout's `node_modules` into the worktree, and pnpm installs through that link instead of replacing it | The hook removes the link before installing. A project that sets `virtualStoreType: global` then installs in well under a second. |
+| `pnpm run` refuses to start under a read-only root | pnpm 12 keeps its lock directory under `XDG_RUNTIME_DIR` | The extension points `XDG_RUNTIME_DIR` at the sandbox's private `/tmp`. |
+| mise fails while parsing configuration inside the sandbox | it records a new worktree's `mise.toml` in `~/.local/state/mise/trusted-configs`, which is not writable | The extension points `MISE_STATE_DIR` at the sandbox's private `/tmp`. |
+| Every mise-shimmed tool exits with `Config files ... are not trusted` on the host | a new worktree's `mise.toml` is untrusted, outside the sandbox as well | Declare `trusted_config_paths = ["<worktree root>"]` in `~/.config/mise/config.toml`. Nothing in this package can compensate for it, and the hook's own interpreter therefore bypasses shims. |
+| `pnpm install` fails inside the sandbox | the network is cut and the store is empty | Grant `"network": true` on the command that installs. |
+| A `.pnpm-store` of tens of megabytes appears in the project | the global store is not writable under a read-only root, so pnpm falls back to a project-local one | List the store in `bash.writablePaths` to keep the global store; the extension already keeps `.pnpm-store` out of the git index. |
+
+Verifying with dependencies already present needs `verifyDepsBeforeRun: false` in
+`pnpm-workspace.yaml`, the only file pnpm 12 reads that setting from.
+
 
 ## Context isolation
 
@@ -517,7 +502,14 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 ```
 
 `pnpm test` runs offline against a fake pi and needs no network: 32 scope cases and 10 context
-cases. End-to-end verification is a separate script that runs real sessions with a real model:
+cases. Kernel requirements are met by the helper's own tests (`cargo test` in
+`packages/helper`), and where the kernel's Landlock ABI is below the required 7 the scope
+suite runs against a stub helper that reports ABI 7, saying so in its output.
+
+Continuous integration runs the type check, the helper tests, the offline suites and the
+worktree hook tests on every push to `main` and every pull request. End-to-end verification is
+a separate script that runs real sessions with a real model, and stays out of CI since it
+needs one:
 
 ```bash
 pnpm run test:e2e                     # uses pi's default model
