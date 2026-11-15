@@ -221,6 +221,12 @@ packages/pi-plugin/skills/pi-subagent-extend{,-probes,-context}/SKILL.md  三个
 
 注意：这同时影响子代理本身——它进了 worktree 之后跑 `pnpm`/`tsc` 同样会被 mise 拦住。hook 只是更早撞上。
 
+三条实现约束（都是实测撞出来的）：
+
+- **`worktreeBaseDir` 定在 `~/.pi/worktrees`。** 不配时上游按 `path.dirname(repoRoot)/worktrees` 建，会散落在各项目旁边（实测出现过 `~/tmp/worktrees`、`~/extensions/worktrees` 两处），而信任/清理都得按目录来。
+- **项目配置可以指定执行目录。** 本仓 `cwd: "packages/pi-plugin"`，因为根目录没有 manifest。实测 worktree 里装出来的 `packages/pi-plugin/node_modules` 是真实目录，`typescript` 解析到 worktree 内部而非主仓。
+- **判据是「树能不能用」，不是命令的退出码。** pnpm 12 装完 121 个包后仍因 `ERR_PNPM_IGNORED_BUILDS` 返回 1；按退出码判失败会把每次 launch 都误拒（实测直接复现：worktree 建好、依赖全装好，launch 依然被拒）。现在退出码只进日志，拒绝的条件是 `node_modules` 缺失/是符号链接、或声明的依赖解析不了。Mise trust 那种真失败会以 `not trusted` 出现在报错里。
+
 ## Agent profile：角色默认值（2026-11-14）
 
 ### 要解决的问题
