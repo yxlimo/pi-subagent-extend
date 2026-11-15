@@ -400,11 +400,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   }
   all.restore()
   // A trailing slash is just another way to write the directory.
-  const slash = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["web/src/features/balance/"] } }) })
-  for (const path of ["web/src/features/balance", "web/src/features/balance/api.ts", "web/src/features/balance/a/b/c.ts"]) {
-    assert.equal(await slash.call("ls", { path }), undefined, `"${path}" is inside "web/src/features/balance/"`)
+  const slash = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/auth/"] } }) })
+  for (const path of ["src/auth", "src/auth/login.ts", "src/auth/a/b/c.ts"]) {
+    assert.equal(await slash.call("ls", { path }), undefined, `"${path}" is inside "src/auth/"`)
   }
-  assert.equal((await slash.call("ls", { path: "web/src/other.ts" }))?.block, true, "trailing-slash scope stays narrow")
+  assert.equal((await slash.call("ls", { path: "src/other.ts" }))?.block, true, "trailing-slash scope stays narrow")
   slash.restore()
   console.log("  ok   glob：** 覆盖整棵树，dir/** 与 dir/ 覆盖任意深度，* 不跨层")
 }
@@ -520,14 +520,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "pi-subagent-extend/1": {
         scope: ["src/**"],
         maxDenies: 2,
-        probe: { forbidWritePatterns: ["_tscProbe", ".*\\.src\\.tsx"] },
+        probe: { forbidWritePatterns: ["_tmp-probe", ".*\\.tmp\\.tsx"] },
       },
     }),
   })
-  const junk = await h.call("write", { path: "src/_tscProbe.ts" })
+  const junk = await h.call("write", { path: "src/_tmp-probe.ts" })
   assert.equal(junk?.block, true, "probe artifact path is refused")
   assert.match(junk.reason, /造杂物/)
-  const junk2 = await h.call("write", { path: "src/TestHooks.src.tsx" })
+  const junk2 = await h.call("write", { path: "src/snapshot.tmp.tsx" })
   assert.equal(junk2?.block, true, "regex pattern also refuses")
   assert.equal(await h.call("write", { path: "src/real.ts" }), undefined, "normal writes pass")
 

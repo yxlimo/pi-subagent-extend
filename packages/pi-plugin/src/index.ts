@@ -518,8 +518,7 @@ export function describeHelper(helper: string): HelperCapabilities | undefined {
  * 所以不存在的可写目录要提前滤掉。
  */
 /**
- * 沙箱里默认可写的设备：bwrap 当年靠 `--dev /dev` 提供一份新的 /dev，换成 Landlock
- * 后没人补上，`2>/dev/null` 这种写法会直接 EPERM。
+ * 沙箱里默认可写的设备。没有它们，`2>/dev/null` 这种写法会直接 EPERM。
  */
 const SANDBOX_DEVICE_PATHS = [
 	"/dev/null",

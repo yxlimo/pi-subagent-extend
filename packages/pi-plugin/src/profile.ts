@@ -23,12 +23,13 @@
  *   2. Create a two-line loader per role:
  *
  *      // .pi/agent-profiles/be-core.ts
- *      import { profile } from "/home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+ *      // The path must be absolute: Node does not expand `~` in an import specifier.
+ *      import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
  *      export default profile("be-core");
  *
  *   3. Declare that loader in the agent definition:
  *
- *      subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts, <project>/.pi/agent-profiles/be-core.ts
+ *      subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, <project>/.pi/agent-profiles/be-core.ts
  *
  * Merge rules: the call's `extensionBindings` keys override the profile's keys
  * (`bash` is replaced as a whole object), except `bash.deny` which is unioned — a deny

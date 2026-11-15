@@ -2,7 +2,7 @@
 //
 //   pnpm run test:e2e           跑完整矩阵
 //   PI_E2E_KEEP=1 pnpm run test:e2e   保留临时工程，便于翻会话记录
-//   PI_E2E_MODEL=buddy/coder-b pnpm run test:e2e
+//   PI_E2E_MODEL=<provider>/<model> pnpm run test:e2e   指定模型；缺省用 pi 自身的默认模型
 //
 // 为什么用 RPC 而不是 `pi -p`：`pi -p` 在父代理空闲时就退出，后台子代理还在跑的时候
 // 进程没了，取证只能靠翻文件。RPC 模式（官方导出的 RpcClient）把会话跑成长寿子进程，
@@ -25,7 +25,7 @@ const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 // RpcClient 缺省的 cliPath 是相对 cwd 的 "dist/cli.js"，而这里的 cwd 是临时工程，
 // 所以从包装的入口解析出同目录的 cli.js 显式传进去。
 const PI_CLI = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "cli.js");
-const MODEL = process.env.PI_E2E_MODEL ?? "buddy/coder-a";
+const MODEL = process.env.PI_E2E_MODEL ?? "";
 const KEEP = process.env.PI_E2E_KEEP === "1";
 const CASE_TIMEOUT_MS = Number(process.env.PI_E2E_TIMEOUT_MS ?? 180_000);
 
@@ -59,14 +59,14 @@ const ASK = [
 const ASK_CHILD = `${ASK} Then write exactly those two lines, and nothing else, to ${ANSWER_FILE} relative to your working directory.`;
 
 function agentDefinition(name, tools) {
+	const modelLine = MODEL ? `model: ${MODEL}\n` : "";
 	return `---
 name: ${name}
 description: e2e probe child (${name})
 inheritSkills: false
 inheritProjectContext: true
 tools: ${tools}
-model: ${MODEL}
-subagentOnlyExtensions: ${join(PKG_DIR, "src/index.ts")}, ${join(PKG_DIR, "src/child-context.ts")}
+${modelLine}subagentOnlyExtensions: ${join(PKG_DIR, "src/index.ts")}, ${join(PKG_DIR, "src/child-context.ts")}
 ---
 You are a probe. Answer only what is asked, in exactly the format asked.
 `;
@@ -110,7 +110,7 @@ function finalAssistantText(events) {
 	return "";
 }
 
-const [provider, modelId] = MODEL.includes("/") ? MODEL.split("/", 2) : [undefined, MODEL];
+const [provider, modelId] = MODEL.includes("/") ? MODEL.split("/", 2) : [undefined, MODEL || undefined];
 
 /** 在工程里跑一轮真实会话，返回最终助手文本。 */
 async function runSession(cwd, prompt) {
@@ -139,7 +139,7 @@ function ok(label) {
 	console.log(`  ok   ${label}`);
 }
 
-console.log(`pi-subagent-extend e2e（模型 ${MODEL}）`);
+console.log(`pi-subagent-extend e2e（模型 ${MODEL || "pi 默认"}）`);
 
 const project = makeProject({ withExtension: true });
 const control = makeProject({ withExtension: false });

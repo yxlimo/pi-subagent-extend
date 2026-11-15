@@ -17,12 +17,12 @@ export type BashAccess = "read" | "write";
 export interface BashRule {
 	read: string[];
 	write: string[];
-	/** 允许网络（默认关闭，沙箱里 --unshare-net）。 */
+	/** 允许网络（默认关闭，沙箱内使用私有网络命名空间）。 */
 	network: boolean;
 	/** scope 命中的目录在沙箱里可写（默认只读根）。 */
 	writable: boolean;
 	/**
-	 * 额外绑成可写的路径（绝对路径、`~` 开头或相对 cwd）。
+	 * 额外给予写权限的路径（绝对路径、`~` 开头或相对 cwd）。
 	 * pnpm store、mise 的 state 目录这类全局可写区，不在 scope 里，但工具链要写。
 	 */
 	writablePaths: string[];
