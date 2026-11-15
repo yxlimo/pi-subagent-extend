@@ -75,7 +75,7 @@ description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看�
 agent 定义里两个路径一起写：
 
 ```yaml
-subagentOnlyExtensions: ~/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts, ~/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, /path/to/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
 ```
 
 为什么拆成两个而不是一个文件：**前台子代理和主会话无法从进程内区分**。前台子代理是同进程的会话、没有 `PI_SUBAGENT_CHILD`，和主会话的环境一模一样；后台子代理是独立进程、有该变量。所以「主代理专属」的逻辑只能靠加载方式来定受众，不能靠运行时判断。`main-context.ts` 里那句 `PI_SUBAGENT_CHILD === "1"` 就是用来挡后台子代理的——它同时被环境加载，否则会漏。
@@ -85,11 +85,11 @@ subagentOnlyExtensions: ~/extensions/pi-subagent-extend/packages/pi-plugin/src/i
 pi-subagents 有现成开关：`inheritProjectContext: false` 让子代理**完全不读** AGENTS.md（实现上直接把 `noContextFiles` 打开，连文件都不读）。
 
 - 仓库规则对子代理毫无意义时，用它最省事，零代码。
-- 但仓库规则里只要有一条子代理也该遵守（验收命令、禁推 git、术语），全关就得把这些复制进每个 agent 定义，9 个 agent 就是 9 份重复。
+- 但仓库规则里只要有一条子代理也该遵守（验收命令、禁推 git、术语），全关就得把这些复制进每个 agent 定义，代理一多便成为重复维护。
 
 本 skill 的标记法保留单文件、单份维护。两套不冲突：`inheritProjectContext: false` 时标记自然也没有意义（文件根本没读进来）；为 `false` 的 agent 不需要声明 `child-context.ts`。
 
-另外注意 `context: "fork"` 的子代理拿的是父代理整份系统提示词，project context 一并带过去——那种情况下标记也会被 `child-context.ts` 剥掉，但 `.pi/main-only.md` 的注入已经在父代理提示词里发生了，属于预期外的残留。**要隔离就别用 fork context。**
+另外注意 `context: "fork"` 的子代理：它拿的是父代理整份系统提示词，project context 一并带过去，所以标记会被 `child-context.ts` 剥掉，但 `.pi/main-only.md` 的注入已经在父代理提示词里发生，属于预期外的残留。**要隔离就别用 fork context。**
 
 ## 排查
 

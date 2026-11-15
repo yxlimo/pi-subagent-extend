@@ -7,7 +7,7 @@ description: 给受限子代理配置探针判据时使用：只读空转、原�
 
 范围限制（`scope`）只用来看住「能碰哪些文件」；探针看的是「有没有在推进」。两者共用同一次委派的 `extensionBindings`，namespace 同为 `pi-subagent-extend/1`。
 
-判据全部 fail closed：命中之后不再放行任何工具调用，子代理只能写汇报。
+判据命中即拦截当次 tool_call 并给出理由；达到 stop 条件后**每个** tool 边界都拒绝，子代理只能写汇报。
 
 ## 默认行为
 
@@ -41,7 +41,7 @@ description: 给受限子代理配置探针判据时使用：只读空转、原�
 
 ```json
 "pi-subagent-extend/1": {
-  "scope": ["web/src/features/balance/**"],
+  "scope": ["src/auth/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
   "maxDenies": 3,
   "probe": {
@@ -49,7 +49,7 @@ description: 给受限子代理配置探针判据时使用：只读空转、原�
     "abortGraceMs": 120000,
     "successIdleMs": 300000,
     "successPatterns": ["0 failed"],
-    "forbidWritePatterns": ["_tscProbe", "TestHooks", ".*\\.src\\.tsx"]
+    "forbidWritePatterns": ["scratch/.*", "_tmp-.*"]
   }
 }
 ```
@@ -58,7 +58,7 @@ description: 给受限子代理配置探针判据时使用：只读空转、原�
 
 warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool 边界都拒绝。
 
-停机既不调 `ctx.abort()` 也不用 `terminate`：两者都会把子代理正在写的收尾汇报一起掐掉（实测带 abort 时最终输出只剩一行）。所以被停的子代理**一定能给出汇报**——里面通常写着「已完成什么、缺什么授权、下一步打算」。
+停机既不调 `ctx.abort()` 也不用 `terminate`：两者都会把子代理正在写的收尾汇报一起掐掉，最终输出被截断。所以被停的子代理**一定能给出汇报**——里面通常写着「已完成什么、缺什么授权、下一步打算」。
 
 因此：
 
@@ -70,7 +70,7 @@ warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool �
 
 - 「早可收工」的坑：成功标记命中后只要还有新改动就不停，但任务若在验证之后还要继续做别的事，就会被判「该收工了」。**把验证命令放在任务最后一步**，或者不要给它配这一条。
 - `successPatterns` 默认是 `fail=0` / `0 failed` 这类测试汇总标记；项目用别的输出格式就自己写（如 `no errors`、`All files pass`）。别写成过宽的 `ok`、`passed`——几乎每条命令都会命中。
-- 想限制子代理乱写调试文件，用 `forbidWritePatterns` 点名，如 `_tscProbe`、`TestHooks`、`.*\.src\.tsx`。命中是拒绝单次写入，不停机。
+- 想限制子代理乱写调试文件，用 `forbidWritePatterns` 点名项目自己的临时文件名（如 `scratch/.*`、`_tmp-.*`）。命中是拒绝单次写入，不停机。
 - 同一轮委派里反复出现「原地打转」说明任务描述有问题（要求它重复同一动作），先修任务而不是调大 `repeatBash`。
 - 「撞权限」只统计范围类拒绝。工具参数缺失（没给 path）是另一类问题，改 task 说清路径，不要靠调大 `maxDenies` 掩盖。
 - 探针只管确定性信号。语义层面的漏测、不安全改动，交给 pi-subagents 自带的 LLM watchdog（`subagents.watchdog`），两者互补。
@@ -127,14 +127,7 @@ subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination
 
 ### 等待方式：让出回合，不要 sleep
 
-父代理派完活以后**不要自己 sleep 轮询**——原生完成通知会唤醒会话。而且 sleep 会占着父代理的前台 tool call，让它一直处于忙状态，完成通知于是降级成 steering 消息追加，反而更晚才到。
-
-- 普通 async 子代理：派完就结束这一轮，等通知
-- 必须在当前轮等结果：`bg_wait({ id, stopOnAttention: false })`
-- 长驻交互会话：`bg_wait({ id, nonBlocking: true })`
-- 想中途看进展：`subagent({ action: "status", id, options: { view: "transcript", lines: 80 } })`，按需查，不循环
-
-别拿 `lastUpdate` 当心跳判断存活：runner 每秒在内存推进它，但只在活动分类变化时才重写 `status.json`，一次长时间安静的工具调用会让文件看起来是陈旧的。
+等待方式由 pi-subagents 的 skill 规定，此处不重述：派完活让出回合，靠原生完成通知唤醒；不要 sleep、不要轮询，也不要对普通子代理用 `bg_wait`——sleep 会占着前台 tool call，反而把完成通知降级成 steering。确需在当轮等结果才用 `bg_wait({ id, stopOnAttention: false })`，要中途看进展用 `subagent({ action: "status", id, options: { view: "transcript", lines: 80 } })`，按需查、不循环。`lastUpdate` 不能当心跳：runner 每秒在内存推进它，但只在活动分类变化时才重写 `status.json`。
 
 ### 不要叠加的东西
 
@@ -163,14 +156,14 @@ subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination
 ```json
 // 实现型子代理：范围收窄 + 允许跑验证 + 探针全开
 "pi-subagent-extend/1": {
-  "scope": ["web/src/features/balance/**"],
+  "scope": ["src/auth/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
   "probe": { "idleWriteMs": 360000, "abortGraceMs": 120000 }
 }
 
 // 评审型子代理：只读、范围给到整棵相关树、探针只留默认两条
 "pi-subagent-extend/1": {
-  "scope": ["web/src/features/balance/**", "web/src/lib/**"],
+  "scope": ["src/auth/**", "src/lib/**"],
   "readOnly": true,
   "maxDenies": 3
 }

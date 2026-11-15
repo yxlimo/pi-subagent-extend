@@ -17,7 +17,7 @@ description: 委派 pi-subagents 子代理并限定其任务范围时使用。�
 
 被委派的 agent 必须能加载本扩展，二选一：
 
-- agent 定义 frontmatter 里声明 `subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts`（前台、后台子代理都生效，推荐）；
+- agent 定义 frontmatter 里声明 `subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts`（前台、后台子代理都生效，推荐）；
 - 扩展已全局安装（`~/.pi/agent/extensions/pi-subagent-extend`）且本次委派 `async: true`（后台子代理才走 ambient discovery）。
 
 扩展没加载时 bindings 传了也没用，拦截不会发生。
@@ -64,12 +64,12 @@ subagent(
   options: { worktree: true },
   extensionBindings: {
     "pi-subagent-extend/1": {
-      "scope": ["web/src/features/balance/**"],
+      "scope": ["src/auth/**"],
       "bash": {
         "read": ["pnpm run typecheck"],
         "write": ["pnpm test"],
         "writable": true,
-        "writablePaths": ["/home/shay/.local/share/pnpm/store"]
+        "writablePaths": ["~/.local/share/pnpm/store"]
       }
     }
   }
@@ -97,11 +97,11 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 | `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
 | `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；算作「写入活动」 |
 | `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
-| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录在沙箱内可写（测试产物、快照）；worktree 场景下 worktree 根也会放开写权限 |
+| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录、cwd、worktree 根与 `node_modules` 在沙箱内可写（测试产物、快照） |
 | `bash.writablePaths` | `string[]` | 额外放开写权限的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
 | `bash.env` | `object` | 注入沙箱的环境变量（写进 spec 的 `env`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
 | `bash.gitExcludes` | `boolean` | 默认 `true`。给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`），防止 `git add -A` 把依赖目录吸进索引 |
-| `bash.deny` | `string[]` | 匹配规则同 read/write，但语义相反：命中的命令**一律拒绝，调用方的白名单无法放宽**。通常写在 agent profile 里做项目骨架（`git stash`、`git reset`） |
+| `bash.deny` | `string[]` | 黑名单：命中的命令**一律拒绝，调用方的白名单无法放宽**。通常写在 agent profile 里做项目骨架（`git stash`、`git reset`） |
 
 白名单外的 bash 命令，拒绝文案里会带上探测到的 pnpm store 路径——模型看得见，能把它和「父代理要写什么」一起汇报上来。扩展只探测不自动放行。
 
@@ -116,14 +116,15 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 
 ```ts
 // .pi/agent-profiles/writer.ts（两行）
-import { profile } from "~/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+// 路径必须写绝对路径：Node 不展开 import 里的 `~`
+import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
 export default profile("writer");
 ```
 
 ```markdown
 ---
 name: be-core
-subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
+subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, <项目根>/.pi/agent-profiles/writer.ts
 ---
 ```
 
@@ -148,7 +149,7 @@ subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
 
 子代理跑在 pi-subagents 的 managed worktree 时（`worktree: true`），两件事要额外安排：
 
-- **worktree 的 `node_modules` 是指向主仓的符号链接**，所以 `pnpm install` 在 worktree 里必然失败（pnpm 需要真实的 hoist 目录）。依赖已经就位时不要让子代理装依赖；让 `pnpm run` 不做前置安装（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`）就能正常跑验证。
+- **worktree 的 `node_modules` 是指向主仓的符号链接**：`pnpm install` 会顺着链接装进主仓、链接本身不被替换，层级因此是错的。装之前先删掉链接，删掉后 install 正常——装了 `virtualStoreType: global` 的项目每次只建指向全局 store 的链接，实测百毫秒级。依赖已经就位时用 `verifyDepsBeforeRun: false`（项目侧 `pnpm-workspace.yaml`）跳过前置安装。
 - **pnpm 与 mise 都要写沙箱外的地方**：pnpm 的锁目录在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`），mise 要把 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`。扩展默认把这两处指到沙箱私有 /tmp，所以这两个失败已经不用管；pnpm store 这类真正需要持久可写的地方，用 `bash.writablePaths` 显式给出。
 - **沙箱里 pnpm 用哪个 store 取决于写权限**：全局 store（`~/.local/share/pnpm/store`）在只读根下不可写时，pnpm 探测到就退回 `<项目>/node_modules/.pnpm-store`；把 store 目录写进 `bash.writablePaths`，`pnpm store path` 就仍指向全局 store（实测）。两种都能跑测试——项目内 store 落在本来就可写的 `node_modules/` 下。扩展用 git 全局排除规则保证它进不了索引，但项目自己的 `.gitignore` 也应忽略 `node_modules/`。
 - **沙箱里装依赖需要开网络**（`"network": true`）：无论用哪个 store，装新包都得访问 registry。默认断网时 `pnpm install` 必然失败。
@@ -159,7 +160,7 @@ subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
 - 一律拒绝：`powershell`/`codemode`；`scope`/`allowTools` 之外的未知工具。
 - `contact_supervisor` / `intercom` / `structured_output` 始终放行：子代理中途向监督者转告是正当通道。
 - `bash`：没配白名单时一律拒绝；配了则只有命中 `read`/`write` 两列的命令执行，并且自动改写为
-  helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录只有 scope（`writable` 时）。命令里出现
+  helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录为 scope 命中目录、cwd 与 `node_modules`（`writable` 时）再加上 `writablePaths`。命令里出现
   `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
 - 缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理，`write`/`edit` 必须给 path。这类拒绝不计入撞权限计数，不会把子代理误判成「授权写错」。
 - 范围内会话可用 `/permission` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态。
@@ -173,4 +174,4 @@ subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
 - 沙箱挡越界写与联网，不挡读：跑测试要读整棵树，所以白名单命令在沙箱里仍可 `cat` 范围外文件。不要把 bash 白名单当成「连读也锁住」的手段。
 - 子代理报「bash 命令不在白名单内」时，先判断这条命令是否本任务必需：必需就把它加进对应列重派；不必要就改任务描述，别让它反复试。拒绝文案里会带 pnpm store 的路径——子代理要装依赖时把它抄进 `bash.writablePaths` 即可，不要让它自己去装。
 - 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
-- bindings 总量上限 16 KiB，scope 用简洁 glob 即可；三个 skill 的字段共用同一个 namespace，总量一起算。
+- bindings 总量上限 16 KiB，scope 用简洁 glob 即可；本扩展所有字段共用 namespace `pi-subagent-extend/1`，上限按整个 bindings 计。
