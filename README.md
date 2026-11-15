@@ -114,8 +114,9 @@ scope, mode, bash allowlist, read count, denial count and probe state.
 Four criteria detect a subagent that is going in circles or colliding with its permissions.
 The two error-signal criteria are on by default, since they misfire rarely. The two
 time-based criteria misfire on slow tasks, so they apply only when configured explicitly:
-`"probe": {}` enables every default, a partial object enables only the fields it names, and
-`"probe": false` disables all of them.
+`time-based criteria misfire on slow tasks, so they apply only when configured explicitly:
+`"probe": {}` enables every default, `"probe": true` does the same, a partial object enables
+only the fields it names, and `"probe": false` disables all of them.
 
 | Criterion | Default | Behaviour |
 | --- | --- | --- |
@@ -125,9 +126,10 @@ time-based criteria misfire on slow tasks, so they apply only when configured ex
 | Writing litter | Explicit: `forbidWritePatterns: []` | A `write` or `edit` target matching the pattern is refused outright. |
 
 Write activity means `edit` and `write` calls and commands matching `bash.write`. Commands
-matching `bash.read`, together with `read`, `grep` and `ls`, do not count; otherwise a
+matching `bash.read`, together with `read`, `grep`, `find` and `ls`, do not count; otherwise a
 subagent could circle using read-only bash and escape the criterion. A task with
-`readOnly: true` skips the first two criteria, which are meaningless for it.
+`readOnly: true` skips the two time-based criteria, read-only idling and finished early,
+which are meaningless for it; repeating a command still applies.
 
 `maxDenies` defaults to three and an explicit `0` disables it. After that many consecutive
 refusals by the scope rules, the subagent is warned that the parent most likely authorised
@@ -159,9 +161,10 @@ The helper is the Rust binary in `packages/helper`, built by `pnpm run build:hel
 confines **itself** before calling `exec`, so an allowlisted command is a process whose file
 scope and network are already fixed:
 
-- **Files**: a Landlock ruleset. `/` stays readable and executable, and only the directories
-  named in the spec are writable: the scope, the working directory, `node_modules` and the
-  `bash.writablePaths` entries. A write outside them fails with `EPERM`.
+- **Files**: a Landlock ruleset. `/` stays readable and executable, and only the paths named
+  in the spec are writable: the scope, the working directory, `node_modules`, the
+  `bash.writablePaths` entries, the device nodes below and the host temporary directory. A
+  write outside them fails with `EPERM`.
 - **Network**: a private network namespace, so TCP, UDP and DNS are all unreachable and only
   the loopback interface remains. A private mount namespace additionally shadows the
   `nscd` and `systemd-resolved` unix socket directories with an empty tmpfs, because a unix
@@ -175,14 +178,17 @@ scope and network are already fixed:
   starts, matching the bubblewrap defaults, so `CapEff` and `CapBnd` are both zero.
 - **`/tmp`**: a private tmpfs, unmixed with the host's temporary files. It is skipped when
   the working directory itself lies under `/tmp`, which would otherwise hide it.
-- **Devices**: the baseline device nodes `/dev/null`, `/dev/zero` and `/dev/tty` are
-  writable by default; without them a redirect such as `2>/dev/null` fails outright.
+- **Devices**: the device nodes `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`,
+  `/dev/urandom`, `/dev/tty` and `/dev/pts` are writable by default, those that exist; without
+  them a redirect such as `2>/dev/null` fails outright.
 
-The kernel requirement is **Landlock ABI 7 (Linux 6.15 or later)**, the lowest level that
-also blocks the `open(O_TRUNC)` bypass. Below that the extension does not support the sandbox
-at all rather than offering a weaker one. When the helper is missing, the ABI is too low or
-the host forbids user namespaces, bash stays disabled and the refusal names what is absent.
-`PI_SUBAGENT_EXTEND_HELPER` overrides the binary path.
+The kernel requirement is **Landlock ABI 7 (Linux 6.15 or later)**. Below that the extension
+does not support the sandbox at all rather than falling back to weaker rules. Network
+isolation does not depend on Landlock: it comes from the network namespace, and the resolver
+socket directories are shadowed because a unix socket crosses that namespace. When the helper
+is missing or the ABI is too low, bash stays disabled and the refusal names what is absent;
+a host that forbids unprivileged user namespaces fails the command inside the helper instead,
+after it has been rewritten. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary path.
 
 - An entry takes one of two forms. A literal is split on whitespace and matched token by
   token as a prefix, so `pnpm test` matches `pnpm test -t foo` but not `pnpm publish`. An
@@ -194,8 +200,9 @@ the host forbids user namespaces, bash stays disabled and the refusal names what
   `write` column allows commands that write, such as tests and builds. Both columns are
   grants; the classification only feeds the write-activity criterion. A command matching
   both counts as a write.
-- A command containing metacharacters such as `; & | < > \` $ \` is refused outright, so an
-  allowlist prefix cannot be extended into another command.
+- A command containing metacharacters such as `; & | < > ( )`, a backtick, `$`, a backslash
+  or a newline is refused outright, so an allowlist prefix cannot be extended into another
+  command.
 - The network is cut and the scope is read-only by default, so writes outside the repository
   and any network access are refused. `"writable": true` grants write access to the
   directories matched by the scope, which is where test artefacts land, and `"network": true`
