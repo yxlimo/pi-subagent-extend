@@ -1,0 +1,4 @@
+{
+  "command": ["pnpm", "install", "--prefer-offline"],
+  "cwd": "packages/pi-plugin"
+}
