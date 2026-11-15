@@ -4,6 +4,13 @@
   "description": "Everything a pi session needs around subagents: scope what a delegated subagent may touch, and keep main-agent-only context out of child prompts",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxlimo/pi-subagent-extend.git",
+    "directory": "packages/pi-plugin"
+  },
+  "homepage": "https://github.com/yxlimo/pi-subagent-extend#readme",
+  "bugs": "https://github.com/yxlimo/pi-subagent-extend/issues",
   "keywords": [
     "pi",
     "pi-extension",

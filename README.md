@@ -103,6 +103,7 @@ well.
 | `bash.env` | Environment variables injected into the sandbox. |
 | `powershell` / `codemode` | Always refused: there is no path to judge, so they can escape the scope. |
 | `structured_output` | Allowed; a session-level runtime tool that does not touch the filesystem. |
+| `contact_supervisor` / `intercom` | Always allowed; a subagent asking the supervisor for a decision is a legitimate channel. |
 | Any other unknown tool | Refused, except tools named in `allowTools`; executor-type tools stay refused. |
 
 When a scope is active the session announces it at the start. `/permission` shows the active
@@ -233,12 +234,9 @@ worktree (`src/runs/shared/worktree.js`, `linkNodeModulesIfPresent`). Consequent
 
 - The symlink must be **removed before installing**. pnpm installs through the link into the
   main checkout and never replaces the link, so the depth stays wrong and `tsc` cannot find
-  its packages. Once the link is gone, installing works: measured in buddy-proxy, whose
-  `pnpm-workspace.yaml` sets `virtualStoreType: global`, a cold install takes **124 ms** and
-  the symlink case **118 ms**, because a worktree only needs links into the global store.
-  (An earlier version of this document claimed installation always fails in a worktree
-  because pnpm requires a real hoist directory. That treated the symlink as an unavoidable
-  property of the worktree layout; measurement refutes it.)
+  its packages. Once the link is gone, installing works: measured in a repository that sets
+  `virtualStoreType: global`, a cold install takes **124 ms** and the symlink case **118 ms**,
+  because a worktree only needs links into the global store.
 - In a project that sets `virtualStoreType: global`, a worktree's `node_modules` holds only
   symlinks and `node_modules/.pnpm` keeps little more than `lock.yaml`. A project without
   that setting installs as well, but hardlinks the packages into its own `.pnpm` and is
@@ -382,7 +380,8 @@ the project root:
 
 ```ts
 // .pi/agent-profiles/writer.ts
-import { profile } from "/home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+// The path must be absolute: Node does not expand `~` in an import specifier.
+import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
 export default profile("writer");
 ```
 
@@ -422,7 +421,7 @@ preferred, as that covers both foreground and background subagents:
 ---
 name: worker
 description: Implements a task within the given scope
-subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts
+subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts
 ---
 ```
 
@@ -514,8 +513,8 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cases. End-to-end verification is a separate script that runs real sessions with a real model:
 
 ```bash
-pnpm run test:e2e                     # defaults to buddy/coder-a
-PI_E2E_MODEL=buddy/coder-b pnpm run test:e2e
+pnpm run test:e2e                     # uses pi's default model
+PI_E2E_MODEL=<provider>/<model> pnpm run test:e2e
 PI_E2E_KEEP=1 pnpm run test:e2e       # keep the temporary project to inspect the transcripts
 ```
 
