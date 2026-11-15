@@ -1,3 +1,6 @@
 node_modules/
 *.log
 *.tsbuildinfo
+
+# 内部文档：开发日志、实测记录，不对外
+docs/internal/
