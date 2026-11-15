@@ -15,41 +15,9 @@ pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任�
 ```text
 packages/pi-plugin       pi 扩展   (src/, test/{extension,context}.test.mjs, install.sh, skills/pi-subagent-extend{,-probes,-context}/SKILL.md)
 packages/helper          沙箱 helper (Rust：Landlock + 网络/挂载命名空间，构建产物落到 packages/pi-plugin/bin/)
-scripts/worktree-setup.mjs  pi-subagents 的 worktreeSetupHook（与扩展无关，见「worktree 建好先装依赖」）
 ```
 
 `src/` 下三个入口：`index.ts`（范围与 bash）、`main-context.ts`（主代理侧上下文，随环境加载）、`child-context.ts`（子代理侧剥标记，由 agent 定义声明）。
-
-## worktree 建好先装依赖（worktreeSetupHook）
-
-`subagent({ worktree: true })` 建出的工作树里没有 `node_modules`（被 gitignore），而工作树里那份**指向主仓的符号链接**会让 pnpm 顺着链接装进主仓，链接本身不被替换，层级依旧是错的——`tsc` 因此找不到包。这个故障在子代理启动后才发现，等于白跑一轮。
-
-pi-subagents 官方提供了 `worktreeSetupHook`：每个 worktree 创建后、子代理启动前跑一次。`scripts/worktree-setup.mjs` 就是给它的脚本，配在 `~/.pi/agent/extensions/subagent/config.json`：
-
-```json
-{
-  "worktreeSetupHook": "~/extensions/pi-subagent-extend/scripts/worktree-setup.mjs",
-  "worktreeSetupHookTimeoutMs": 300000
-}
-```
-
-行为（**先探测再装**，健康的树不会被每次 launch 重装）：
-
-| 探测结果 | 动作 |
-| --- | --- |
-| `node_modules` 是真实目录、且（有 tsconfig 时）`tsc --noEmit` 通过 | 跳过 |
-| `node_modules` 缺失 / 是符号链接 / 为空 / `tsc` 不过 | 先 unlink 掉符号链接，再装 |
-
-安装根：根有 `package.json` 或 `pnpm-workspace.yaml` 就装根；否则有界向下（≤2 层）找独立包，跳过 `node_modules` 与点目录——本仓没有根 manifest，包在 `packages/pi-plugin`。锁文件决定包管理器（`pnpm-lock.yaml` → pnpm，`package-lock.json` → npm）。
-
-两个判据上的取舍，都是实测出来的：
-
-- **探针是判据，安装器的退出码只进日志。** pnpm 12 把「有依赖的 build script 没被批准」当作非零退出（`ERR_PNPM_IGNORED_BUILDS`），而依赖其实已装好、`tsc` 也通过；按退出码判失败会误拒每一次 launch。
-- **符号链接必须先 unlink。** 不删链接直接 install，pnpm 会顺着链接写进目标目录，链接本身保留，问题原样存在。
-
-setup 失败时脚本以非零退出并打印路径，启动被拒——宁可不出这一单，也不让子代理在依赖解析不了的树里跑。每次运行的日志在 `~/.cache/pi-worktree-setup/<runId>.log`。
-
-这个脚本服务的是 pi-subagents 的启动流程，跟本扩展的权限/上下文无关，只是恰好维护在同一仓库里。
 
 ## 行为
 
@@ -127,10 +95,13 @@ helper 是 `packages/helper` 里的 Rust 二进制（`pnpm run build:helper` 构
 
 pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接**进 worktree（`src/runs/shared/worktree.js: linkNodeModulesIfPresent`）。由此：
 
-- `pnpm install` 在 worktree 里必然失败：pnpm 需要真实的 hoist 目录（`workspace hoist directory is not a real directory`）。这与沙箱无关，是 worktree 布局本身。
+- 那个符号链接必须**先删掉**再装：pnpm 会顺着链接装进主仓，链接本身不被替换，层级因此是错的（`tsc` 找不到包）。删掉链接后 install 正常——实测 buddy-proxy（`pnpm-workspace.yaml` 里 `virtualStoreType: global`）冷装 **124ms**、符号链接场景 **118ms**，因为每个 worktree 只需要建指向全局 store 的链接。
+  （此前这里写着「在 worktree 里必然失败：pnpm 需要真实的 hoist 目录」——那是把符号链接这个前提当成了 worktree 布局的必然结果，实测不成立。）
+- 装了 `virtualStoreType: global` 的项目，worktree 里的 `node_modules` 只有符号链接，`node_modules/.pnpm` 只留 `lock.yaml` 之类的小文件；没配这个开关的项目同样能装，只是要把包硬链接进各自的 `.pnpm`，慢一些。
 - 依赖已就位的验证命令可以用：让 `pnpm run` 不做前置安装即可（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`，pnpm 12 的设置只认这个文件）。
 - pnpm 12 把锁目录放在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`）而不是 store 下，所以只读根下连 `pnpm run` 都起不来。扩展默认把 `XDG_RUNTIME_DIR` 指向沙箱私有 /tmp 解决这一条。
 - mise 在 worktree 里要把新 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`，只读根下会在解析配置阶段就失败。扩展在 worktree 场景把 `MISE_STATE_DIR` 指向沙箱私有 /tmp，免掉这次登记。
+- **宿主侧（不在沙箱里）同样会被 mise 拦住**：新 worktree 的 `mise.toml` 未信任时，`node`、`pnpm` 这些 mise shim 一律报 `Config files in ... are not trusted` 并退出。所以任何在 worktree 里跑命令的东西都会挂，包括 pi-subagents 的 `worktreeSetupHook` —— 连它的 shebang（`#!/usr/bin/env node`）都过不去，进程在执行任何一行之前就死了，只剩一个「进程树未收敛」的报错。声明式解法是 `~/.config/mise/config.toml` 里写 `trusted_config_paths = ["<worktree 根>"]`（官方文档：覆盖该路径及其下所有配置文件，包括以后新建的）。
 - **沙箱里 pnpm 默认用项目内 store**：全局 store（`~/.local/share/pnpm/store`）在只读根下不可写，pnpm 探测到之后退回 `<项目>/node_modules/.pnpm-store`。把 store 目录写进 `bash.writablePaths`，`pnpm store path` 就仍然指向全局 store（实测：放行后返回 `~/.local/share/pnpm/store/v11`）。两种都能跑测试——项目内 store 落在 `node_modules/`，那里本来就可写。
 - 副作用是项目里可能多出一个几十 MB 的 `.pnpm-store`——扩展用 `core.excludesFile` 保证它进不了 git 索引，但项目自己的 `.gitignore` 仍应忽略 `node_modules/`。
 - **装依赖需要联网**：沙箱内 pnpm 用的是项目内的空 store，只能从 registry 下载。`bash.network` 默认关闭，所以 `pnpm install` 在沙箱里必然失败，除非显式开网络。

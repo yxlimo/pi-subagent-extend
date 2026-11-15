@@ -194,19 +194,32 @@ packages/pi-plugin/skills/pi-subagent-extend{,-probes,-context}/SKILL.md  三个
 
 ## worktree setup hook（2026-11-14）
 
-需求：worktree 里的 `node_modules` 是指向主仓的符号链接，pnpm 会把它重建成层级错误的相对链接，导致 tsc 找不到包；希望子代理启动前在工作树里先跑特定命令。
+需求：worktree 里的 `node_modules` 是指向主仓的符号链接，pnpm 会顺着它装进主仓、链接本身不被替换，层级因此是错的，tsc 找不到包；希望子代理启动前在工作树里先跑特定命令。
 
-查过：pi-subagents 已经官方支持这条，不需要新造——`worktreeSetupHook` + `worktreeSetupHookTimeoutMs`，配在 `~/.pi/agent/extensions/subagent/config.json`，每个 worktree 创建后跑一次，stdin 给 `{repoRoot, worktreePath, agentCwd, branch, index, runId, baseCommit}`，stdout 必须是一个 JSON（`syntheticPaths` 在 diff 前删掉）。
+查过：pi-subagents 已官方支持——`worktreeSetupHook` + `worktreeSetupHookTimeoutMs`，每个 worktree 创建后跑一次，stdin 给 `{repoRoot, worktreePath, agentCwd, branch, index, runId, baseCommit}`，stdout 必须是一个 JSON（`syntheticPaths` 在 diff 前删掉）。
 
-实现：`scripts/worktree-setup.mjs`，先探测再装。三条实测结论：
+**归属：不属于本扩展。** 脚本放在 `~/.pi/agent/extensions/subagent/worktree-setup.mjs`（与引用它的 config 同目录），本仓不再保留副本。理由是它服务的是 pi-subagents 的启动流程，与权限/上下文无关。
 
-1. **符号链接必须先 unlink。** 直接 `pnpm install` 会顺着链接装进目标，链接本身不被替换，故障原样存在（同目录下实测确认）。
-2. **探针是判据，安装器退出码只进日志。** pnpm 12 装完所有依赖后仍因 `ERR_PNPM_IGNORED_BUILDS` 返回 1，按退出码判失败会误拒每次 launch。
-3. **安装根要能处理没有根 manifest 的仓。** 本仓包在 `packages/pi-plugin`，只扫一层会扫到 `packages/`（无 package.json）而放过真正的包——改成 ≤2 层有界扫描。
+**闸门是项目自己的配置文件，不是环境探测。** `<repoRoot>/.pi/worktree-setup.json` 存在才执行，内容声明要跑什么：
 
-真机验证（本仓，`worktree: true`）：worktree 内 `packages/pi-plugin/node_modules` 是真实目录，`typescript` 解析路径落在 worktree 内部（非主仓），`tsc --noEmit` 退出码 0；hook 日志 `~/.cache/pi-worktree-setup/<runId>.log` 记录 `ready <worktree>/packages/pi-plugin`。
+```json
+{ "command": ["pnpm", "install", "--prefer-offline"], "cwd": "." }
+```
 
-一个容易误判的现象：在 worktree **根**执行 `ls node_modules` / `require.resolve('typescript')` 会失败，因为本仓根本没有根 manifest；判据要放在 `packages/pi-plugin` 下。第一轮实验就是撞了这个，差点误判成 hook 没生效。
+没有这个文件 → 什么都不做（实测 1ms 退出）。这样全局只有一份脚本，项目各自声明自己的步骤，不需要「全局转发到项目脚本」这种中间层。早先版本用「项目是 pnpm 管理且主仓有 node_modules」当闸门，被否掉了：环境推断出来的意图不如显式声明。
+
+三条实测结论：
+
+1. **符号链接必须先 unlink。** 直接 `pnpm install` 会顺着链接装进目标，链接本身不被替换，故障原样存在。
+2. **安装成本几乎为零，只要项目配了 `virtualStoreType: global`。** 这是 pnpm 官方给 git worktree 的建议（`https://pnpm.io/git-worktrees`），worktree 的 `node_modules` 只含指向全局 store 的符号链接。实测 buddy-proxy：冷装 124ms、符号链接场景 118ms。所以「worktree 挂掉被删、下次要重装」不再是问题，之前设想的 `cp -al` 缓存方案纯属多余。
+3. **worktree 不能落在项目内。** 上游直接拒绝：`worktree.js:591` `if (isPathInside(resolvedRepoRoot, resolvedLeaf)) throw new Error("worktree path would land inside the repository checkout")`，且必须是 `<worktreeBaseDir>/<仓库名>` 的严格子目录。`<project>/.worktrees` 这条路除非打补丁，否则不存在。
+
+**环境坑（宿主侧，不是沙箱侧）**：新 worktree 里的 `mise.toml` 未信任时，`node`/`pnpm` 等 mise shim 一律报 `Config files in ... are not trusted` 并退出。hook 的 shebang `#!/usr/bin/env node` 因此直接死在第一行，一行日志都写不出来，pi 只报「进程树未收敛」。两处应对：
+
+- hook 的 shebang 改用具体 node 路径（`/run/current-system/sw/bin/node`），并在命令失败且输出含 `not trusted` 时给出 `trusted_config_paths` 的提示——**报错要暴露成可执行的线索**，不能只剩退出码。
+- 根治是声明式的：`~/.config/mise/config.toml` 里 `trusted_config_paths = ["<worktree 根>"]`，官方文档写明覆盖该路径及其下所有配置文件，包括以后新建的。配合把 `worktreeBaseDir` 固定到一个目录，就不会散落在各项目旁边（实测散在 `~/tmp/worktrees`、`~/extensions/worktrees` 两处）。
+
+注意：这同时影响子代理本身——它进了 worktree 之后跑 `pnpm`/`tsc` 同样会被 mise 拦住。hook 只是更早撞上。
 
 ## Agent profile：角色默认值（2026-11-14）
 
