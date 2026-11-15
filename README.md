@@ -112,6 +112,7 @@ well.
 | `grep` / `find` / `ls` | As above, with a missing path defaulting to the working directory. |
 | `bash` | Refused entirely without an allowlist. With one, only commands matching `bash.read` or `bash.write` are allowed, and they are rewritten to run under the sandbox helper, which enforces the file scope through Landlock, cuts the network by default and grants write access to the scope only when `writable` is set. A command containing shell metacharacters is refused. |
 | `bash.writablePaths` | Additional writable paths, for globally writable areas such as the pnpm store or the mise state directory. |
+| `bash.writable` in a linked worktree | The worktree root plus the repository's common git directory (`git rev-parse --git-common-dir`). The index and refs live there, so without it `git add`, `git commit`, `git stash` and `git switch -c` fail on `<common>/worktrees/<id>/index.lock` or `<common>/refs`. A read-only sandbox gets neither. |
 | `bash.env` | Environment variables injected into the sandbox. |
 | `powershell` / `codemode` | Always refused: there is no path to judge, so they can escape the scope. |
 | `structured_output` | Allowed; a session-level runtime tool that does not touch the filesystem. |
@@ -143,16 +144,17 @@ subagent could circle using read-only bash and escape the criterion. A task with
 `readOnly: true` skips the two time-based criteria, read-only idling and finished early,
 which are meaningless for it; repeating a command still applies.
 
-`maxDenies` defaults to three and an explicit `0` disables it. After that many consecutive
-refusals by the scope rules, the subagent is warned that the parent most likely authorised
-the wrong paths and should be told what is missing; one more refusal stops the turn.
+`maxDenies` defaults to five and an explicit `0` disables it. After that many consecutive
+grant refusals the subagent is warned that the parent most likely authorised the wrong paths,
+and is told to escalate; one more refusal ends the run.
 
-Stopping does not call `ctx.abort()`. A hard abort also kills the summary the model is
-writing, so the parent receives nothing but a tool error. The extension instead latches a
-stopped state and refuses every later call, so the model, having lost its tools, finishes its
-conclusions and the parent receives a complete report. Both variants were measured: with
-`terminate` the report was truncated to a single line, and without it the report was
-complete.
+The stop is a hard one: every blocked result carries `terminate`, so pi ends the turn as soon
+as the whole batch is terminating. There is no closing report after a stop — the parent reads
+what the subagent produced before it, plus the refusal text. That is why the escalation path
+matters: `contact_supervisor` and `intercom` are checked before every stop mechanism, so a
+subagent being refused can still report what it is missing. Measured in a real session: after
+the second counted refusal the run went straight to `agent_end` with no further assistant
+message.
 
 ### The bash allowlist and the sandbox
 
@@ -355,7 +357,7 @@ the project root:
 
 ```json
 {
-  "default": { "maxDenies": 3 },
+  "default": { "maxDenies": 5 },
   "writer": {
     "bash": {
       "read": ["git status", "git diff", "git log", "mise run typecheck"],
@@ -505,21 +507,36 @@ which loads `index.ts` and `main-context.ts`, that is the `pi.extensions` entry 
 cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 ```
 
-`pnpm test` runs offline against a fake pi and needs no network: 32 scope cases and 10 context
-cases. Kernel requirements are met by the helper's own tests (`cargo test` in
-`packages/helper`), and where the kernel's Landlock ABI is below the required 7 the scope
-suite runs against a stub helper that reports ABI 7, saying so in its output.
+`pnpm test` runs three layers, all offline: no model, no network beyond localhost.
 
-Continuous integration runs the type check, the helper tests, the offline suites and the
-worktree hook tests on every push to `main` and every pull request. End-to-end verification is
-a separate script that runs real sessions with a real model, and stays out of CI since it
-needs one:
+1. **Scope suite** (36 cases) and **context suite** (10 cases) check the extension's own
+   judgement against a fake pi API. Kernel requirements are met by the helper's own tests
+   (`cargo test` in `packages/helper`), and where the kernel's Landlock ABI is below the
+   required 7 the scope suite runs against a stub helper that reports ABI 7, saying so in its
+   output.
+2. **Mock session suite** (4 cases) runs a real pi process driven by `test/mock-llm.mjs`, a
+   dependency-free OpenAI-compatible server. The "model" is a script of tool calls, so the
+   boundaries are exact rather than left to chance: whether a run continued is simply whether
+   the next script step was requested. It covers the hard stop, the rescue-channel exemption
+   inside a mixed batch, an in-scope control, and the regression where a call after a stop must
+   report the stop reason instead of a fresh verdict on its own path.
+
+Continuous integration runs the type check, the helper tests and all three offline suites on
+every push to `main` and every pull request.
+
+Real-model runs are for final debugging only, never part of `pnpm test`, and are driven by
+hand:
 
 ```bash
-pnpm run test:e2e                     # uses pi's default model
-PI_E2E_MODEL=<provider>/<model> pnpm run test:e2e
-PI_E2E_KEEP=1 pnpm run test:e2e       # keep the temporary project to inspect the transcripts
+pnpm run test:llm                     # uses pi's default model
+PI_E2E_MODEL=<provider>/<model> pnpm run test:llm
+PI_E2E_KEEP=1 pnpm run test:llm       # keep the temporary project to inspect the transcripts
 ```
+
+A boundary a real-model run reveals comes back as a scripted case in
+`test/mock-session.test.mjs`, so the suite stays deterministic. The mock exposes its request
+log, which is what makes "the run ended" assertable: `mock.requests.length` counts the turns
+pi actually asked for.
 
 It creates a disposable project holding an `AGENTS.md` with markers, a `.pi/main-only.md`, a
 `.pi/extensions/` symlink and two agent definitions, then runs four sessions: the main session,
@@ -529,10 +546,11 @@ content: the main session and the control must produce them, while both subagent
 `NONE`.
 
 `pi -p` is unsuitable because it exits as soon as the parent agent becomes idle, which loses
-the process while a background subagent is still running. The script therefore drives RPC mode
-through the officially exported `RpcClient`, a long-lived child process whose lifetime the
-test controls, so the parent turn cannot end early. The background subagent writes its answer
-to a file itself, so collecting that evidence does not depend on the parent turn being woken.
+the process while a background subagent is still running. Both session-level suites therefore
+drive RPC mode through the officially exported `RpcClient`, a long-lived child process whose
+lifetime the test controls, so the parent turn cannot end early. The background subagent
+writes its answer to a file itself, so collecting that evidence does not depend on the parent
+turn being woken.
 
 Offline tests never call a model and only verify scope decisions and context isolation:
 `node test/extension.test.mjs` and `node test/context.test.mjs`, both run by `pnpm test`. The

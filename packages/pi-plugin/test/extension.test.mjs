@@ -96,11 +96,13 @@ async function handler({ bindings, cwd = workdir, profile, profileFile } = {}) {
   const call = async (toolName, input) =>
     handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx)
   const result = async (toolName, content) =>
-    handlers.tool_result?.({ type: "tool_result", toolName, content }, ctx)
+    handlers.tool_result?.({ type: "tool_result", toolCallId: "t1", toolName, input: {}, content, isError: false }, ctx)
+  const context = async (messages) => handlers.context?.({ type: "context", messages }, ctx)
 
   return {
     call,
     result,
+    context,
     aborts,
     ui,
     commands,
@@ -178,7 +180,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const outside = await h.call("read", { path: "docs/design.md" })
   assert.equal(outside?.block, true, "out-of-scope read is blocked")
-  assert.match(outside.reason, /任务范围/, "block reason names the scope")
+  assert.match(outside.reason, /outside this task's scope/, "block reason names the scope")
   const editOutside = await h.call("write", { path: "docs/notes.md" })
   assert.equal(editOutside?.block, true, "out-of-scope write is blocked")
 
@@ -204,7 +206,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read-only read passes")
   const edit = await h.call("edit", { path: "src/a.ts" })
   assert.equal(edit?.block, true, "read-only edit is blocked")
-  assert.match(edit.reason, /只读/, "block reason says read-only")
+  assert.match(edit.reason, /read-only/, "block reason says read-only")
   h.restore()
   console.log("  ok   readOnly 时范围内也禁止 edit/write")
 }
@@ -223,7 +225,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({ bindings: "{not json" })
   const read = await h.call("read", { path: "src/a.ts" })
   assert.equal(read?.block, true, "malformed bindings deny reads")
-  assert.match(read.reason, /不是合法 JSON/, "block reason names the parse error")
+  assert.match(read.reason, /not valid JSON/, "block reason names the parse error")
   h.restore()
   console.log("  ok   bindings 损坏时 fail closed 并说明原因")
 }
@@ -245,7 +247,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("read", { path: "src/b.ts" }), undefined, "read 2 passes")
   const third = await h.call("read", { path: "src/c.ts" })
   assert.equal(third?.block, true, "read 3 is denied by the budget")
-  assert.match(third.reason, /预算/, "block reason names the budget")
+  assert.match(third.reason, /read budget/, "block reason names the budget")
   assert.equal(await h.call("grep", { path: "src" }), undefined, "grep does not consume the read budget")
   h.restore()
   console.log("  ok   maxReads 限制 read 次数")
@@ -267,7 +269,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
   const grep = await h.call("grep", { pattern: "x" })
   assert.equal(grep?.block, true, "pathless grep (cwd) is out of scope here")
-  assert.match(grep.reason, /任务范围/, "block reason teaches the scope")
+  assert.match(grep.reason, /outside (this task's |the )?scope/, "block reason teaches the scope")
   h.restore()
   console.log("  ok   缺省 path 视为 cwd 并按范围判定")
 }
@@ -351,7 +353,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const other = { command: "pnpm publish" }
   const denied = await h.call("bash", other)
   assert.equal(denied?.block, true, "unlisted command is denied")
-  assert.match(denied.reason, /不在白名单内/)
+  assert.match(denied.reason, /not in the allowlist/)
   assert.equal(other.command, "pnpm publish", "denied command is left untouched")
 
   const inject = { command: "pnpm test; cat /etc/passwd" }
@@ -472,7 +474,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const p = new Probe({
     config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 1000 },
     readOnly: false,
-    hooks: { abort: () => {}, warn: () => {} },
+    hooks: { warn: () => {} },
     host: clock.host,
   })
   // Read-only command: idle window survives the call.
@@ -487,35 +489,33 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   read 列 bash 不重置空转计时器，write 列重置")
 }
 
-// 18. Idle probe: warn at the boundary, abort once the grace runs out.
+// 18. Idle probe: warn at the boundary, stop once the grace runs out.
 {
   const { Probe } = await import(join(repo, "src", "probe.ts"))
   const clock = fakeClock()
-  const aborted = []
   const warned = []
   const p = new Probe({
     config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 500 },
     readOnly: false,
-    hooks: { abort: () => aborted.push(1), warn: (t) => warned.push(t) },
+    hooks: { warn: (t) => warned.push(t) },
     host: clock.host,
   })
   clock.advance(1000)
   const warn = p.atToolBoundary()
   assert.equal(warn?.stop, false, "first boundary warns")
-  assert.match(warn.reason, /只读空转/)
+  assert.match(warn.reason, /criterion: idle/i)
   clock.advance(500)
-  assert.equal(aborted.length, 0, "the grace timer does not hard-abort (the model keeps its chance to report)")
-  assert.equal(p.status().some((l) => l.includes("已停止")), true, "the probe is stopped after the grace")
+  assert.equal(p.status().some((l) => l.includes("stopped")), true, "the probe is stopped after the grace")
   const after = p.atToolBoundary()
   assert.equal(after?.stop, true, "after the stop every boundary refuses the call")
-  assert.match(after.reason, /不要再调用工具/, "and asks for the report")
+  assert.match(after.reason, /stops here/, "and says the run is over")
   p.dispose()
 
   // Read-only tasks are exempt.
   const ro = new Probe({
     config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 500 },
     readOnly: true,
-    hooks: { abort: () => {}, warn: () => {} },
+    hooks: { warn: () => {} },
     host: clock.host,
   })
   clock.advance(5000)
@@ -531,7 +531,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const p = new Probe({
     config: { ...defaultProbe(), repeatBash: 3 },
     readOnly: true,
-    hooks: { abort: () => {}, warn: () => {} },
+    hooks: { warn: () => {} },
     host: clock.host,
   })
   p.noteBashStart("pnpm test", "write")
@@ -558,7 +558,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const junk = await h.call("write", { path: "src/_tmp-probe.ts" })
   assert.equal(junk?.block, true, "probe artifact path is refused")
-  assert.match(junk.reason, /造杂物/)
+  assert.match(junk.reason, /junk files/)
   const junk2 = await h.call("write", { path: "src/snapshot.tmp.tsx" })
   assert.equal(junk2?.block, true, "regex pattern also refuses")
   assert.equal(await h.call("write", { path: "src/real.ts" }), undefined, "normal writes pass")
@@ -567,12 +567,21 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(first?.block, true, "out-of-scope read denied")
   const second = await h.call("read", { path: "outside/b.ts" })
   assert.equal(second?.block, true, "second denial feeds the counter")
-  assert.match(second.reason, /撞权限|撞到任务范围/, "the budget warns about a bad grant")
+  assert.match(second.reason, /in a row/, "the budget warns about a bad grant")
   const third = await h.call("read", { path: "outside/c.ts" })
   assert.equal(third?.block, true, "one more denial stops the run")
+  assert.equal(third?.terminate, true, "the stop is hard: every result in the batch terminates")
+  assert.match(third.reason, /denial budget/, "the stop names its criterion")
   const after = await h.call("read", { path: "src/real.ts" })
-  assert.equal(after?.block, true, "once stopped, every later call is refused")
-  assert.match(after.reason, /不要再调用任何工具/, "and the model is told to write its report")
+  assert.equal(after?.block, true, "once stopped, later calls are refused")
+  assert.equal(after?.terminate, true, "refused terminally, not with a soft latch")
+  assert.match(after.reason, /denial budget/, "the reason still names the stop, not this call's verdict")
+  assert.ok(!/src\/real\.ts/.test(after.reason), "the stop reason does not pretend this call was out of scope")
+  assert.equal(
+    await h.call("contact_supervisor", { reason: "need_decision", message: "stuck" }),
+    undefined,
+    "the rescue channel survives the stop",
+  )
   h.restore()
   console.log("  ok   造杂物：探针产物路径被拒；撞权限：计数到上限 warn，再撞 stop")
 }
@@ -595,9 +604,10 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const commands = []
   for (let i = 0; i < 4; i += 1) commands.push(await h.call("bash", { command: "pnpm run typecheck" }))
   assert.ok(commands.slice(0, 2).every((r) => r === undefined), "the first two repeats run")
-  assert.match(commands[2].reason, /原地打转/, "the 3rd identical command is refused with a warning")
+  assert.match(commands[2].reason, /spinning/, "the 3rd identical command is refused with a warning")
   assert.equal(commands[2].block, true, "the warning refuses that call but keeps the run alive")
-  assert.match(commands[3].reason, /停止本轮/, "one more repeat stops the run")
+  assert.match(commands[3].reason, /stops here/, "one more repeat stops the run")
+  assert.equal(commands[3].terminate, true, "the repeat stop is hard too")
   h.restore()
   console.log("  ok   打转与撞权限默认开启；时间判据需显式配置")
 }
@@ -659,13 +669,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const write = await h.call("write", { content: "x" })
   assert.equal(write?.block, true, "write without path is refused")
-  assert.match(write.reason, /必须给 path/, "write says the path argument is missing")
-  assert.ok(!/不在任务范围内/.test(write.reason), "write does not blame the scope")
+  assert.match(write.reason, /needs a path/, "write says the path argument is missing")
+  assert.ok(!/outside this task's scope/.test(write.reason), "write does not blame the scope")
 
   const grep = await h.call("grep", { pattern: "foo" })
   assert.equal(grep?.block, true, "grep without path is refused")
-  assert.match(grep.reason, /没有给 path/, "grep says no path was given")
-  assert.match(grep.reason, /当前目录/, "grep says the cwd was used instead")
+  assert.match(grep.reason, /no path was given/, "grep says no path was given")
+  assert.match(grep.reason, /working directory/, "grep says the cwd was used instead")
 
   // A missing path is a usage error, not a permission problem: it must not
   // count toward the deny budget, or a forgetful child gets stopped as
@@ -690,7 +700,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const notified = []
   await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m) => notified.push(m) } })
   const text = notified.join("\n")
-  assert.match(text, /沙箱可写路径/, "the command lists the writable paths")
+  assert.match(text, /Sandbox writable paths/, "the command lists the writable paths")
   assert.match(text, /pnpm store/, "the command probes the pnpm store")
   h.restore()
   console.log("  ok   /permission 列出可写路径并探测 pnpm store")
@@ -849,7 +859,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const stash = await h.call("bash", { command: "git stash" })
   assert.equal(stash?.block, true, "a deny entry cannot be re-allowed by the caller")
-  assert.match(stash.reason, /禁掉/, "the denial says the command is forbidden")
+  assert.match(stash.reason, /blocked by the project profile/, "the denial says the command is forbidden")
   const checkout = await h.call("bash", { command: "git checkout -- src/a.ts" })
   assert.equal(checkout?.block, true, "deny entries use the same prefix matching")
   h.restore()
@@ -863,7 +873,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const messages = []
   await plain.commands.permission.handler("", { cwd: proj, ui: { notify: (m) => messages.push(m) } })
-  assert.match(messages.join("\n"), /bash 禁（不可放宽）/, "/permission shows the non-overridable list")
+  assert.match(messages.join("\n"), /bash deny \(cannot be lifted\)/, "/permission shows the non-overridable list")
   plain.restore()
   console.log("  ok   bash.deny 不可被 bindings 放宽（含 /permission 可见）")
 }
@@ -875,11 +885,268 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({ cwd: proj, profile: "impl" })
   const blocked = await h.call("read", { path: "a.ts" })
   assert.equal(blocked?.block, true, "a broken profile denies everything")
-  assert.match(blocked.reason, /找不到/, "the denial says the profile file is missing")
+  assert.match(blocked.reason, /not found/, "the denial says the profile file is missing")
   const brokenBash = await h.call("bash", { command: "ls" })
   assert.equal(brokenBash?.block, true, "bash is refused too")
   h.restore()
   console.log("  ok   profile 缺失时失败关闭，不是退回不设限")
+}
+
+// 33. 撞权限只统计「父代理放宽授权或调整设置能解决」的拒绝。
+//     用法错误（元字符、缺 path）与硬规则（永久不开放的工具、profile 禁令）不消耗预算，
+//     否则一次参数写错就能把长任务提前判死（现场：4 次计数里 1 次是 `cd X && git status`）。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 2, bash: { read: ["pnpm run typecheck"] } },
+    }),
+  })
+  const counted = (reason) => /in a row|denial budget/.test(reason)
+
+  // (a) 用法错误：shell 元字符，连撞 4 次也不该推进计数。
+  for (let i = 0; i < 4; i += 1) {
+    const r = await h.call("bash", { command: `pnpm run typecheck && echo ${i}` })
+    assert.equal(r?.block, true, "a metacharacter command is refused")
+    assert.equal(counted(r.reason), false, `metacharacters do not feed the counter (call ${i + 1})`)
+  }
+
+  // (b) 硬规则：范围放多宽都不会开放的工具。
+  for (let i = 0; i < 3; i += 1) {
+    const r = await h.call("powershell", { command: "dir" })
+    assert.equal(r?.block, true, "powershell is refused")
+    assert.match(r.reason, /never available/i, "the message says it is not a grant the parent can widen")
+    assert.equal(counted(r.reason), false, "a never-available tool does not feed the counter")
+  }
+
+  // (c) 缺 path：用法错误，同样不计。
+  const noPath = await h.call("grep", { pattern: "x" })
+  assert.equal(noPath?.block, true, "pathless grep at an out-of-scope cwd is refused")
+  assert.equal(counted(noPath.reason), false, "a usage error does not feed the counter")
+
+  // (d) 真正的撞权限：上面一堆拒绝之后，计数仍从 0 开始。
+  const first = await h.call("read", { path: "outside/a.ts" })
+  assert.equal(first?.block, true, "out-of-scope read is refused")
+  assert.equal(counted(first.reason), false, "the budget is still untouched by the usage errors before it")
+  const second = await h.call("read", { path: "outside/b.ts" })
+  assert.match(second.reason, /in a row/, "the second counted refusal warns at maxDenies 2")
+  const third = await h.call("read", { path: "outside/c.ts" })
+  assert.equal(third?.terminate, true, "the third stops the run")
+  assert.match(third.reason, /denial budget/)
+  h.restore()
+  console.log("  ok   撞权限只计授权类：用法错误与硬规则不消耗预算")
+}
+
+// 34. 拿仓库根当路径时，文案要说清「这是仓库根」，而不是让人以为 scope 有错。
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
+  const rootish = await h.call("grep", { pattern: "x", path: "." })
+  assert.equal(rootish?.block, true, "the repository root is outside a src-only scope")
+  assert.match(rootish.reason, /repository root/, "the message names what was given")
+  assert.match(rootish.reason, /widen the scope/, "and says the parent can widen it")
+  h.restore()
+  console.log("  ok   仓库根当路径时说清缘由，不装成 scope 写法有误")
+}
+
+// 35. 撞权限的缺省预算：5 次计数拒绝才 warn，第 6 次才硬停。
+//     缺省值本身就是决策（硬停判早一次就丢整轮任务），所以用行为钉住它。
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
+  const verdicts = []
+  for (const name of ["a", "b", "c", "d", "e", "f"]) {
+    verdicts.push(await h.call("read", { path: `outside/${name}.ts` }))
+  }
+  const notes = verdicts.map((v) => /in a row|denial budget/.test(v.reason))
+  assert.deepEqual(
+    notes,
+    [false, false, false, false, true, true],
+    "default budget of five: four silent refusals, a warning at the fifth, a stop at the sixth",
+  )
+  assert.equal(verdicts[4].terminate, undefined, "the fifth only warns")
+  assert.match(verdicts[4].reason, /contact_supervisor/, "the warning names the escalation channel")
+  assert.equal(verdicts[5].terminate, true, "the sixth ends the run")
+  assert.match(verdicts[5].reason, /for the parent session/i, "the stop text is addressed to the parent, who can act on it")
+  h.restore()
+  console.log("  ok   撞权限缺省 5：第 5 次 warn（点名求援），第 6 次硬停")
+}
+
+// 36. linked worktree：git 的索引与 ref 在主仓 .git 里，那里必须可写。
+//     Lab 实测（Lab/git-worktree/probe.sh）：只给 worktree 时 `git add`/`commit`/`stash`/
+//     `switch -c` 全失败在 <common>/worktrees/<id>/index.lock 或 <common>/refs 上，
+//     加上 common dir 才通。
+{
+  const gitOk = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0
+  if (!gitOk) {
+    console.log("  skip  linked worktree（环境里没有 git）")
+  } else {
+    const repoDir = join(workdir, "gitrepo")
+    const wtDir = join(workdir, "gitwt")
+    mkdirSync(repoDir, { recursive: true })
+    const gitEnv = {
+      ...process.env,
+      HOME: workdir,
+      GIT_CONFIG_GLOBAL: join(workdir, "gitconfig"),
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.com",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.com",
+    }
+    const git = (...args) => {
+      const r = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv, stdio: ["ignore", "pipe", "pipe"] })
+      assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stderr}`)
+      return r.stdout.trim()
+    }
+    git("init", "-q", "-b", "main")
+    writeFileSync(join(repoDir, "a.txt"), "one\n")
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    git("worktree", "add", "-q", wtDir, "-b", "wtbranch")
+    let commonDir = spawnSync("git", ["rev-parse", "--git-common-dir"], { cwd: wtDir, encoding: "utf8", env: gitEnv }).stdout.trim()
+    if (!commonDir.startsWith("/")) commonDir = join(wtDir, commonDir)
+
+    const bindings = (writable) =>
+      JSON.stringify({
+        "pi-subagent-extend/1": { scope: ["**"], bash: { [writable ? "write" : "read"]: ["git status"], writable } },
+      })
+
+    const h = await handler({ cwd: wtDir, bindings: bindings(true) })
+    const input = { command: "git status" }
+    assert.equal(await h.call("bash", input), undefined, "a writable sandbox passes the listed command")
+    const spec = specOf(input.command)
+    assert.ok(
+      spec.write.includes(commonDir),
+      `the linked worktree's common git dir is writable, got: ${spec.write.join(", ")}`,
+    )
+    assert.ok(!spec.write.some((d) => d === join(repoDir, "a.txt")), "the main working tree is not granted")
+    h.restore()
+
+    // 不只是看 spec：让 helper 真的执行，文件必须真的进索引（修复前会失败在 index.lock）。
+    writeFileSync(join(wtDir, "b.txt"), "two\n")
+    const live = await handler({
+      cwd: wtDir,
+      bindings: JSON.stringify({
+        "pi-subagent-extend/1": { scope: ["**"], bash: { write: ["git add b.txt"], writable: true } },
+      }),
+    })
+    const liveInput = { command: "git add b.txt" }
+    assert.equal(await live.call("bash", liveInput), undefined, "git add is allowlisted")
+    const exec = spawnSync("/bin/sh", ["-c", liveInput.command], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+    assert.equal(exec.status, 0, `sandboxed git add failed: ${exec.stderr}`)
+    const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+    assert.match(staged.stdout, /b\.txt/, "the file is really staged inside the sandbox")
+    live.restore()
+
+    // 只读沙箱：父代理明确选了只读树，不因为「git 需要一个可写索引」偷偷放开主仓 .git。
+    const ro = await handler({ cwd: wtDir, bindings: bindings(false) })
+    const roInput = { command: "git status" }
+    assert.equal(await ro.call("bash", roInput), undefined, "read-only passes the listed command")
+    assert.equal(
+      specOf(roInput.command).write.includes(commonDir),
+      false,
+      "a read-only sandbox does not get the common git dir",
+    )
+    ro.restore()
+
+    // 普通仓库：.git 在目录里且在 cwd 之内，不应额外追加。
+    const plain = await handler({ cwd: repoDir, bindings: bindings(true) })
+    const plainInput = { command: "git status" }
+    assert.equal(await plain.call("bash", plainInput), undefined, "plain repo passes too")
+    assert.equal(
+      specOf(plainInput.command).write.some((d) => d.endsWith("/.git")),
+      false,
+      "a normal repository gets no extra .git grant",
+    )
+    plain.restore()
+    console.log("  ok   linked worktree 的 common dir 可写；只读沙箱与普通仓库不追加")
+  }
+}
+
+// 37. 交接单提示（前台）：子代理 worktree 单返回 handoff 路径时，就地补「看哪个键」。
+//     pi-subagents 捕获补丁后会删掉工作树与分支，父代理只拿到一行路径；
+//     不点明 children[].patch 等于让父代理去猜。
+{
+  const h = await handler()
+  const path = "/tmp/pi-subagents/async-subagent-runs/run-1/handoff.json"
+  const out = await h.result("subagent", [
+    { type: "text", text: `Worktree handoff: ${path} (1 children, 1 changed patches, cleanup complete)` },
+  ])
+  assert.ok(Array.isArray(out?.content), "the result content is patched")
+  assert.equal(out.content.length, 2, "one text part is appended")
+  const hint = out.content[1].text
+  assert.match(hint, /\[worktree handoff\]/, "the hint is marked so it can be recognised")
+  assert.ok(hint.includes(path), "the hint names the manifest path")
+  assert.match(hint, /children\[\]\.patch/, "the hint names the key to read")
+  assert.match(hint, /diffStat/, "the hint names the volume signal")
+  assert.match(hint, /SHA quoted by the child no longer resolves/, "the hint says the child's SHA is dead")
+  assert.match(hint, /Nothing was applied/, "the hint says nothing reached this checkout")
+  assert.match(hint, /tasks\[\]\.reason/, "the hint says where the preserve reason lives")
+
+  // 幂等：同一条消息再跑一次（tool_result 与 message_end 可能都命中）不应重复追加。
+  const again = await h.result("subagent", out.content)
+  assert.equal(again, undefined, "an already-annotated result is left alone")
+
+  // 交接单写失败时没有路径，但工作树与分支是被保留下来的 —— 父代理必须知道这一点，
+  // 否则会以为「没收到交接单 = 子代理什么都没做」。
+  const unavailable = await h.result("subagent", [
+    { type: "text", text: "Worktree handoff unavailable: EACCES" },
+  ])
+  const unavailableHint = unavailable?.content?.at(-1)?.text ?? ""
+  assert.match(unavailableHint, /\[worktree handoff\]/, "the unavailable case is annotated too")
+  assert.match(unavailableHint, /not deleted/, "it says the worktree was kept")
+  assert.match(unavailableHint, /git worktree list/, "it says how to find it")
+  assert.equal(unavailableHint.includes("children[].patch"), false, "it does not promise a manifest key")
+
+  // 同一条消息再跑一次也不重复追加。
+  assert.equal(
+    await h.result("subagent", unavailable.content),
+    undefined,
+    "an already-annotated unavailable result is left alone",
+  )
+
+  // 普通工具结果、普通子代理结果（没有 worktree）都不动。
+  assert.equal(await h.result("bash", [{ type: "text", text: "ok" }]), undefined, "other tools are untouched")
+  assert.equal(
+    await h.result("subagent", [{ type: "text", text: "child finished, no worktree" }]),
+    undefined,
+    "a subagent result without a worktree gets no hint",
+  )
+  h.restore()
+  console.log("  ok   交接单提示（前台）：补出该看的键与失效的分支/SHA，幂等且不误伤")
+}
+
+// 38. 交接单提示（后台）：async 完成通知是注入到会话里的消息，实测 message_end 不为它
+//     触发，所以走 context —— 每次 LLM 调用前拿到完整消息表，就地补一句。
+{
+  const h = await handler()
+  const path = "/tmp/pi-subagents/async-subagent-runs/run-2/handoff.json"
+  const injected = { role: "user", content: [{ type: "text", text: `run finished.\n\nParallel handoff: ${path}` }] }
+  const out = await h.context([{ role: "system", content: "sys" }, injected])
+  assert.ok(Array.isArray(out?.messages), "the message list is replaced")
+  assert.match(out.messages[1].content.at(-1).text, /\[worktree handoff\]/, "the injected notification gets the hint")
+  assert.ok(out.messages[1].content.at(-1).text.includes(path), "and carries the manifest path")
+  assert.equal(out.messages[0].content, "sys", "other messages pass through untouched")
+
+  // 字符串形态的 content 也要能补。
+  const asString = await h.context([{ role: "custom", customType: "subagent-notify", content: `Parallel handoff: ${path}` }])
+  assert.equal(typeof asString?.messages?.[0]?.content, "string", "a string body stays a string")
+  assert.match(asString.messages[0].content, /children\[\]\.patch/)
+
+  // 没有交接单行的消息、以及 assistant 角色都不动。
+  assert.equal(
+    await h.context([{ role: "user", content: [{ type: "text", text: "just a prompt" }] }]),
+    undefined,
+    "no handoff line, no patch",
+  )
+  assert.equal(
+    await h.context([{ role: "assistant", content: [{ type: "text", text: `Parallel handoff: ${path}` }] }]),
+    undefined,
+    "assistant messages are not annotated",
+  )
+
+  // 幂等：已经带标记的消息不再追加。
+  assert.equal(await h.context(out.messages), undefined, "an already-annotated message is left alone")
+  h.restore()
+  console.log("  ok   交接单提示（后台）：context 里补上注入的通知，其它消息不动")
 }
 
 rmSync(workdir, { recursive: true, force: true })

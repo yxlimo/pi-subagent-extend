@@ -10,7 +10,8 @@
  * 4. 造杂物：write/edit 目标路径命中 forbidWritePatterns → 直接拒绝。
  *
  * warn 的载体是「拦截下一次 tool_call」：定时器到点自己拦不了正在跑的调用，边界才是
- * 能保证模型看到文案的地方。abort 用 ctx 的 abort()，不等边界。
+ * 能保证模型看到文案的地方。停机由调用方用 terminate: true 硬停（见 index.ts），
+ * 探针只负责把「为什么停」写进 stopReason。
  */
 
 export interface ProbeConfig {
@@ -39,8 +40,6 @@ export interface ProbeEvent {
 }
 
 export interface ProbeHooks {
-	/** 停机：由调用方桥接到 ctx.actions.abort()。 */
-	abort: () => void;
 	warn: (text: string) => void;
 }
 
@@ -195,8 +194,8 @@ export class Probe {
 		this.#bashCounts.set(key, count);
 		if (count === this.#cfg.repeatBash) {
 			const message =
-				`同一条 bash 命令已经重复 ${count} 次（判据：原地打转）：${key.slice(0, 160)}。` +
-				`再重复一次就停止本轮——换一种做法，或者直接把当前结论汇报给父代理。`;
+				`The same bash command has been repeated ${count} times (criterion: spinning): ${key.slice(0, 160)}. ` +
+				`One more repeat stops the run. Change approach, or report your current conclusion to the parent.`;
 			this.#repeat = {
 				armed: true,
 				warned: true,
@@ -210,8 +209,8 @@ export class Probe {
 		if (count > this.#cfg.repeatBash) {
 			return {
 				reason:
-					`同一条 bash 命令已重复 ${count} 次（判据：原地打转）：${key.slice(0, 160)}。停止本轮，` +
-					"把「反复尝试了什么、卡在哪、需要父代理提供什么」写清楚作为最终汇报。",
+					`The same bash command has been repeated ${count} times (criterion: spinning): ${key.slice(0, 160)}. ` +
+					"The run stops here. Write up what you kept retrying, where you got stuck, and what the parent must supply.",
 				stop: true,
 			};
 		}
@@ -234,8 +233,8 @@ export class Probe {
 			if (p.re.test(path)) {
 				return {
 					reason:
-						`pi-subagent-extend: 不允许把 "${path}" 写进仓库（判据：造杂物，命中 forbidWritePatterns "` +
-						`${p.source}"）。这是调试/临时产物，不要留在工作区；需要临时文件就写到 /tmp。`,
+						`pi-subagent-extend: refusing to write "${path}" into the repository (criterion: junk files, matched forbidWritePatterns "` +
+						`${p.source}"). Debug and temporary artifacts do not belong in the tree; write them under /tmp instead.`,
 					stop: false,
 				};
 			}
@@ -255,7 +254,7 @@ export class Probe {
 		if (expired) {
 			this.#stopped = true;
 			this.#clearTimers();
-			this.#stopReason = `${expired.message}\n宽限已到期，本轮到此停止：不要再调用工具，把已完成的改动、当前状态、卡住的点写清楚作为最终汇报。`;
+			this.#stopReason = `${expired.message}\nThe grace window expired; the run stops here. Summarize what changed, where you are now, and what blocks you.`;
 			return { reason: this.#stopReason, stop: true };
 		}
 		const armed = [this.#repeat, this.#idle].find((w) => w.armed);
@@ -276,8 +275,8 @@ export class Probe {
 				armed: true,
 				warned: false,
 				message:
-					`已经有 ${ms(this.#cfg.idleWriteMs)} 没有写入任何文件，也没有跑过可写的 bash 命令（判据：只读空转）。` +
-					"读到的东西够了就直接动手改；确实需要更多上下文就先写给父代理说明卡点。",
+					`Nothing has been written for ${ms(this.#cfg.idleWriteMs)} and no write-capable bash command has run (criterion: idle). ` +
+					"If you have read enough, start making the change; if you genuinely need more context, report what blocks you to the parent.",
 				abortAt: this.#host.now() + this.#cfg.abortGraceMs,
 			};
 			this.#idleTimer = this.#schedule(() => this.#fireIdleAbort(), this.#cfg.abortGraceMs);
@@ -291,9 +290,9 @@ export class Probe {
 		this.#stopped = true;
 		this.#clearTimers();
 		this.#stopReason =
-			`判据：只读空转——超过 ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} 没有写入任何文件，` +
-			"也没有跑过可写的 bash 命令。本轮到此停止：不要再调用工具，把「已确认的事实、下一步打算改动什么、" +
-			"为什么一直没动手」写清楚作为最终汇报。";
+			`Criterion: idle (nothing written). No file was written for over ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} ` +
+			"and no write-capable bash command ran. The run stops here: state the facts you confirmed, what you meant to change, " +
+			"and why you never made a change.";
 		this.#hooks.warn(this.#stopReason);
 	}
 
@@ -312,8 +311,8 @@ export class Probe {
 			this.#stopped = true;
 			this.#clearTimers();
 			this.#stopReason =
-				`判据：早可收工——验证已经通过（命中的成功标记："${marker}"），之后 ${ms(this.#cfg.successIdleMs)} ` +
-				"没有任何新改动。本轮到此停止：不要再调用工具，直接汇报结果收工。";
+				`Criterion: work is done. Verification already passed (matched success marker "${marker}") and nothing changed in the last ${ms(this.#cfg.successIdleMs)}. ` +
+				"The run stops here; report the result.";
 			this.#hooks.warn(this.#stopReason);
 		}, this.#cfg.successIdleMs);
 	}
@@ -359,17 +358,17 @@ export class Probe {
 	/** 诊断用：当前状态。 */
 	status(): string[] {
 		// 空闲阈值：只读任务不适用；关闭时写「关闭」。
-		let idleLimit = "关闭";
-		if (this.#readOnly) idleLimit = "不适用（只读任务）";
+		let idleLimit = "off";
+		if (this.#readOnly) idleLimit = "n/a (read-only task)";
 		else if (this.#cfg.idleWriteMs > 0) {
-			idleLimit = `${ms(this.#cfg.idleWriteMs)} + 宽限 ${ms(this.#cfg.abortGraceMs)}`;
+			idleLimit = `${ms(this.#cfg.idleWriteMs)} + grace ${ms(this.#cfg.abortGraceMs)}`;
 		}
 		const lines = [
-			`只读空转: ${idleLimit}`,
-			`原地打转: 同一命令第 ${this.#cfg.repeatBash} 次警告、第 ${this.#cfg.repeatBash + 1} 次停止（已记录 ${this.#bashCounts.size} 条命令）`,
-			`早可收工: ${this.#readOnly ? "不适用（只读任务）" : `${ms(this.#cfg.successIdleMs)} 无新改动即停止`}`,
-			`造杂物: ${this.#forbidPatterns.length} 条禁用路径模式`,
-			`状态: ${this.#stopped ? "已停止" : "运行中"}${this.#successArmed ? "（成功标记已命中）" : ""}`,
+			`Idle: ${idleLimit}`,
+			`Spin: same command warns at ${this.#cfg.repeatBash}, stops at ${this.#cfg.repeatBash + 1} (${this.#bashCounts.size} commands recorded)`,
+			`Done-early: ${this.#readOnly ? "n/a (read-only task)" : `stops after ${ms(this.#cfg.successIdleMs)} with no new change`}`,
+			`Junk files: ${this.#forbidPatterns.length} forbidden path patterns`,
+			`State: ${this.#stopped ? "stopped" : "running"}${this.#successArmed ? " (success marker matched)" : ""}`,
 		];
 		return lines;
 	}
@@ -378,9 +377,9 @@ export class Probe {
 function ms(value: number): string {
 	if (value >= 60_000) {
 		const m = value / 60_000;
-		return `${Number.isInteger(m) ? m : m.toFixed(1)} 分钟`;
+		return `${Number.isInteger(m) ? m : m.toFixed(1)} min`;
 	}
-	return `${Math.round(value / 1000)} 秒`;
+	return `${Math.round(value / 1000)} s`;
 }
 
 function defaultHost(): ProbeHost {

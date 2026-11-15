@@ -45,6 +45,7 @@ import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
+import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
@@ -91,7 +92,7 @@ interface Policy {
 const INACTIVE: Policy = {
 	globs: [],
 	regexps: [],
-	source: "未配置",
+	source: "not configured",
 	readOnly: true,
 	maxReads: 0,
 	allowTools: [],
@@ -174,11 +175,11 @@ function extractCallConfig(raw: string | undefined): { config?: Record<string, u
 		parsed = JSON.parse(raw);
 	} catch (error) {
 		return {
-			error: `${BINDINGS_ENV} 不是合法 JSON（${error instanceof Error ? error.message : String(error)}），全部拒绝`,
+			error: `${BINDINGS_ENV} is not valid JSON (${error instanceof Error ? error.message : String(error)}); everything is refused`,
 		};
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		return { error: `${BINDINGS_ENV} 不是 JSON 对象，全部拒绝` };
+		return { error: `${BINDINGS_ENV} is not a JSON object; everything is refused` };
 	}
 	const record = parsed as Record<string, unknown>;
 	const key = Object.keys(record).find(
@@ -188,7 +189,7 @@ function extractCallConfig(raw: string | undefined): { config?: Record<string, u
 	if (!key) return {};
 	const cfg = record[key];
 	if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
-		return { error: `extensionBindings ${key} 的配置不是对象，全部拒绝` };
+		return { error: `extensionBindings ${key}: the configuration is not an object; everything is refused` };
 	}
 	return { config: cfg as Record<string, unknown> };
 }
@@ -242,10 +243,10 @@ function parsePolicyObject(
 	const scope = config.scope;
 	const scopeGiven = scope !== undefined;
 	if (scopeGiven && (!Array.isArray(scope) || scope.some((g) => typeof g !== "string" || !g.trim()))) {
-		return denyAll(`${source}.scope 必须是字符串数组，全部拒绝`);
+		return denyAll(`${source}.scope must be an array of strings; everything is refused`);
 	}
 	if (!scopeGiven && options.requireScope) {
-		return denyAll(`${source}.scope 缺失，全部拒绝`);
+		return denyAll(`${source}.scope is missing; everything is refused`);
 	}
 	const globs = scopeGiven ? (scope as string[]).map((g) => g.trim()).filter(Boolean) : [];
 	const allowTools = Array.isArray(config.allowTools)
@@ -261,7 +262,8 @@ function parsePolicyObject(
 		bash: parseBashRule(config.bash),
 		probe: config.probe,
 		// 撞权限是纯错误信号：不配也开，父代理可以显式写 0 关掉。
-		maxDenies: config.maxDenies === 0 ? 0 : positiveInt(config.maxDenies) || 3,
+		// 缺省 5：停机是硬停，判早一次就丢掉整轮任务，而多给几次只浪费几个调用。
+		maxDenies: config.maxDenies === 0 ? 0 : positiveInt(config.maxDenies) || 5,
 		active: true,
 	};
 }
@@ -274,6 +276,44 @@ function isAllowed(policy: Policy, cwd: string, target: string): boolean {
 		if (re.test(rel) || re.test(abs)) return true;
 	}
 	return false;
+}
+
+/**
+ * "." / "./" / 仓库根 / "/"：目标不是某个文件，而是「整棵树」。单独区分出来，
+ * 这样拒绝文案能直说「这是仓库根」，而不是让人以为 scope 写法有错。
+ */
+function isRootish(raw: string, cwd: string): boolean {
+	const abs = resolve(cwd, raw);
+	return abs === cwd || abs === "/";
+}
+
+/**
+ * linked worktree 的 git 公共目录（主仓的 .git）。只有 .git 是文件（worktree）时才问 git，
+ * 普通仓库直接返回 undefined：那边 .git 在 cwd 之内，不需要额外授权，也省掉一次 spawn。
+ * 结果按 cwd 缓存：bash 白名单命令会反复拼 spec。
+ */
+const gitCommonCache = new Map<string, string | undefined>();
+function gitCommonDir(cwd: string): string | undefined {
+	const key = resolve(cwd);
+	if (gitCommonCache.has(key)) return gitCommonCache.get(key);
+	let found: string | undefined;
+	try {
+		const out = execFileSync("git", ["rev-parse", "--absolute-git-dir", "--git-common-dir"], {
+			cwd: key,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 5000,
+		});
+		const [gitDirRaw, commonRaw] = out.trim().split("\n");
+		const gitDir = gitDirRaw?.trim();
+		const common = commonRaw ? resolve(key, commonRaw.trim()) : "";
+		// common == gitDir 就是普通仓库（或 bare），额外授权无从谈起。
+		if (gitDir && common && common !== gitDir && existsSync(common)) found = common;
+	} catch {
+		found = undefined;
+	}
+	gitCommonCache.set(key, found);
+	return found;
 }
 
 /** 找 helper：环境变量优先，其次包内构建产物，最后缓存目录。 */
@@ -355,7 +395,14 @@ function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): strin
 		// namespace.rs。）
 		dirs.add(cwd);
 		const worktreeRoot = findWorktreeRoot(cwd);
-		if (worktreeRoot) dirs.add(worktreeRoot);
+		if (worktreeRoot) {
+			dirs.add(worktreeRoot);
+			// linked worktree 的索引与 ref 在**主仓**的 .git 里（<common>/worktrees/<id>/index、
+			// <common>/refs），只给 worktree 自己时 git add / commit / stash / switch -c 会失败在
+			// index.lock 上。Lab 实测见 Lab/git-worktree/probe.sh。
+			const common = gitCommonDir(cwd);
+			if (common) dirs.add(common);
+		}
 		// node_modules 也要可写：pnpm install 要写 .bin 里的 shim。它通常不在
 		// scope 里，但装依赖是任务的必要步骤。worktree 里它是符号链接，要给
 		// 解析后的真实路径：Landlock 规则落在 inode 上，符号链接自身不覆盖目标。
@@ -457,7 +504,7 @@ function probePnpmStore(cwd: string): { path?: string; error?: string } {
 			.map((l) => l.trim())
 			.filter(Boolean)
 			.pop();
-		return line ? { path: line } : { error: "pnpm store path 没有输出" };
+		return line ? { path: line } : { error: "pnpm store path printed nothing" };
 	} catch (error) {
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
@@ -466,8 +513,8 @@ function probePnpmStore(cwd: string): { path?: string; error?: string } {
 /** /permission 里显示 pnpm store：探测到的路径 + 一句「未放行」的提示。 */
 function describePnpmStore(cwd: string): string {
 	const found = detectPnpmStore(cwd);
-	if (found.path) return `${found.path}（未放行；要让子代理装依赖就写进 bash.writablePaths）`;
-	return `探测失败（${found.error ?? "未知原因"}）`;
+	if (found.path) return `${found.path} (not writable; add it to bash.writablePaths if the subagent must install dependencies)`;
+	return `detection failed (${found.error ?? "unknown cause"})`;
 }
 
 function shellQuote(text: string): string {
@@ -568,7 +615,7 @@ export function wrapInSandbox(command: string, specFile: string, helper: string)
 }
 
 function preview(globs: string[]): string {
-	if (globs.length === 0) return "（空）";
+	if (globs.length === 0) return "(empty)";
 	const shown = globs.slice(0, 12).join(", ");
 	return globs.length > 12 ? `${shown} …` : shown;
 }
@@ -592,22 +639,22 @@ function readProfile(
 ): { config?: Record<string, unknown>; source: string; error?: string } {
 	const path = resolve(cwd, file ?? PROFILE_FILE);
 	const shown = path.startsWith(`${cwd}/`) ? relative(cwd, path) : path;
-	const source = `profile ${name}（${shown}）`;
-	if (!existsSync(path)) return { source, error: `${source}：找不到 ${shown}` };
+	const source = `profile ${name} (${shown})`;
+	if (!existsSync(path)) return { source, error: `${source}: ${shown} not found` };
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(readFileSync(path, "utf8"));
 	} catch (error) {
 		const detail = error instanceof Error ? error.message : String(error);
-		return { source, error: `${source}：${shown} 不是合法 JSON（${detail}）` };
+		return { source, error: `${source}: ${shown} is not valid JSON (${detail})` };
 	}
 	const table = asObject(parsed);
-	if (!table) return { source, error: `${source}：${shown} 不是 JSON 对象` };
+	if (!table) return { source, error: `${source}: ${shown} is not a JSON object` };
 	if (!("default" in table) && !(name in table)) {
-		return { source, error: `${source}：${shown} 里既没有 "default" 也没有 "${name}"` };
+		return { source, error: `${source}: ${shown} has neither "default" nor "${name}"` };
 	}
 	const config = mergeConfig(asObject(table.default), asObject(table[name]));
-	if (!config) return { source, error: `${source}：${shown} 里 "${name}" 与 "default" 都不是对象` };
+	if (!config) return { source, error: `${source}: ${shown}: neither "${name}" nor "default" is an object` };
 	return { config, source };
 }
 
@@ -633,23 +680,24 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// tool_call 里读不到，必须在这里取。profile 的文件反过来——要按会话 cwd 读，
 	// 所以在 session_start 里解析。
 	const call = extractCallConfig(process.env[BINDINGS_ENV]);
-	let policy: Policy = call.error
-		? denyAll(call.error)
-		: call.config
-			? parsePolicyObject(call.config, `extensionBindings ${BINDING_NAMESPACE}`, { requireScope: true })
-			: INACTIVE;
+	let policy: Policy = INACTIVE;
+	if (call.error) {
+		policy = denyAll(call.error);
+	} else if (call.config) {
+		policy = parsePolicyObject(call.config, `extensionBindings ${BINDING_NAMESPACE}`, { requireScope: true });
+	}
 	let denyCounter = new DenyCounter(policy.maxDenies);
 	let allowedReads = 0;
-	// 探针要停本轮：abort 是 hard stop，同一个动作可能触发多次，只做一次。
-	let aborted = false;
-	let lastAbortReason = "";
-	/**
-	 * 停机：不调 ctx.abort()。硬 abort 会把模型正在生成的收尾汇报一起掐掉，父代理只能
-	 * 收到一句工具错误。改为「粘住停止状态 + 后续调用一律 terminate」，pi 在工具批次
-	 * 结束后自然收尾，模型有机会把结论写完。
-	 */
-	const abortNow = () => {
-		aborted = true;
+	// 停机是硬停：每个被拦的结果都带 terminate，pi 在整批结果都 terminating 时结束本轮
+	// （docs/extensions.md："terminate only applies to a blocked call; the agent stops early
+	// only when every finalized result in the batch is terminating"）。停止后整批都会被拦，
+	// 所以不留「一切都拒绝、模型还在反复试」的软状态。
+	let stopped = false;
+	let stopReason = "";
+	const stop = (reason: string) => {
+		stopped = true;
+		stopReason = reason;
+		return { block: true, reason, terminate: true } as const;
 	};
 	let currentCtx: { cwd?: string; actions?: unknown; ui?: unknown } | undefined;
 	let probe: Probe | undefined;
@@ -662,7 +710,6 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					config: probeCfg,
 					readOnly: policy.readOnly,
 					hooks: {
-						abort: abortNow,
 						warn: (text) => {
 							const ui = currentCtx?.ui as { notify?: (m: string, t?: string) => void } | undefined;
 							ui?.notify?.(`pi-subagent-extend: ${text}`, "warning");
@@ -692,16 +739,16 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			armProbe();
 		}
 		if (!policy.active) return;
-		const budget = policy.maxReads > 0 ? `，read 预算 ${policy.maxReads} 次` : "";
+		const budget = policy.maxReads > 0 ? `, read budget ${policy.maxReads}` : "";
 		const bash = policy.bash
-			? `，bash ${policy.bash.read.length} 读 / ${policy.bash.write.length} 写`
-			: "，bash 关闭";
-		const probeLine = probe ? "，探针开启" : "";
-		const storeLine = policy.bash ? `，pnpm store ${detectPnpmStore(cwd).path ?? "探测失败"}` : "";
-		const mode = policy.readOnly ? "只读" : "读写";
+			? `, bash ${policy.bash.read.length} read / ${policy.bash.write.length} write`
+			: ", bash off";
+		const probeLine = probe ? ", probe on" : "";
+		const storeLine = policy.bash ? `, pnpm store ${detectPnpmStore(cwd).path ?? "detection failed"}` : "";
+		const mode = policy.readOnly ? "read-only" : "read-write";
 		const msg = policy.globs.length
-			? `任务范围生效（${policy.source}，${policy.globs.length} 条，${mode}${budget}${bash}${probeLine}${storeLine}）`
-			: `任务范围为空，所有文件访问都被拒绝${budget}${bash}${probeLine}${storeLine}`;
+			? `scope active (${policy.source}, ${policy.globs.length} entries, ${mode}${budget}${bash}${probeLine}${storeLine})`
+			: `scope is empty: every file access is refused${budget}${bash}${probeLine}${storeLine}`;
 		ctx.ui.notify(`pi-subagent-extend: ${msg}`, "info");
 	});
 
@@ -709,14 +756,36 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		probe?.dispose();
 	});
 
-	// 探针 3 需要看命令输出；tool_result 里拿。
+	// tool_result 干两件事：
+	// 1. 探针 3 要看 bash 的输出；
+	// 2. 子代理的 worktree 单会在这里返回交接单路径，就地补一句「该看哪个键」。
 	pi.on("tool_result", async (event) => {
-		if (!probe) return;
-		// SAFETY: tool_result 的事件类型只声明了结果载体，没声明 toolName。这里只读
-		// 三个字段，且先用 `!== "bash"` 筛掉，拿不到 toolName 就当它不是 bash 结果。
-		const p = event as unknown as { toolName?: string; content?: unknown; result?: unknown };
-		if (p.toolName !== "bash") return;
-		probe.noteBashResult(textOf(p.content) || textOf(p.result));
+		const text = textOf(event.content);
+		if (probe && event.toolName === "bash") probe.noteBashResult(text);
+		const hint = handoffHintFor(text);
+		if (!hint) return undefined;
+		return { content: withHint(event.content, hint) };
+	});
+
+	// 后台子代理完成后，pi-subagents 用 sendMessage 把通知注入会话（正文带 `Parallel handoff:`）。
+	// 实测 message_end 不会为这种注入消息触发，所以改用 context：每次 LLM 调用前拿到完整
+	// 消息表，就地补一句。它就是模型实际看到的内容，不依赖通知用什么 role 送达。
+	pi.on("context", async (event) => {
+		let changed = false;
+		const messages = event.messages.map((message) => {
+			if (message.role !== "custom" && message.role !== "user") return message;
+			const text = textOf(message.content);
+			// 便宜的前置筛：没有 handoff 字样就不进正则。
+			if (!text.includes("handoff")) return message;
+			const hint = handoffHintFor(text);
+			if (!hint) return message;
+			changed = true;
+			const content = Array.isArray(message.content)
+				? withHint(message.content, hint)
+				: withHint(message.content, hint);
+			return { ...message, content };
+		});
+		return changed ? { messages } : undefined;
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -724,33 +793,27 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (!policy.active) return;
 		const cwd = ctx.cwd ?? process.cwd();
 		const deny = (reason: string) => ({ block: true, reason } as const);
+		// 求援通道不受任何停机影响：被停住的子代理最需要的就是「报告我卡在哪」。
+		if (SAFE_TOOLS.includes(event.toolName)) return undefined;
+		if (stopped) return { block: true, reason: stopReason, terminate: true };
 		// 探针在边界上的 warn / 到期停机，先于本工具的判定。
 		const boundary = probe?.atToolBoundary();
 		if (boundary) {
-			if (boundary.stop) {
-				lastAbortReason = boundary.reason;
-				abortNow();
-				return { block: true, reason: boundary.reason };
-			}
+			if (boundary.stop) return stop(boundary.reason);
 			return { block: true, reason: boundary.reason, terminate: false };
 		}
-		// 已经停过：后续调用一律拒绝。不带 terminate——terminate 会在工具批次结束时
-		// 直接结束本轮，模型连收尾汇报都来不及写；这里靠「每次都被拒」逼它停止调工具
-		// 并输出汇报。
-		if (aborted) {
-			return { block: true, reason: `${lastAbortReason}\n\n本轮已停止，不要再调用任何工具，直接输出最终汇报。` };
-		}
 
+		// 拒绝分两类，分类标准只有一条：**父代理放宽授权能不能解决**。
+		//   能 → 撞权限计数（bail）：范围外路径、命令不在白名单、read 预算、readOnly 写、
+		//         工具不在 allowTools、整个 bash 被关。这些是「授权与任务不匹配」的信号。
+		//   不能 → 只拒不计（deny）：用法错误（缺 path、空命令、shell 元字符）、
+		//          项目 profile 的硬禁令、永远不开放的工具、环境/内核缺能力。
+		// 把后一类算进预算，会让一次参数写错就提前判死长任务。
 		const bail = (reason: string) => {
 			const counted = denyCounter.record();
 			if (!counted.yes) return deny(reason);
 			const composed = counted.note ? `${reason}\n\n${counted.note}` : reason;
-			if (counted.stop) {
-				lastAbortReason = composed;
-				abortNow();
-				return { block: true, reason: composed };
-			}
-			return { block: true, reason: composed };
+			return counted.stop ? stop(composed) : deny(composed);
 		};
 
 		if (event.toolName === "bash") {
@@ -758,20 +821,20 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const rule = policy.bash;
 			if (!rule) {
 				return bail(
-					`pi-subagent-extend: 本会话不允许执行 bash（来源：${policy.source}）。需要跑测试/typecheck 时由父代理在 bindings 里给 bash.read / bash.write 点名命令`,
+					`pi-subagent-extend: bash is not allowed in this session (source: ${policy.source}). To run tests or a typecheck, the parent must name the commands in bash.read / bash.write.`,
 				);
 			}
-			if (!command) return deny("pi-subagent-extend: 空的 bash 命令");
+			if (!command) return deny("pi-subagent-extend: empty bash command");
 			// 禁止列表先于一切判定：它来自项目 profile，调用方的白名单不能放宽它。
 			const forbidden = deniedEntry(rule, command);
 			if (forbidden) {
 				return deny(
-					`pi-subagent-extend: bash 命令被项目 profile 禁掉："${forbidden}"（来源：${policy.source}）。这条禁令不受 extensionBindings 的白名单影响`,
+					`pi-subagent-extend: command blocked by the project profile: "${forbidden}" (source: ${policy.source}). This ban is not liftable by extensionBindings.`,
 				);
 			}
 			if (SHELL_META.test(command)) {
 				return deny(
-					`pi-subagent-extend: bash 命令含 shell 元字符（; & | < > \` $ 等），只允许直接调用白名单命令：${preview(allEntries(rule))}`,
+					`pi-subagent-extend: the command contains shell metacharacters (; & | < > \` $ ...). Only a single allowlisted command may be run: ${preview(allEntries(rule))}`,
 				);
 			}
 			const match = classifyCommand(rule, command);
@@ -779,63 +842,61 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				// 模型能看见这段文案，所以把它需要的路径直接写进去，省得它再猜。
 				const store = detectPnpmStore(cwd);
 				const storeHint = store.path
-					? `（pnpm store 在 ${store.path}，未放行；需要装依赖时由父代理写进 bash.writablePaths）`
+					? ` (pnpm store at ${store.path}, not writable; the parent can add it to bash.writablePaths)`
 					: "";
 				return bail(
-					`pi-subagent-extend: bash 命令不在白名单内：${preview(allEntries(rule))}（来源：${policy.source}）${storeHint}`,
+					`pi-subagent-extend: command not in the allowlist: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
 				);
 			}
 			const repeatEvent = probe?.noteBashStart(command, match.access);
 			if (repeatEvent) {
-				if (repeatEvent.stop) {
-					lastAbortReason = repeatEvent.reason;
-					abortNow();
-				}
-				return { block: true, reason: repeatEvent.reason };
+				return repeatEvent.stop
+					? stop(repeatEvent.reason)
+					: { block: true, reason: repeatEvent.reason, terminate: false };
 			}
 			const helper = helperPath();
 			if (!helper) {
 				return deny(
-					"pi-subagent-extend: 找不到沙箱 helper（pi-subagent-extend-helper）。在 pi-plugin 目录里跑一次 `pnpm run build:helper`，或用 PI_SUBAGENT_EXTEND_HELPER 指定路径",
+					"pi-subagent-extend: the sandbox helper (pi-subagent-extend-helper) was not found. Run `pnpm run build:helper` in pi-plugin, or point PI_SUBAGENT_EXTEND_HELPER at it.",
 				);
 			}
 			const caps = describeHelper(helper);
 			if (!caps?.landlock.supported) {
-				const reason = caps?.landlock.reason ?? "helper --describe 没有输出可用信息";
-				return deny(`pi-subagent-extend: 当前内核无法强制任务范围：${reason}`);
+				const reason = caps?.landlock.reason ?? "helper --describe returned no usable information";
+				return deny(`pi-subagent-extend: this kernel cannot enforce the task scope: ${reason}`);
 			}
 			const specFile = writeSpec(cwd, rule, policy);
 			if (!specFile) {
-				return deny("pi-subagent-extend: 写不出沙箱 spec（检查 ~/.cache/pi-subagent-extend 是否可写）");
+				return deny("pi-subagent-extend: cannot write the sandbox spec (check that ~/.cache/pi-subagent-extend is writable)");
 			}
 			(event.input as { command?: string }).command = wrapInSandbox(command, specFile, helper);
 			return undefined;
 		}
 		if (EXEC_TOOLS.includes(event.toolName)) {
-			return bail(
-				`pi-subagent-extend: 本会话被限定在任务范围内（${preview(policy.globs)}），不允许执行 ${event.toolName}`,
+			// 从来不可用：给多宽的范围、多长的命令白名单都不会打开，所以不计入撞权限。
+			return deny(
+				`pi-subagent-extend: ${event.toolName} is never available inside a scoped session, whatever the grant; it is not a permission the parent can widen. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
 			);
 		}
-		if (SAFE_TOOLS.includes(event.toolName) || policy.allowTools.includes(event.toolName)) {
-			return undefined;
-		}
+		// SAFE_TOOLS 已经在最前面处理过，这里只管调用方显式放行的工具。
+		if (policy.allowTools.includes(event.toolName)) return undefined;
 
 		if (PATH_TOOLS.includes(event.toolName)) {
 			const input = (event as { input?: { path?: unknown } }).input;
 			const raw = typeof input?.path === "string" ? input.path.trim() : "";
 			const target = raw || ".";
 			if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
-				return bail(`pi-subagent-extend: 已达 read 预算上限（${policy.maxReads} 次）`);
+				return bail(`pi-subagent-extend: read budget exhausted (${policy.maxReads} reads).`);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
 				if (policy.readOnly) {
-					return bail(`pi-subagent-extend: 本会话只读，禁止 ${event.toolName}（来源：${policy.source}）`);
+					return bail(`pi-subagent-extend: this session is read-only; ${event.toolName} is refused (source: ${policy.source}).`);
 				}
 				// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
 				// 这是用法错误不是权限错误，不计入撞权限计数。
 				if (!raw) {
 					return deny(
-						`pi-subagent-extend: ${event.toolName} 必须给 path（参数里没有 path，无法判断目标文件是否在任务范围内）。范围：${preview(policy.globs)}`,
+						`pi-subagent-extend: ${event.toolName} needs a path; none was supplied, so the target cannot be checked against the scope. Pass the path explicitly.\nScope: ${preview(policy.globs)}`,
 					);
 				}
 			}
@@ -844,11 +905,18 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				if (!raw) {
 					// 缺 path：用法错误，不计入撞权限计数。
 					return deny(
-						`pi-subagent-extend: 没有给 path，按当前目录（cwd：${cwd}）处理，而它不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
+						`pi-subagent-extend: no path was given, so the working directory (${cwd}) was used, and it is outside the scope (source: ${policy.source}). Pass a path inside the scope.\nScope: ${preview(policy.globs)}`,
+					);
+				}
+				// cwd / 仓库根：读起来像 scope 写错，其实多半是「想要全仓搜索」。计数（这是
+				// 授权问题），但要说清这不是某个文件路径写错。
+				if (isRootish(raw, cwd)) {
+					return bail(
+						`pi-subagent-extend: "${raw}" is the repository root, not a file inside the task scope (source: ${policy.source}). Pass the concrete file or directory you need; if the task genuinely needs repo-wide access, say so and the parent can widen the scope.\nScope: ${preview(policy.globs)}`,
 					);
 				}
 				return bail(
-					`pi-subagent-extend: "${target}" 不在任务范围内（来源：${policy.source}）。范围：${preview(policy.globs)}`,
+					`pi-subagent-extend: "${target}" is outside this task's scope (source: ${policy.source}). Do not retry paths outside the scope; if the task needs this one, report what you need and why.\nScope: ${preview(policy.globs)}`,
 				);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
@@ -861,42 +929,42 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		}
 
 		return bail(
-			`pi-subagent-extend: 工具 ${event.toolName} 不在放行名单内，拒绝（fail closed；确需放行就在 extensionBindings 的 allowTools 里列出）`,
+			`pi-subagent-extend: tool ${event.toolName} is not on the allow list (fail closed; list it in allowTools if the task needs it).`,
 		);
 	});
 
 	pi.registerCommand("permission", {
-		description: "查看当前任务范围、bash 白名单与探针状态",
+		description: "Show the current task scope, the bash allowlist and the probe state",
 		handler: async (_args, ctx) => {
 			const cwd = ctx.cwd ?? process.cwd();
 			const lines = policy.active
 				? [
-					`来源: ${policy.source}`,
-					`模式: ${policy.readOnly ? "只读" : "读写"}`,
+					`Source: ${policy.source}`,
+					`Mode: ${policy.readOnly ? "read-only" : "read-write"}`,
 					policy.bash
-						? `bash 读: ${policy.bash.read.join(" | ") || "（无）"}`
-						: "bash: 关闭",
-					policy.bash ? `bash 写: ${policy.bash.write.join(" | ") || "（无）"}` : undefined,
+						? `bash read: ${policy.bash.read.join(" | ") || "(none)"}`
+						: "bash: off",
+					policy.bash ? `bash write: ${policy.bash.write.join(" | ") || "(none)"}` : undefined,
 					policy.bash && policy.bash.deny.length > 0
-						? `bash 禁（不可放宽）: ${policy.bash.deny.join(" | ")}`
+						? `bash deny (cannot be lifted): ${policy.bash.deny.join(" | ")}`
 						: undefined,
 					policy.bash
-						? `沙箱: ${policy.bash.network ? "有网" : "断网"}，${policy.bash.writable ? "scope 可写" : "只读根"}`
+						? `Sandbox: ${policy.bash.network ? "network on" : "offline"}, ${policy.bash.writable ? "scope writable" : "read-only root"}`
 						: undefined,
 					policy.bash
-						? `沙箱可写路径: ${
+						? `Sandbox writable paths: ${
 							sandboxWritableDirs(policy, cwd, policy.bash)
 								.map((d) => d.replace(cwd, "."))
-								.join(" | ") || "（无）"
+								.join(" | ") || "(none)"
 						}`
 						: undefined,
 					policy.bash ? `pnpm store: ${describePnpmStore(cwd)}` : undefined,
-					`已读 ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""} 次`,
-					`撞权限: ${denyCounter.status()}`,
-					...(probe ? probe.status() : ["探针: 关闭"]),
+					`Reads: ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""}`,
+					`Denials: ${denyCounter.status()}`,
+					...(probe ? probe.status() : ["Probe: off"]),
 					...policy.globs.map((g) => `  ${g}`),
 				].filter((l): l is string => Boolean(l))
-				: ["未生效（本会话没有 pi-subagent-extend 的 extensionBindings，也没有声明 profile）"];
+				: ["Inactive (no pi-subagent-extend bindings and no profile declared in this session)"];
 			ctx.ui.notify(`pi-subagent-extend:\n${lines.join("\n")}`, "info");
 		},
 	});

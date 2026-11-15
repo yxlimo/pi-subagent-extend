@@ -108,7 +108,7 @@ glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字
 | `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
 | `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；算作「写入活动」 |
 | `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
-| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录、cwd、worktree 根与 `node_modules` 在沙箱内可写（测试产物、快照） |
+| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录、cwd、worktree 根与 `node_modules` 在沙箱内可写（测试产物、快照）。cwd 是 linked worktree 时，主仓的 common git 目录也一并可写——worktree 的索引与 ref 在那里，不给的话 `git add`/`commit`/`stash`/`switch -c` 会失败在 `index.lock` |
 | `bash.writablePaths` | `string[]` | 额外放开写权限的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
 | `bash.env` | `object` | 注入沙箱的环境变量（写进 spec 的 `env`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
 | `bash.gitExcludes` | `boolean` | 默认 `true`。给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`），防止 `git add -A` 把依赖目录吸进索引 |
@@ -142,7 +142,7 @@ subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index
 ```json
 // .pi/subagent-bindings.json（项目根）
 {
-  "default": { "maxDenies": 3 },
+  "default": { "maxDenies": 5 },
   "writer": { "bash": { "read": ["mise run typecheck"], "write": ["mise run test"], "writable": true } },
   "review": { "readOnly": true, "bash": { "read": ["git diff", "rg"], "deny": ["git stash"] } }
 }
@@ -192,20 +192,22 @@ pnpm install --prefer-offline
 
 - 范围内：`read`/`edit`/`write`/`grep`/`find`/`ls` 放行（`readOnly` 时 `edit`/`write` 拒绝）。
 - 一律拒绝：`powershell`/`codemode`；`scope`/`allowTools` 之外的未知工具。
-- `contact_supervisor` / `intercom` / `structured_output` 始终放行：子代理中途向监督者转告是正当通道。
+- `contact_supervisor` / `intercom` / `structured_output` 始终放行，**停机之后也放行**：子代理中途向监督者转告是正当通道，不能被范畴或探针关掉。
+- 停机是硬停（`terminate`）：整批结果都 terminating 时本轮直接结束，不再有收尾回合。所以求援要在停机前用，不要指望被停之后还能报。
 - `bash`：没配白名单时一律拒绝；配了则只有命中 `read`/`write` 两列的命令执行，并且自动改写为
   helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录为 scope 命中目录、cwd 与 `node_modules`（`writable` 时）再加上 `writablePaths`。命令里出现
   `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
-- 缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理，`write`/`edit` 必须给 path。这类拒绝不计入撞权限计数，不会把子代理误判成「授权写错」。
-- 范围内会话可用 `/permission` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态。
+- 越界拒绝的文案是英文，会说清「哪个路径不在范围、不要重试、需要就上报」，并列出当前 scope。缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理（文案写 `no path was given`），`write`/`edit` 必须给 path（文案写 `needs a path`）。这类拒绝不计入撞权限计数。
+- 范围内会话可用 `/permission` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态（键名为英文：`Source`、`Mode`、`bash read`、`bash write`、`bash deny`、`Sandbox`、`Sandbox writable paths`、`Reads`、`Denials`）。
 
 ## 作为父代理的注意事项
 
-- 子代理报「没有给 path」或「必须给 path」时：那是工具参数缺失，不是它走错了目录。给子代理的 task 里写清文件路径。
-- 子代理报「某路径不在任务范围内」时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。先核对 scope 写法本身（目录要写成 `dir` / `dir/` / `dir/**`），再怀疑子代理走错目录。
+- 子代理报 `no path was given` 或 `needs a path` 时：那是工具参数缺失，不是它走错了目录。给子代理的 task 里写清文件路径。
+- 子代理报 `is outside this task's scope` 时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。先核对 scope 写法本身（目录要写成 `dir` / `dir/` / `dir/**`），再怀疑子代理走错目录。
+- 同一批里有放行结果时（整批不全是 terminating），本轮会继续，之后的调用一律拿到「停机理由」那段文字（里面是历史路径）。判断时只认最后一行的 criterion，不要把里面的路径当成本轮任务的路径。
 - 不要为绕开拒绝而反复重试范围外的路径。
 - 需要子代理自己跑测试/typecheck 时，把只读命令写进 `bash.read`、会写文件的写进 `bash.write`（查得细就用 `re:` 正则，别写 `re: .*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。
 - 沙箱挡越界写与联网，不挡读：跑测试要读整棵树，所以白名单命令在沙箱里仍可 `cat` 范围外文件。不要把 bash 白名单当成「连读也锁住」的手段。
-- 子代理报「bash 命令不在白名单内」时，先判断这条命令是否本任务必需：必需就把它加进对应列重派；不必要就改任务描述，别让它反复试。拒绝文案里会带 pnpm store 的路径——子代理要装依赖时把它抄进 `bash.writablePaths` 即可，不要让它自己去装。
+- 子代理报 `command not in the allowlist` 时，先判断这条命令是否本任务必需：必需就把它加进对应列重派；不必要就改任务描述，别让它反复试。拒绝文案里会带 pnpm store 的路径和 `bash.writablePaths` 的提示——子代理要装依赖时把它抄进去即可，不要让它自己去装。
 - 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
 - bindings 总量上限 16 KiB，scope 用简洁 glob 即可；本扩展所有字段共用 namespace `pi-subagent-extend/1`，上限按整个 bindings 计。

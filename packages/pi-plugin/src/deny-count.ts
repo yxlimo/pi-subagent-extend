@@ -36,20 +36,21 @@ export class DenyCounter {
 				yes: true,
 				stop: false,
 				note:
-					`这是第 ${this.#count} 次撞到任务范围的边界。连续被拒通常说明父代理给的授权与任务不匹配，` +
-					"而不是你走错了地方：停止继续试探，把「我需要访问什么、为什么任务需要它」直接写进最终汇报交给父代理。",
+					`That is refusal ${this.#count} in a row. Repeated refusals usually mean the grant does not match the task, ` +
+					"not that you are in the wrong place. Use contact_supervisor to say what you need and why — one more refusal ends the run.",
 			};
 		}
 		return {
 			yes: true,
 			stop: true,
+			// 硬停之后模型没有下一轮，这段文字的实际读者是父代理：写成诊断，而不是叮嘱。
 			note:
-				`第 ${this.#count} 次被拒（判据：撞权限）。本轮到此停止——把已完成的部分、缺的权限、下一步打算都写清楚，` +
-				"作为最终汇报交给父代理，由它重新派单。",
+				`Refusal ${this.#count} (criterion: denial budget): the run is over. For the parent session — ` +
+				"the subagent can no longer act. If the need was not escalated, re-dispatch with a wider grant or a clearer task.",
 		};
 	}
 
 	status(): string {
-		return this.#limit > 0 ? `${this.#count}/${this.#limit}` : "关闭";
+		return this.#limit > 0 ? `${this.#count}/${this.#limit}` : "off";
 	}
 }

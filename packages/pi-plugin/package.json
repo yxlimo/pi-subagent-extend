@@ -33,8 +33,9 @@
     "build": "tsc -p tsconfig.json",
     "build:helper": "mkdir -p bin && cargo build --release --manifest-path ../helper/Cargo.toml && cp ../helper/target/release/pi-subagent-extend-helper bin/",
     "pretest": "pnpm run build:helper",
-    "test": "node test/extension.test.mjs && node test/context.test.mjs",
-    "test:e2e": "node test/e2e.test.mjs",
+    "test": "node test/extension.test.mjs && node test/context.test.mjs && node test/mock-session.test.mjs",
+    "test:mock": "node test/mock-session.test.mjs",
+    "test:llm": "node test/e2e.test.mjs",
     "prepublishOnly": "pnpm run build"
   },
   "devDependencies": {

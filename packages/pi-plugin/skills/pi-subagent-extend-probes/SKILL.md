@@ -1,6 +1,6 @@
 ---
 name: pi-subagent-extend-probes
-description: 给受限子代理配探针时使用：检测只读空转、原地打转、早可收工、造杂物、撞权限，命中即拦截，达到 stop 条件后只允许它写汇报。适用场景：子代理反复读同一处或反复撞同一个拒绕而不推进、任务已实质完成却还在试、开始创建探针杂文件。写明 extensionBindings 里 pi-subagent-extend/1 的 maxDenies 与 probe 字段与默认值、warn 与 stop 的差别，以及子代理被停后怎么读它的汇报。范围与 bash 白名单见 pi-subagent-extend。
+description: 给受限子代理配探针时使用：检测只读空转、原地打转、早可收工、造杂物、撞权限，命中即拦截当次调用，达到 stop 条件后本轮直接结束。适用场景：子代理反复读同一处或反复撞同一个拒绕而不推进、任务已实质完成却还在试、开始创建探针杂文件。写明 extensionBindings 里 pi-subagent-extend/1 的 maxDenies 与 probe 字段与默认值、warn 与 stop 的差别（stop 是硬停，没有收尾回合），以及子代理被停后父代理该看什么。范围与 bash 白名单见 pi-subagent-extend。
 ---
 
 # 探针：检测子代理的空转与无效工作
@@ -17,7 +17,7 @@ description: 给受限子代理配探针时使用：检测只读空转、原地�
 | 在仓库里留下探针用的临时文件 | 造杂物 |
 | 反复碰同一个权限拒绝 | 撞权限 |
 
-判据命中即拦截当次 tool_call 并给出理由；达到 stop 条件后**每个** tool 边界都拒绝，子代理只能写汇报。
+判据命中即拦截当次 tool_call 并给出理由；达到 stop 条件后本轮直接结束（被拦结果都带 `terminate`），没有收尾回合。
 
 ## 默认行为
 
@@ -26,7 +26,7 @@ description: 给受限子代理配探针时使用：检测只读空转、原地�
 | 判据 | 默认 | 说明 |
 | --- | --- | --- |
 | 原地打转 | 开，`repeatBash: 3` | 同一条 bash 命令原文（trim 后）第 3 次 → warn，第 4 次 → stop |
-| 撞权限 | 开，`maxDenies: 3` | 连续被范围规则拒绝第 3 次 → warn，第 4 次 → stop。工具参数缺失（没给 path）不算在内 |
+| 撞权限 | 开，`maxDenies: 5` | 连续第 5 次**授权类**拒绝 → warn（要求它去求援），第 6 次 → 硬停。只统计「父代理放宽授权能解决」的拒绝：范围外路径、命令不在白名单、read 预算、readOnly 写、工具不在 `allowTools`、整个 bash 被关 |
 
 会误伤慢任务的三条必须显式配置：`probe: {}` 一次打开全部默认值，写部分字段则只打开写到的那些，`probe: false` 全关。
 
@@ -53,7 +53,7 @@ description: 给受限子代理配探针时使用：检测只读空转、原地�
 "pi-subagent-extend/1": {
   "scope": ["src/auth/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
-  "maxDenies": 3,
+  "maxDenies": 5,
   "probe": {
     "idleWriteMs": 360000,
     "abortGraceMs": 120000,
@@ -66,15 +66,11 @@ description: 给受限子代理配探针时使用：检测只读空转、原地�
 
 ## 停机语义（父代理必须知道）
 
-warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool 边界都拒绝。
+warn 只拦一次 tool_call 并把理由写给它；stop 是**硬停**：被拦的结果都带 `terminate`，pi 在整批工具结果都 terminating 时结束本轮（`docs/extensions.md`）。所以：
 
-停机既不调 `ctx.abort()` 也不用 `terminate`：两者都会把子代理正在写的收尾汇报一起掐掉，最终输出被截断。所以被停的子代理**一定能给出汇报**——里面通常写着「已完成什么、缺什么授权、下一步打算」。
-
-因此：
-
-- 被停的汇报是诊断，不是任务结果。按它补授权或补信息再重派，**不要原样重试**。
-- 汇报里常说「请放开某条命令」或「请把某文件加进 scope」，那是判断该扩什么范围的依据。
-- 子代理也可能用 `contact_supervisor` 主动上报（该工具始终放行），那条消息同样值得读。
+- **停机之后没有收尾回合**。子代理不会再有「写最终汇报」的机会，父代理要靠它停下前已产出的内容加上被拒理由判断发生了什么。想让子代理自己交代，就该在它还没撞线时让它报。
+- **求援通道不受停机影响**。`contact_supervisor` / `intercom` / `structured_output` 先于停机判定，永远放行——这一点在**同一批里有放行结果**时（整批不全是 terminating，本轮继续）才真正救命：被停的子代理仍能把「我卡在哪、需要什么」送出来。
+- 停机理由不会被当成当前调用的判定。文案会明确写「which criterion stopped the run」以及触发它的那次调用；不要把里面的路径当成「刚被拒的路径」——那是历史。
 
 ## 作为父代理的注意事项
 
@@ -82,7 +78,7 @@ warn 只拦一次 tool_call 并把理由写给它；stop 之后**每个** tool �
 - `successPatterns` 默认是 `fail=0` / `0 failed` 这类测试汇总标记；项目用别的输出格式就自己写（如 `no errors`、`All files pass`）。别写成过宽的 `ok`、`passed`——几乎每条命令都会命中。
 - 想限制子代理乱写调试文件，用 `forbidWritePatterns` 点名项目自己的临时文件名（如 `scratch/.*`、`_tmp-.*`）。命中是拒绝单次写入，不停机。
 - 同一轮委派里反复出现「原地打转」说明任务描述有问题（要求它重复同一动作），先修任务而不是调大 `repeatBash`。
-- 「撞权限」只统计范围类拒绝。工具参数缺失（没给 path）是另一类问题，改 task 说清路径，不要靠调大 `maxDenies` 掩盖。
+- 「撞权限」只统计**授权类**拒绝，判据是「父代理放宽授权或调整设置能不能解决」。计数的是：范围外路径（含把 `.` 当路径）、命令不在白名单、read 预算用尽、`readOnly` 下写、工具不在 `allowTools`、整个 bash 被关。不计数的是：用法错误（缺 path、shell 元字符、空命令）与硬规则（`powershell`/`codemode` 这类永久不开放的工具、profile 的 `bash.deny`）——把这类算进预算，一次参数写错就能把长任务提前判死。看到子代理报用法错误，改 task 说清楚，不要靠调大 `maxDenies` 掩盖。
 - 探针只管确定性信号。语义层面的漏测、不安全改动，交给 pi-subagents 自带的 LLM watchdog（`subagents.watchdog`），两者互补。
 
 ## 与 pi-subagents 自带能力的配合
@@ -133,7 +129,7 @@ subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination
 
 **探针 + LLM watchdog。** 不冲突，配置通道不同：探针走 `extensionBindings`，watchdog 走 settings 的 `subagents.watchdog`。watchdog 自己有一条 `stalemateRepeats`（默认 3 次同样 warning）会结束轮次，那是语义层面的；探针的打转判据是命令层面的，两者可能同时命中，不重复计费也不用互相关闭。
 
-**探针 + 后台运行。** 后台（`async: true`）子代理在独立进程里跑，探针照常工作；`checkpointBeforeDeadlineMs` 只在 async 单代理上有效，前台阻塞运行时没有这个收尾机制，靠探针的 stop 让子代理写汇报。
+**探针 + 后台运行。** 后台（`async: true`）子代理在独立进程里跑，探针照常工作；`checkpointBeforeDeadlineMs` 只在 async 单代理上有效。前台阻塞运行时没有这种收尾机制，而探针的 stop 是**硬停**（本轮直接结束，不会给子代理写汇报的机会）——所以长任务靠 `contact_supervisor` 主动上报，而不是指望停下来的那一刻。
 
 ### 等待方式：让出回合，不要 sleep
 
@@ -175,13 +171,13 @@ subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination
 "pi-subagent-extend/1": {
   "scope": ["src/auth/**", "src/lib/**"],
   "readOnly": true,
-  "maxDenies": 3
+  "maxDenies": 5
 }
 ```
 
 要点：
 
-- **评审要读得比实现宽**。实现子代理的 scope 只该有它要改的那块；评审要看改动涉及的依赖、类型定义、测试，scope 得覆盖这些，否则评审会一路撞权限停下，而且它撞权限的汇报会被父代理误读成「实现有问题」。
+- **评审要读得比实现宽**。实现子代理的 scope 只该有它要改的那块；评审要看改动涉及的依赖、类型定义、测试，scope 得覆盖这些，否则评审会一路撞权限被硬停，而它停前留下的痕迹会被父代理误读成「实现有问题」。
 - **评审单 `readOnly: true`**：同时跳过「只读空转」和「早可收工」两条时间判据（本来就是只读任务），但「原地打转」「撞权限」「造杂物」仍然生效——评审反复跑同一条命令或乱写临时文件一样是浪费。
 - **`maxDenies` 对评审单更重要**：评审忘了给某个目录的读权限时，它会立刻停下并报告「缺哪个目录」，父代理据此补 scope 重跑评审即可，不用重新实现。
 

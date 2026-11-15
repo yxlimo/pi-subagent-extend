@@ -37,14 +37,17 @@ jobs:
       - name: Helper tests
         run: cargo test --manifest-path packages/helper/Cargo.toml --locked
 
-      # Builds the helper first (the package's pretest hook), then runs the
-      # scope and context suites against a fake pi API.
+      # Builds the helper first (the package's pretest hook), then runs three
+      # suites: the scope and context ones against a fake pi API, and the mock
+      # session one against a real pi process driven by a scripted
+      # OpenAI-compatible mock server (no model, no network beyond localhost).
       - name: Extension tests
         working-directory: packages/pi-plugin
         run: pnpm test
 
-      # The end-to-end suite needs a real model and is run by hand:
-      #   PI_E2E_MODEL=<provider>/<model> pnpm run test:e2e
+      # Real-model checks stay manual: they are for final debugging only, and
+      # any boundary they reveal should come back as a mock-session case.
+      #   PI_E2E_MODEL=<provider>/<model> pnpm run test:llm
 
       # The worktree hook has no dependencies, and these cases start it the way
       # pi-subagents does: the file itself, with nothing but a shebang.
