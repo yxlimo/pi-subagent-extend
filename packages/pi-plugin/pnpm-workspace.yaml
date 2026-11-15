@@ -1,0 +1,6 @@
+# pnpm 12 reads its settings from this file only, not from package.json.
+#
+# Some transitive dependencies ship build scripts this package never runs, and
+# pnpm 12 otherwise fails an otherwise complete install with
+# ERR_PNPM_IGNORED_BUILDS.
+strictDepBuilds: false

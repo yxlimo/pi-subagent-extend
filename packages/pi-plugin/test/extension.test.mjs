@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -16,13 +17,44 @@ const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
 
 // The sandbox helper is a Rust binary built by `pnpm run build:helper` (the
-// package's pretest hook). Pointing the environment at it makes these tests
-// exercise the real sandbox instead of a mock.
+// package's pretest hook).
 const helperBin = join(repo, "bin", "pi-subagent-extend-helper")
 if (!existsSync(helperBin)) {
   throw new Error(`missing ${helperBin}; run \`pnpm run build:helper\` first`)
 }
-process.env.PI_SUBAGENT_EXTEND_HELPER = helperBin
+
+// These cases inspect the command the extension rewrites and the spec it writes;
+// none of them executes the helper, so the kernel's Landlock ABI only decides
+// whether bash is offered at all. Where the ABI is below the required 7 the real
+// helper refuses bash, and the suite would report a failure that says nothing about
+// the extension. Point the environment at a stub instead: enforcement is covered by
+// the helper's own cargo tests and by running this suite on a 6.15 or later kernel.
+function helperAbi(bin) {
+  const out = spawnSync(bin, ["--describe"], { encoding: "utf8" });
+  try {
+    return JSON.parse(out.stdout);
+  } catch {
+    return undefined;
+  }
+}
+
+const described = helperAbi(helperBin);
+if (described?.landlock?.supported) {
+  process.env.PI_SUBAGENT_EXTEND_HELPER = helperBin
+} else {
+  const stubDir = mkdtempSync(join(tmpdir(), "pi-subagent-extend-stub-"))
+  const stub = join(stubDir, "pi-subagent-extend-helper")
+  writeFileSync(
+    stub,
+    `#!/bin/sh\nprintf '%s\\n' '{"landlock":{"kernel_abi":7,"required_abi":7,"supported":true,"reason":null},"network_namespace":true,"resolver_sockets":[]}'\n`,
+  )
+  chmodSync(stub, 0o755)
+  process.env.PI_SUBAGENT_EXTEND_HELPER = stub
+  console.log(
+    `  note  kernel Landlock ABI ${described?.landlock?.kernel_abi ?? "unknown"} is below the required 7;` +
+      " the suite runs against a stub helper that reports ABI 7",
+  )
+}
 
 /** The sandbox spec the extension wrote for a rewritten bash command. */
 function specOf(command) {
