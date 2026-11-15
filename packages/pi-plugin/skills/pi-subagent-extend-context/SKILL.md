@@ -1,6 +1,6 @@
 ---
 name: pi-subagent-extend-context
-description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看的规则（怎么委派、怎么等结果、汇报口径、主代理专属的写权限边界），用这个 skill 把子代理侧的提示词裁干净：一部分留在 AGENTS.md 里用 <!-- main-agent-only:start --> 标记圈掉，主代理专属的整段放 .pi/main-only.md 只注入主会话。含三个入口的分工、标记写法、不闭合时的降级行为，以及和 inheritProjectContext 全有全无开关的取舍。
+description: 委派子代理时用它把主代理专属内容从子代理提示词中移除：AGENTS.md 里用 <!-- main-agent-only:start --> 圈出的段落子代理看不到，主代理专属规则另放 .pi/main-only.md 只注入主会话。适用场景：AGENTS.md 里混着委派纪律、等待方式、汇报口径、主代理专属的写权限边界，子代理读到会白占上下文并错认职责。含三个入口的分工、标记写法、标记不闭合时的降级、与 inheritProjectContext 全有全无开关的取舍。
 ---
 
 # 上下文隔离：让 AGENTS.md 只喂该喂的那部分
@@ -11,7 +11,9 @@ description: 委派子代理时，如果 AGENTS.md 里混着只该主代理看�
 
 文件范围与 bash 白名单见 `pi-subagent-extend`，探针判据见 `pi-subagent-extend-probes`。三件事互不依赖，可以只用其中一个。
 
-## 两种用法，按「这段内容属于谁」选
+子代理在 `worktree` 里装依赖是另一件事（`worktreeSetupHook`），同样见 `pi-subagent-extend`。
+
+## 用在什么场景：这段内容属于谁
 
 | 内容 | 放哪 | 子代理看得见吗 |
 | --- | --- | --- |

@@ -450,9 +450,13 @@ What the parent model needs to know ships as three skills published with the ext
 
 | Skill | Contents |
 | --- | --- |
-| `skills/pi-subagent-extend` | File scope, the two bash columns and `re:` patterns, the sandbox, and a call template |
-| `skills/pi-subagent-extend-probes` | The four probe criteria, the denial count, warn and stop semantics, and how to read a report after a stop |
+| `skills/pi-subagent-extend` | File scope, the two bash columns and `re:` patterns, the sandbox, worktree dependency setup through `worktreeSetupHook`, agent profiles, and a call template |
+| `skills/pi-subagent-extend-probes` | The five probe criteria, the denial count, warn and stop semantics, and how to read a report after a stop |
 | `skills/pi-subagent-extend-context` | The `<!-- main-agent-only:start -->` markers, `.pi/main-only.md`, and the division of labour between the three entry points |
+
+Each skill opens with a table of the situations it covers, and its frontmatter description names
+them too: Pi advertises only the name and description, and loads the rest when the task calls for
+it, so the summary has to carry the routing decision on its own.
 
 The extension registers all three directories with the session through `resources_discover`:
 when the extension is loaded, its skills enter the list available to the system prompt, and

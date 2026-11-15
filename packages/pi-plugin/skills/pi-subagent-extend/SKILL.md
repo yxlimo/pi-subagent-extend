@@ -1,11 +1,22 @@
 ---
 name: pi-subagent-extend
-description: 委派 pi-subagents 子代理并限定其任务范围时使用。写明如何通过 extensionBindings（namespace pi-subagent-extend/1）把子代理可读可写的文件限制在指定范围内，范围外的所有 tool_call 一律被拒绝；需要子代理自己跑测试/typecheck 时用 bash.read / bash.write 点名命令（支持 re: 正则），在沙箱 helper 里执行（Landlock 强制文件范围、默认断网）；worktree 隔离、pnpm/mise 的可写目录用 bash.writablePaths 与 bash.env 处理。
+description: 委派 pi-subagents 子代理时，用 extensionBindings 把它的文件读写和可跑命令限定在本任务范围内：范围外的 tool_call 一律被拒绝，bash 白名单里的命令在 Landlock 沙箱里执行（默认断网、写目录受限）。适用场景：不让子代理扫整个仓库、给子代理放行 typecheck/test、在 worktree 里装依赖或跑验证、按角色配默认范围（profile）。判据与停机见 pi-subagent-extend-probes；裁掉 AGENTS.md 里的主代理专属段落见 pi-subagent-extend-context。
 ---
 
 # pi-subagent-extend：给子代理限定任务范围
 
 委派子代理时通过 `extensionBindings` 传入本次任务的范围。子代理会话里，范围之外的所有 tool_call 一律被拒绝（fail closed）：防止子代理漫无目的地扫仓库。
+
+## 用在什么场景
+
+| 场景 | 用哪个字段 | 看哪一节 |
+| --- | --- | --- |
+| 子代理只该读/写本任务的那几个文件 | `scope`，只读任务加 `readOnly` | [scope 字段](#scope-字段) |
+| 子代理要自己跑 typecheck、测试、构建 | `bash.read` / `bash.write`，产物落盘加 `writable` | [bash 字段](#bash-字段) |
+| 子代理在 `worktree: true` 里跑，需要装依赖 | 项目提交 `.pi/worktree-setup.sh`，配合 `writablePaths` / `network` | [worktree 里的 bash](#worktree-里的-bash) |
+| 不想每次派单都手写范围（忙起来会忘） | agent profile | 下文「profile（角色默认值）」 |
+| 子代理开始空转或原地打转 | 本包的另一半：探针 | skill `pi-subagent-extend-probes` |
+| AGENTS.md 里混着只该主代理看的规则 | 本包的另一半：上下文隔离 | skill `pi-subagent-extend-context` |
 
 判据与停机（只读空转、原地打转、早可收工、造杂物、撞权限）见另一个 skill `pi-subagent-extend-probes`。
 
@@ -149,10 +160,33 @@ subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index
 
 子代理跑在 pi-subagents 的 managed worktree 时（`worktree: true`），两件事要额外安排：
 
-- **worktree 的 `node_modules` 是指向主仓的符号链接**：`pnpm install` 会顺着链接装进主仓、链接本身不被替换，层级因此是错的。装之前先删掉链接，删掉后 install 正常——装了 `virtualStoreType: global` 的项目每次只建指向全局 store 的链接，实测百毫秒级。依赖已经就位时用 `verifyDepsBeforeRun: false`（项目侧 `pnpm-workspace.yaml`）跳过前置安装。
+- **装依赖不归扩展管**：worktree 的 `node_modules` 是指向主仓的符号链接，`pnpm install` 会顺着链接装进主仓、链接本身不被替换，层级因此是错的。这件事交给 pi-subagents 的 `worktreeSetupHook`（本仓 `packages/worktree-setup`）在子代理启动前处理，见下一节。扩展只管沙箱内的写权限。
 - **pnpm 与 mise 都要写沙箱外的地方**：pnpm 的锁目录在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`），mise 要把 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`。扩展默认把这两处指到沙箱私有 /tmp，所以这两个失败已经不用管；pnpm store 这类真正需要持久可写的地方，用 `bash.writablePaths` 显式给出。
 - **沙箱里 pnpm 用哪个 store 取决于写权限**：全局 store（`~/.local/share/pnpm/store`）在只读根下不可写时，pnpm 探测到就退回 `<项目>/node_modules/.pnpm-store`；把 store 目录写进 `bash.writablePaths`，`pnpm store path` 就仍指向全局 store（实测）。两种都能跑测试——项目内 store 落在本来就可写的 `node_modules/` 下。扩展用 git 全局排除规则保证它进不了索引，但项目自己的 `.gitignore` 也应忽略 `node_modules/`。
 - **沙箱里装依赖需要开网络**（`"network": true`）：无论用哪个 store，装新包都得访问 registry。默认断网时 `pnpm install` 必然失败。
+
+## worktree 依赖安装（worktree hook）
+
+pi-subagents 每个 worktree 创建后、子代理启动前会跑一次 `worktreeSetupHook`，cwd 就是新工作树根。本仓提供的 hook 是 `packages/worktree-setup/worktree-setup.sh`，全局只装一个软链：
+
+```text
+~/.pi/agent/extensions/subagent/worktree-setup.sh -> <本仓>/packages/worktree-setup/worktree-setup.sh
+```
+
+项目侧只要提交一个 shell 脚本 `<repo>/.pi/worktree-setup.sh`，没这个文件就什么都不做（所以同一个全局 hook 服务所有项目）：
+
+```sh
+#!/bin/sh
+set -eu
+cd packages/pi-plugin      # manifest 不在根目录时自己 cd
+pnpm install --prefer-offline
+```
+
+- **退出码就是契约**：hook 不二次判断「装好没」，项目在自己的脚本里决定。pnpm 12 装完还会因 `ERR_PNPM_IGNORED_BUILDS` 退 1，那就自己写 `|| true` 或加一条自检。
+- **符号链接由 hook 先删**（`node_modules` 指向主仓时先 unlink 再装），项目脚本不用管。
+- 输出记在 `~/.cache/pi-worktree-setup/<worktree 目录名>.log`；失败时 hook 把最后 20 行和日志路径打到 stderr，输出含 `not trusted` 时额外提示 mise 的 `trusted_config_paths`。
+- **hook 不经过沙箱**：它在子代理之前跑，用的是宿主权限。子代理自己再跑 `pnpm install` 仍然要沙箱内的写权限与 `network`。
+- hook 是 POSIX sh，需要内核认 shebang；Windows 得上原生可执行文件（上游用 `spawn(hookPath, [], { shell: false })`，Node 不会代跑 `.cmd`）。
 
 ## 生效后的规则
 
