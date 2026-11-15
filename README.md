@@ -13,11 +13,52 @@ pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任�
 ## 布局
 
 ```text
-packages/pi-plugin       pi 扩展   (src/, test/{extension,context}.test.mjs, install.sh, skills/pi-subagent-extend{,-probes,-context}/SKILL.md)
-packages/helper          沙箱 helper (Rust：Landlock + 网络/挂载命名空间，构建产物落到 packages/pi-plugin/bin/)
+packages/pi-plugin         pi 扩展   (src/, test/{extension,context}.test.mjs, install.sh, skills/pi-subagent-extend{,-probes,-context}/SKILL.md)
+packages/helper            沙箱 helper (Rust：Landlock + 网络/挂载命名空间，构建产物落到 packages/pi-plugin/bin/)
+packages/worktree-setup    pi-subagents 的 worktreeSetupHook（独立脚本，见下文；暂未做成扩展）
 ```
 
 `src/` 下三个入口：`index.ts`（范围与 bash）、`main-context.ts`（主代理侧上下文，随环境加载）、`child-context.ts`（子代理侧剥标记，由 agent 定义声明）。
+
+## worktree 初始化钩子（packages/worktree-setup）
+
+给 pi-subagents 的 `worktreeSetupHook` 用：worktree 建好、子代理启动前跑一次项目声明的命令。它要解决的问题是 pi-subagents 把主仓 `node_modules` 链进 worktree（`linkNodeModulesIfPresent`），pnpm 会顺着链接装、层级因此错掉。
+
+全局只放一条软链，脚本本体在本仓（以后可能做成扩展）：
+
+```text
+~/.pi/agent/extensions/subagent/worktree-setup.mjs -> 本仓 packages/worktree-setup/worktree-setup.mjs
+```
+
+```json
+// ~/.pi/agent/extensions/subagent/config.json
+{
+  "worktreeSetupHook": "~/.pi/agent/extensions/subagent/worktree-setup.mjs",
+  "worktreeSetupHookTimeoutMs": 300000,
+  "worktreeBaseDir": "~/.pi/worktrees"
+}
+```
+
+**闸门是项目自己的文件**：`<repoRoot>/.pi/worktree-setup.json` 存在才执行，否则什么都不做（1ms 退出）。所以全局一份脚本可以服务所有项目，不需要转发层。
+
+```json
+// 单包仓库（package.json 在根）：不需要 cwd
+{ "command": ["pnpm", "install", "--prefer-offline"] }
+
+// 多包、根目录没有 manifest（本仓就是这种）：用 cwd 指定装哪个目录
+{ "command": ["pnpm", "install", "--prefer-offline"], "cwd": "packages/pi-plugin" }
+```
+
+`cwd` 不是冗余开关：根目录没有 `package.json` 时 pnpm 直接 `ERR_PNPM_NO_PKG_MANIFEST`。
+
+判定成功与否看**树能不能用**，不看命令退出码：`node_modules` 必须是真实目录、声明的依赖要能解析。pnpm 12 装完所有包后仍可能因 `ERR_PNPM_IGNORED_BUILDS` 返回 1，按退出码判会把每次 launch 都误拒（实测复现过）。
+
+两处环境事实：
+
+- shebang 写的是具体 node 路径而不是 `#!/usr/bin/env node`。PATH 上的 `node` 是 mise shim，新 worktree 的 `mise.toml` 未信任时 shim 直接退出，脚本一行都不会执行、连日志都留不下。换机器要改这一行。
+- mise 信任归项目自己解决（`trusted_config_paths`），脚本只负责把 `not trusted` 原文抛出来，不替项目兜底。
+
+运行日志：`~/.cache/pi-worktree-setup/<runId>.log`。
 
 ## 行为
 
