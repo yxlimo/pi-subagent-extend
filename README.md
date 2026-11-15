@@ -1,33 +1,51 @@
 # pi-subagent-extend
 
-> 曾用名 `pi-allow-reads` → `pi-subagent-permission`。现名把范围扩到「子代理相关的一次收齐」（权限 + 上下文隔离），绑定命名空间、环境变量、helper 二进制与 skill 目录都跟着改过，旧名不再接受。
+> Formerly `pi-allow-reads`, then `pi-subagent-permission`. The current name reflects a
+> wider scope: everything subagent-related in one package, covering both permissions and
+> context isolation. The binding namespace, the environment variable, the helper binary and
+> the skill directories changed with each rename, and the former identifiers are no longer
+> accepted.
 
-pi 扩展：把一个会话（主要是子代理）能碰的文件限制在任务范围内。父代理委派时指定本次任务的文件/目录，子代理会话里范围之外的 tool_call 一律拒绝，防止子代理漫无目的地扫仓库。
+A pi extension that confines the files a session, subagents in particular, may touch to the
+scope of its task. The parent agent names the files and directories the task covers when it
+delegates; any tool call outside that scope in the subagent's session is refused, which
+keeps a subagent from wandering through the repository.
 
-同一个包还管第二件事：**上下文隔离**。`AGENTS.md` 里用 `<!-- main-agent-only:start -->` 圈出的段落不进子代理提示词，整段只给主代理的内容放 `.pi/main-only.md` 只注入主会话。两件事互不依赖，可以只用一个（见「上下文隔离」）。
+The same package handles a second, independent concern: **context isolation**. A section of
+`AGENTS.md` fenced by `<!-- main-agent-only:start -->` and `<!-- main-agent-only:end -->`
+never reaches a subagent's prompt, and content that belongs entirely to the main agent lives
+in `.pi/main-only.md`, which is injected into the main session only. Either concern can be
+used without the other; see [Context isolation](#context-isolation).
 
 | npm package | directory | host | what it does |
 | --- | --- | --- | --- |
-| `pi-subagent-extend` | `packages/pi-plugin` | pi extension | 会话激活时读取任务范围，`tool_call` 阶段拦截范围外的一切调用 |
+| `pi-subagent-extend` | `packages/pi-plugin` | pi extension | reads the task scope when a session activates and refuses, at the `tool_call` stage, every call outside it |
 
-## 布局
+## Layout
 
 ```text
-packages/pi-plugin         pi 扩展   (src/, test/{extension,context}.test.mjs, install.sh, skills/pi-subagent-extend{,-probes,-context}/SKILL.md)
-packages/helper            沙箱 helper (Rust：Landlock + 网络/挂载命名空间，构建产物落到 packages/pi-plugin/bin/)
-packages/worktree-setup    pi-subagents 的 worktreeSetupHook（独立脚本，见下文；暂未做成扩展）
+packages/pi-plugin         pi extension (src/, test/{extension,context}.test.mjs, install.sh, skills/pi-subagent-extend{,-probes,-context}/SKILL.md)
+packages/helper            sandbox helper (Rust: Landlock plus network, mount and PID namespaces; the build artifact lands in packages/pi-plugin/bin/)
+packages/worktree-setup    the pi-subagents worktreeSetupHook (a standalone script, see below; not an extension yet)
 ```
 
-`src/` 下三个入口：`index.ts`（范围与 bash）、`main-context.ts`（主代理侧上下文，随环境加载）、`child-context.ts`（子代理侧剥标记，由 agent 定义声明）。
+`src/` holds three entry points: `index.ts` for scope and bash, `main-context.ts` for the
+main-agent side of context isolation (loaded ambiently), and `child-context.ts` for stripping
+the markers in subagents (declared by the agent definition).
 
-## worktree 初始化钩子（packages/worktree-setup）
+## worktree initialisation hook (packages/worktree-setup)
 
-给 pi-subagents 的 `worktreeSetupHook` 用：worktree 建好、子代理启动前跑一次项目声明的命令。它要解决的问题是 pi-subagents 把主仓 `node_modules` 链进 worktree（`linkNodeModulesIfPresent`），pnpm 会顺着链接装、层级因此错掉。
+This script serves pi-subagents' `worktreeSetupHook`: once a worktree exists and before the
+subagent starts, it runs a command the project declares. It exists because pi-subagents
+links the main checkout's `node_modules` into a new worktree through
+`linkNodeModulesIfPresent`, and pnpm installs through that link, which leaves the virtual
+store at the wrong depth.
 
-全局只放一条软链，脚本本体在本仓（以后可能做成扩展）：
+Only a symlink is installed globally; the script itself is versioned here, since it may
+become an extension:
 
 ```text
-~/.pi/agent/extensions/subagent/worktree-setup.mjs -> 本仓 packages/worktree-setup/worktree-setup.mjs
+~/.pi/agent/extensions/subagent/worktree-setup.mjs -> packages/worktree-setup/worktree-setup.mjs
 ```
 
 ```json
@@ -39,167 +57,311 @@ packages/worktree-setup    pi-subagents 的 worktreeSetupHook（独立脚本，�
 }
 ```
 
-**闸门是项目自己的文件**：`<repoRoot>/.pi/worktree-setup.json` 存在才执行，否则什么都不做（1ms 退出）。所以全局一份脚本可以服务所有项目，不需要转发层。
+**The gate is the project's own file.** The hook runs only when `<repoRoot>/.pi/worktree-setup.json`
+exists; otherwise it exits immediately without doing anything. One global script therefore
+serves every project, and no forwarding layer is needed.
 
 ```json
-// 单包仓库（package.json 在根）：不需要 cwd
+// single-package repository (package.json at the root): cwd is unnecessary
 { "command": ["pnpm", "install", "--prefer-offline"] }
 
-// 多包、根目录没有 manifest（本仓就是这种）：用 cwd 指定装哪个目录
+// multiple packages without a root manifest (this repository): cwd names the directory to install in
 { "command": ["pnpm", "install", "--prefer-offline"], "cwd": "packages/pi-plugin" }
 ```
 
-`cwd` 不是冗余开关：根目录没有 `package.json` 时 pnpm 直接 `ERR_PNPM_NO_PKG_MANIFEST`。
+`cwd` is not a redundant switch: pnpm fails with `ERR_PNPM_NO_PKG_MANIFEST` when the
+directory has no `package.json`.
 
-判定成功与否看**树能不能用**，不看命令退出码：`node_modules` 必须是真实目录、声明的依赖要能解析。pnpm 12 装完所有包后仍可能因 `ERR_PNPM_IGNORED_BUILDS` 返回 1，按退出码判会把每次 launch 都误拒（实测复现过）。
+The verdict is whether **the tree is usable**, not the command's exit code: `node_modules`
+must be a real directory and the declared dependencies must resolve. pnpm 12 installs every
+package and can still exit with one because of `ERR_PNPM_IGNORED_BUILDS`, and judging by the
+exit code would refuse every launch; this was reproduced.
 
-两处环境事实：
+Two environment facts:
 
-- shebang 写的是具体 node 路径而不是 `#!/usr/bin/env node`。PATH 上的 `node` 是 mise shim，新 worktree 的 `mise.toml` 未信任时 shim 直接退出，脚本一行都不会执行、连日志都留不下。换机器要改这一行。
-- mise 信任归项目自己解决（`trusted_config_paths`），脚本只负责把 `not trusted` 原文抛出来，不替项目兜底。
+- The shebang names a concrete node binary rather than `#!/usr/bin/env node`. The `node` on
+  PATH is a mise shim, and when a new worktree's `mise.toml` is not trusted the shim exits
+  at once, so the script never executes a single line and leaves no log. This line must be
+  adjusted on another machine.
+- mise trust is the project's responsibility (`trusted_config_paths`). The script only
+  surfaces the `not trusted` output verbatim; it does not compensate for it.
 
-运行日志：`~/.cache/pi-worktree-setup/<runId>.log`。
+Runs are logged to `~/.cache/pi-worktree-setup/<runId>.log`.
 
-## 行为
+## Behaviour
 
-fail closed：范围生效时，下表之外的任何工具也一律拒绝。
+The extension fails closed: while a scope is active, any tool not listed below is refused as
+well.
 
-| 工具 | 行为 |
-|------|------|
-| `read` | 解析 path（缺省视为 cwd），命中范围放行，否则拒绝；受 `maxReads` 预算约束 |
-| `edit` / `write` | 同上；`readOnly` 时即使范围内也拒绝 |
-| `grep` / `find` / `ls` | 同上（path 缺省为 cwd） |
-| `bash` | 没配白名单时一律拒绝；配了则只放行 `bash.read` / `bash.write` 命中的命令，并改写为交给沙箱 helper 执行（文件范围由 Landlock 强制、默认断网、scope 可写需 `writable`）；命令含 shell 元字符直接拒绝 |
-| `bash.writablePaths` | 额外给可写权限的路径（pnpm store、mise state 等全局可写区） |
-| `bash.env` | 注入沙箱的环境变量 |
-| `powershell` / `codemode` | 一律拒绝（没有路径可判，能绕过范围） |
-| `structured_output` | 放行（会话级运行时工具，不碰文件系统） |
-| 其余未知工具 | 拒绝；`allowTools` 里点名的工具放行（执行器类仍拒绝） |
+| Tool | Behaviour |
+| --- | --- |
+| `read` | Resolves the path, treating a missing one as the working directory, and allows it when it falls inside the scope. Subject to the `maxReads` budget. |
+| `edit` / `write` | As above; refused even inside the scope when `readOnly` is set. |
+| `grep` / `find` / `ls` | As above, with a missing path defaulting to the working directory. |
+| `bash` | Refused entirely without an allowlist. With one, only commands matching `bash.read` or `bash.write` are allowed, and they are rewritten to run under the sandbox helper, which enforces the file scope through Landlock, cuts the network by default and grants write access to the scope only when `writable` is set. A command containing shell metacharacters is refused. |
+| `bash.writablePaths` | Additional writable paths, for globally writable areas such as the pnpm store or the mise state directory. |
+| `bash.env` | Environment variables injected into the sandbox. |
+| `powershell` / `codemode` | Always refused: there is no path to judge, so they can escape the scope. |
+| `structured_output` | Allowed; a session-level runtime tool that does not touch the filesystem. |
+| Any other unknown tool | Refused, except tools named in `allowTools`; executor-type tools stay refused. |
 
-范围生效时会话开始有提示；`/permission` 查看当前范围、模式、bash 白名单、read 计数、撞权限计数与探针状态。
+When a scope is active the session announces it at the start. `/permission` shows the active
+scope, mode, bash allowlist, read count, denial count and probe state.
 
-### 探针（四条判据）
+### Probes
 
-打转与撞权限默认开启（纯错误信号，误伤小）；两条时间判据会误伤慢任务，必须在 `probe` 里显式配置才生效：`"probe": {}` 一次打开全部默认值，写部分字段则只打开写到的那些，`"probe": false` 关闭全部。
+Four criteria detect a subagent that is going in circles or colliding with its permissions.
+The two error-signal criteria are on by default, since they misfire rarely. The two
+time-based criteria misfire on slow tasks, so they apply only when configured explicitly:
+`"probe": {}` enables every default, a partial object enables only the fields it names, and
+`"probe": false` disables all of them.
 
-| 判据 | 缺省 | 行为 |
+| Criterion | Default | Behaviour |
 | --- | --- | --- |
-| 只读空转 | 需显式配置：`idleWriteMs: 360000`，`abortGraceMs: 120000` | `idleWriteMs` 内没有任何写入活动 → 下一个 tool 边界 warn；再过 `abortGraceMs` → 停止本轮 |
-| 原地打转 | 默认开启，`repeatBash: 3` | 同一条 bash 命令原文第 3 次 warn，第 4 次停止 |
-| 早可收工 | 需显式配置：`successIdleMs: 300000`，`successPatterns` | bash 输出命中成功标记后，`successIdleMs` 内无新改动 → 停止 |
-| 造杂物 | 需显式配置：`forbidWritePatterns: []` | `write`/`edit` 目标路径命中正则 → 直接拒绝该次写入 |
+| Read-only idling | Explicit: `idleWriteMs: 360000`, `abortGraceMs: 120000` | No write activity within `idleWriteMs` produces a warning at the next tool boundary; after a further `abortGraceMs` the turn stops. |
+| Repeating a command | On by default, `repeatBash: 3` | The third identical bash command warns and the fourth stops. |
+| Finished early | Explicit: `successIdleMs: 300000`, `successPatterns` | Once bash output matches a success marker, no new change within `successIdleMs` stops the turn. |
+| Writing litter | Explicit: `forbidWritePatterns: []` | A `write` or `edit` target matching the pattern is refused outright. |
 
-「写入活动」只算 `edit`/`write` 调用与命中 `bash.write` 的命令；`bash.read` 与 `read`/`grep`/`ls` 都不算——否则拿 bash 只读打转就绕过了这条判据。`readOnly: true` 的任务跳过前两条（本来就该只读）。
+Write activity means `edit` and `write` calls and commands matching `bash.write`. Commands
+matching `bash.read`, together with `read`, `grep` and `ls`, do not count; otherwise a
+subagent could circle using read-only bash and escape the criterion. A task with
+`readOnly: true` skips the first two criteria, which are meaningless for it.
 
-`maxDenies`（缺省 3，写 `0` 关闭）：连续被范围规则拒绝这么多次，先 warn「多半是父代理授权写错，向父代理报告缺什么」，再撞一次就停。
+`maxDenies` defaults to three and an explicit `0` disables it. After that many consecutive
+refusals by the scope rules, the subagent is warned that the parent most likely authorised
+the wrong paths and should be told what is missing; one more refusal stops the turn.
 
-停机方式：不调 `ctx.abort()`。硬 abort 会把模型正在写的收尾汇报一起掐掉，父代理只拿到一句工具错误。改为「粘住停止状态 + 之后每次调用都拒绝」，模型失去工具后自然把结论写完，父代理收到的是一份完整汇报。实测对比过：带 `terminate` 时汇报被截断成一行，去掉后完整。
+Stopping does not call `ctx.abort()`. A hard abort also kills the summary the model is
+writing, so the parent receives nothing but a tool error. The extension instead latches a
+stopped state and refuses every later call, so the model, having lost its tools, finishes its
+conclusions and the parent receives a complete report. Both variants were measured: with
+`terminate` the report was truncated to a single line, and without it the report was
+complete.
 
-### bash 白名单与沙箱
+### The bash allowlist and the sandbox
 
-子代理要跑测试/typecheck 时，父代理在 bindings 里点名命令：
+When a subagent needs to run tests or a type check, the parent names the commands in the
+bindings:
 
 ```json
 { "pi-subagent-extend/1": { "scope": ["lib/router/**"], "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] } } }
 ```
 
-放行的命令会改写成：
+An allowed command is rewritten to:
 
 ```text
-<helper> --spec ~/.cache/pi-subagent-extend/spec-<pid>.json -- bash -lc '<命令>'
+<helper> --spec ~/.cache/pi-subagent-extend/spec-<pid>.json -- bash -lc '<command>'
 ```
 
-helper 是 `packages/helper` 里的 Rust 二进制（`pnpm run build:helper` 构建）。它在 `exec` 之前先把**自己**关进沙箱，所以白名单命令拿到的就是一个已经限定好范围、断好网的进程：
+The helper is the Rust binary in `packages/helper`, built by `pnpm run build:helper`. It
+confines **itself** before calling `exec`, so an allowlisted command is a process whose file
+scope and network are already fixed:
 
-- **文件**：Landlock 规则集。`/` 可读可执行，只有 spec 里列出的目录可写（scope、cwd、`node_modules`、`bash.writablePaths`），写到范围外直接 `EPERM`。
-- **网络**：私有网络命名空间，TCP、UDP、DNS 全断（网卡只剩 `lo`）。同时用私有 mount 命名空间把 `nscd` / `systemd-resolved` 的 unix socket 目录盖成空 tmpfs——unix socket 不受网络命名空间约束，不盖的话域名照样能解析。
-- **进程**：私有 PID 命名空间并重挂 `/proc`，沙箱里只有自己的进程——看不到宿主进程，读不到别的进程的 `/proc/<pid>/environ`，也发不出跨进程信号。PID 1 是一个转发信号的监督者，命令跑在它下面，所以 `kill` 能正常结束命令而不是被 PID 1 忽略。
-- **capability**：命令启动前清空 bounding set 与 effective 集合（对齐 bwrap 默认），`CapEff`/`CapBnd` 都是 0。
-- **`/tmp`**：私有 tmpfs，不跟宿主的临时文件混在一起（cwd 本身在 `/tmp` 下时跳过，否则会把工作目录挡掉）。
-- **设备**：`/dev/null`、`/dev/zero`、`/dev/tty` 等基线设备默认可写，否则 `2>/dev/null` 这种写法会直接失败。
+- **Files**: a Landlock ruleset. `/` stays readable and executable, and only the directories
+  named in the spec are writable: the scope, the working directory, `node_modules` and the
+  `bash.writablePaths` entries. A write outside them fails with `EPERM`.
+- **Network**: a private network namespace, so TCP, UDP and DNS are all unreachable and only
+  the loopback interface remains. A private mount namespace additionally shadows the
+  `nscd` and `systemd-resolved` unix socket directories with an empty tmpfs, because a unix
+  socket crosses a network namespace and host names would otherwise still resolve.
+- **Processes**: a private PID namespace with a freshly mounted `/proc`, so only the
+  sandbox's own processes are visible. Host processes cannot be seen, another process's
+  `/proc/<pid>/environ` cannot be read, and no signal reaches across the boundary. PID 1 is
+  a supervisor that forwards signals and the command runs beneath it, so `kill` terminates
+  the command instead of being ignored by PID 1.
+- **Capabilities**: the bounding set and the effective set are cleared before the command
+  starts, matching the bubblewrap defaults, so `CapEff` and `CapBnd` are both zero.
+- **`/tmp`**: a private tmpfs, unmixed with the host's temporary files. It is skipped when
+  the working directory itself lies under `/tmp`, which would otherwise hide it.
+- **Devices**: the baseline device nodes `/dev/null`, `/dev/zero` and `/dev/tty` are
+  writable by default; without them a redirect such as `2>/dev/null` fails outright.
 
-内核要求 **Landlock ABI 7（Linux 6.15+）**，这是能拦住 `open(O_TRUNC)` 绕过的最低下限；ABI 不够时插件干脆不支持，而不是给一个更弱的沙箱。helper 缺失、ABI 不足或宿主不允许 user namespace 时，bash 保持关闭（fail closed），拒绝文案会说明缺什么。`PI_SUBAGENT_EXTEND_HELPER` 可指定二进制路径。
+The kernel requirement is **Landlock ABI 7 (Linux 6.15 or later)**, the lowest level that
+also blocks the `open(O_TRUNC)` bypass. Below that the extension does not support the sandbox
+at all rather than offering a weaker one. When the helper is missing, the ABI is too low or
+the host forbids user namespaces, bash stays disabled and the refusal names what is absent.
+`PI_SUBAGENT_EXTEND_HELPER` overrides the binary path.
 
-- 条目两种写法：字面量按空白切词逐 token 前缀匹配（`pnpm test` 匹配 `pnpm test -t foo`，不匹配 `pnpm publish`）；`re:` 前缀按正则整串匹配（`"re: ^pnpm -r (test|build)"`）。不自动猜正则——命令参数常含 `*`、`.`，猜错方向是误授权。
-- `read` 列放行只读命令（typecheck、grep），`write` 列放行会写文件的命令（测试、构建）。两列都是授权；分类只影响探针的「写入活动」判定。两边都命中时按 write 算。
-- 命令里出现 `; & | < > \` $ \` 等元字符直接拒绝，白名单前缀拼不进别的命令。
-- 默认断网、范围外只读：写仓库外被拒、联网被拒。`"writable": true` 把 scope 命中的目录给写权限（测试产物落地）；`"network": true` 放开网络。
-- `bash.writablePaths`：额外给写权限的路径（绝对路径、`~` 开头或相对 cwd），用于 pnpm store 这类全局可写区。
-- `bash.env`：注入沙箱的环境变量（写进 spec 的 `env`）。默认已经注入 `XDG_RUNTIME_DIR`（指向沙箱私有 /tmp）与 worktree 场景下的 `MISE_STATE_DIR`。
-- 白名单外的 bash 命令，其拒绝文案会带上探测到的 pnpm store 路径——模型看得见这段文案，能把它连同「父代理需要写什么」一起汇报上来。扩展只探测不自动放行：放行与否是父代理的显式决定。
-- `bash.writable` 为真时，额外给写权限：**当前工作目录**（不写的话 git 连索引都写不了）、**`<cwd>/node_modules`**（解析符号链接后的真实路径，pnpm install 要写 `.bin` 里的 shim）、**worktree 根本身**（scope 通常只写到 worktree 里的相对路径，根级的 package.json、node_modules 之类在范围之外）。
-- `bash.gitExcludes`（默认 `true`）：给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`）。沙箱里 pnpm 一定会用项目内的 `.pnpm-store`（见下），否则子代理一句 `git add -A` 就能把几万个依赖文件吸进索引，patch 直接生成失败。
-- 找不到 helper 时 fail closed：白名单命令也不执行，拒绝理由说明原因（并给出构建命令）。`PI_SUBAGENT_EXTEND_HELPER` 可指定二进制路径。
-- 上限明确：沙箱防的是**越界写和联网**，不是读。跑测试本身就要读整棵树（`node_modules`、配置），所以 `cat` 仓库里范围外的文件在沙箱内仍可读——读的约束仍由 `read`/`grep` 等工具层负责。
+- An entry takes one of two forms. A literal is split on whitespace and matched token by
+  token as a prefix, so `pnpm test` matches `pnpm test -t foo` but not `pnpm publish`. An
+  entry prefixed with `re:` is matched as a regular expression against the whole command,
+  for example `"re: ^pnpm -r (test|build)"`. Regular expressions are never inferred, because
+  command arguments routinely contain `*` and `.`, and guessing the direction to parse them
+  in is how permissions are granted by accident.
+- The `read` column allows commands that only read, such as a type check or grep, and the
+  `write` column allows commands that write, such as tests and builds. Both columns are
+  grants; the classification only feeds the write-activity criterion. A command matching
+  both counts as a write.
+- A command containing metacharacters such as `; & | < > \` $ \` is refused outright, so an
+  allowlist prefix cannot be extended into another command.
+- The network is cut and the scope is read-only by default, so writes outside the repository
+  and any network access are refused. `"writable": true` grants write access to the
+  directories matched by the scope, which is where test artefacts land, and `"network": true`
+  restores networking.
+- `bash.writablePaths` grants write access to further paths, given as absolute paths, `~`
+  paths or paths relative to the working directory, for globally writable areas such as the
+  pnpm store.
+- `bash.env` holds the environment variables injected into the sandbox, written into the
+  spec's `env` field. `XDG_RUNTIME_DIR`, pointing at the sandbox's private `/tmp`, and
+  `MISE_STATE_DIR` in a worktree are injected by default.
+- A refused bash command reports the detected pnpm store path in the refusal, since the
+  model sees that text and can pass it on with what the parent needs to authorise. The
+  extension only detects it and never grants it on its own; granting remains the parent's
+  explicit decision.
+- When `bash.writable` is true, write access additionally covers **the working directory**,
+  without which git cannot even write its index; **`<cwd>/node_modules`**, as resolved
+  through any symlinks, because pnpm install writes the shims in `.bin`; and **the worktree
+  root**, because a scope usually names paths relative to the worktree while the root-level
+  `package.json` and `node_modules` lie outside it.
+- `bash.gitExcludes`, on by default, injects global git exclusion rules for `node_modules/`
+  and `.pnpm-store/`. Inside the sandbox pnpm always uses a project-local `.pnpm-store` (see
+  below), and without the exclusion a single `git add -A` would pull tens of thousands of
+  dependency files into the index and make patch generation fail.
+- A missing helper fails closed: allowlisted commands do not run either, and the refusal
+  states the reason and the build command. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary
+  path.
+- The limit is deliberate: the sandbox prevents **out-of-scope writes and network access**,
+  not reads. Running a test suite requires reading the whole tree, `node_modules` and
+  configuration files included, so inside the sandbox `cat` can still read files outside the
+  scope. Read confinement remains the responsibility of `read`, `grep` and their peers.
 
-## worktree 与 pnpm 的已知边界
+## Known boundaries between worktrees and pnpm
 
-pi-subagents 的 managed worktree 会把主仓的 `node_modules` **符号链接**进 worktree（`src/runs/shared/worktree.js: linkNodeModulesIfPresent`）。由此：
+pi-subagents links the main checkout's `node_modules` **as a symlink** into a managed
+worktree (`src/runs/shared/worktree.js`, `linkNodeModulesIfPresent`). Consequently:
 
-- 那个符号链接必须**先删掉**再装：pnpm 会顺着链接装进主仓，链接本身不被替换，层级因此是错的（`tsc` 找不到包）。删掉链接后 install 正常——实测 buddy-proxy（`pnpm-workspace.yaml` 里 `virtualStoreType: global`）冷装 **124ms**、符号链接场景 **118ms**，因为每个 worktree 只需要建指向全局 store 的链接。
-  （此前这里写着「在 worktree 里必然失败：pnpm 需要真实的 hoist 目录」——那是把符号链接这个前提当成了 worktree 布局的必然结果，实测不成立。）
-- 装了 `virtualStoreType: global` 的项目，worktree 里的 `node_modules` 只有符号链接，`node_modules/.pnpm` 只留 `lock.yaml` 之类的小文件；没配这个开关的项目同样能装，只是要把包硬链接进各自的 `.pnpm`，慢一些。
-- 依赖已就位的验证命令可以用：让 `pnpm run` 不做前置安装即可（项目侧 `pnpm-workspace.yaml` 写 `verifyDepsBeforeRun: false`，pnpm 12 的设置只认这个文件）。
-- pnpm 12 把锁目录放在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`）而不是 store 下，所以只读根下连 `pnpm run` 都起不来。扩展默认把 `XDG_RUNTIME_DIR` 指向沙箱私有 /tmp 解决这一条。
-- mise 在 worktree 里要把新 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`，只读根下会在解析配置阶段就失败。扩展在 worktree 场景把 `MISE_STATE_DIR` 指向沙箱私有 /tmp，免掉这次登记。
-- **宿主侧（不在沙箱里）同样会被 mise 拦住**：新 worktree 的 `mise.toml` 未信任时，`node`、`pnpm` 这些 mise shim 一律报 `Config files in ... are not trusted` 并退出。所以任何在 worktree 里跑命令的东西都会挂，包括 pi-subagents 的 `worktreeSetupHook` —— 连它的 shebang（`#!/usr/bin/env node`）都过不去，进程在执行任何一行之前就死了，只剩一个「进程树未收敛」的报错。声明式解法是 `~/.config/mise/config.toml` 里写 `trusted_config_paths = ["<worktree 根>"]`（官方文档：覆盖该路径及其下所有配置文件，包括以后新建的）。
-- **沙箱里 pnpm 默认用项目内 store**：全局 store（`~/.local/share/pnpm/store`）在只读根下不可写，pnpm 探测到之后退回 `<项目>/node_modules/.pnpm-store`。把 store 目录写进 `bash.writablePaths`，`pnpm store path` 就仍然指向全局 store（实测：放行后返回 `~/.local/share/pnpm/store/v11`）。两种都能跑测试——项目内 store 落在 `node_modules/`，那里本来就可写。
-- 副作用是项目里可能多出一个几十 MB 的 `.pnpm-store`——扩展用 `core.excludesFile` 保证它进不了 git 索引，但项目自己的 `.gitignore` 仍应忽略 `node_modules/`。
-- **装依赖需要联网**：沙箱内 pnpm 用的是项目内的空 store，只能从 registry 下载。`bash.network` 默认关闭，所以 `pnpm install` 在沙箱里必然失败，除非显式开网络。
+- The symlink must be **removed before installing**. pnpm installs through the link into the
+  main checkout and never replaces the link, so the depth stays wrong and `tsc` cannot find
+  its packages. Once the link is gone, installing works: measured in buddy-proxy, whose
+  `pnpm-workspace.yaml` sets `virtualStoreType: global`, a cold install takes **124 ms** and
+  the symlink case **118 ms**, because a worktree only needs links into the global store.
+  (An earlier version of this document claimed installation always fails in a worktree
+  because pnpm requires a real hoist directory. That treated the symlink as an unavoidable
+  property of the worktree layout; measurement refutes it.)
+- In a project that sets `virtualStoreType: global`, a worktree's `node_modules` holds only
+  symlinks and `node_modules/.pnpm` keeps little more than `lock.yaml`. A project without
+  that setting installs as well, but hardlinks the packages into its own `.pnpm` and is
+  slower.
+- Verifying with dependencies already present works if `pnpm run` skips its pre-install
+  check, which pnpm 12 reads only from `pnpm-workspace.yaml`: set `verifyDepsBeforeRun:
+  false` there.
+- pnpm 12 keeps its lock directory under `XDG_RUNTIME_DIR` (`/run/user/<uid>`) rather than in
+  the store, so under a read-only root even `pnpm run` fails to start. The extension points
+  `XDG_RUNTIME_DIR` at the sandbox's private `/tmp`, which resolves it.
+- mise records a new worktree's `mise.toml` in `~/.local/state/mise/trusted-configs`, and
+  under a read-only root that fails while the configuration is still being parsed. In a
+  worktree the extension points `MISE_STATE_DIR` at the sandbox's private `/tmp`, which
+  avoids the registration.
+- **The host side is blocked by mise as well**, outside any sandbox. When a new worktree's
+  `mise.toml` is not trusted, the shimmed tools such as `node` and `pnpm` all print
+  `Config files in ... are not trusted` and exit. Anything that runs a command in a worktree
+  therefore fails, including the pi-subagents `worktreeSetupHook`, whose own shebang
+  (`#!/usr/bin/env node`) does not survive it: the process dies before executing a line and
+  all that remains is an unverified process tree. The declarative remedy is
+  `trusted_config_paths = ["<worktree root>"]` in `~/.config/mise/config.toml`; the official
+  documentation states that it covers the configuration files at or below each path,
+  including projects created there later.
+- **Inside the sandbox pnpm uses a project-local store by default.** The global store under
+  `~/.local/share/pnpm/store` is not writable under a read-only root, so pnpm detects that
+  and falls back to `<project>/node_modules/.pnpm-store`. Adding the store directory to
+  `bash.writablePaths` makes `pnpm store path` report the global store again; measured, the
+  allowed case returns `~/.local/share/pnpm/store/v11`. Tests pass in either mode, since the
+  project-local store lands in `node_modules`, which is already writable.
+- The side effect is a `.pnpm-store` of tens of megabytes in the project. The extension
+  guarantees through `core.excludesFile` that it cannot enter the git index, and a project
+  should still ignore `node_modules/` in its own `.gitignore`.
+- **Installing dependencies requires network access.** Inside the sandbox pnpm uses the empty
+  project-local store and can only download from the registry, while `bash.network` is off by
+  default, so `pnpm install` cannot succeed in the sandbox unless networking is granted.
 
-## 上下文隔离
+## Context isolation
 
-`AGENTS.md` 是整份进的，子代理会连「怎么委派、怎么等结果、汇报口径」这些只对主代理有意义的段落一起读进去，白占上下文。这个包同时处理它，两种做法按「这段内容属于谁」选：
+`AGENTS.md` enters the prompt in full, so a subagent also reads the passages that matter only
+to the main agent, such as how to delegate, how to wait for results and what a report must
+contain, which wastes context. This package addresses that as well, choosing between two
+mechanisms according to whom the content belongs to:
 
-| 内容 | 放哪 | 子代理看得见吗 |
+| Content | Where it goes | Visible to a subagent |
 | --- | --- | --- |
-| 子代理也该遵守的（术语、验收命令、代码风格） | `AGENTS.md` 普通段落 | 看得见 |
-| 和仓库规则写在一起更顺、但只给主代理 | `AGENTS.md` 里用 `<!-- main-agent-only:start -->` 圈起来 | 看不见 |
-| 整段都只给主代理 | `.pi/main-only.md` | 看不见 |
+| Rules a subagent must follow too (terminology, acceptance commands, code style) | An ordinary section of `AGENTS.md` | Yes |
+| Content that reads better alongside the repository rules but concerns the main agent only | A section fenced by `<!-- main-agent-only:start -->` and `<!-- main-agent-only:end -->` in `AGENTS.md` | No |
+| Content that concerns the main agent only in its entirety | `.pi/main-only.md` | No |
 
 ```markdown
-## 术语
+## Terminology
 
-**Upstream**：指上游的 API。
+**Upstream** refers to the upstream API.
 
 <!-- main-agent-only:start -->
-## 委派
+## Delegation
 
-用 `subagent` 工具委派，等结果再决定下一步。汇报口径：改了哪些文件、跑了什么、结果如何。
+Delegate with the `subagent` tool and wait for the result before deciding the next step.
+A report states which files changed, what was run and how it turned out.
 <!-- main-agent-only:end -->
 ```
 
-成对标记之间的整段（含两个注释和尾随空行）在子代理的提示词里被删除，主代理照常读。标记不闭合时**整段保留不剥**，并在会话里记一条 warning：宁可让子代理多看见一段，也不要因为猜错边界删掉半个文件。
+The whole span between a pair of markers, including both comments and the trailing blank
+line, is removed from a subagent's prompt, while the main agent reads it unchanged. When a
+marker is left unterminated, **the section is kept rather than stripped** and the session
+records a warning: letting a subagent read one extra passage is preferable to deleting half a
+file on a guess about where the boundary lies.
 
-`.pi/main-only.md`（相对项目根，路径写死）只注入主会话，用 pi 的 `sections` 而不是重写整段提示词——pi 按 section 做差量，只补一条系统消息，前面的提示词缓存仍然命中。
+`.pi/main-only.md`, resolved against the project root with a fixed name, is injected into the
+main session only, through pi's `sections` rather than by rewriting the whole system prompt,
+because pi diffs sections and appends a single system message, so the earlier prompt cache
+still hits.
 
-三个入口按**怎么被加载**分受众，不靠运行时猜：
+The three entry points separate audiences by **how they are loaded**, never by guessing at
+run time:
 
-| 入口 | 谁加载 | 行为 |
+| Entry point | Loaded by | Behaviour |
 | --- | --- | --- |
-| `src/index.ts` | agent 的 `subagentOnlyExtensions` + 环境加载 | 范围与 bash（本文前半） |
-| `src/main-context.ts` | 只走环境加载（`.pi/extensions/` 软链或全局安装） | 主会话注入 `.pi/main-only.md`；后台子代理里改为剥标记 |
-| `src/child-context.ts` | 只由 agent 的 `subagentOnlyExtensions` 声明 | 剥标记，永不注入 |
+| `src/index.ts` | The agent's `subagentOnlyExtensions`, plus ambient loading | Scope and bash (the first half of this document) |
+| `src/main-context.ts` | Ambient loading only (a symlink in `.pi/extensions/` or a global install) | Injects `.pi/main-only.md` into the main session; in a background subagent it strips the markers instead |
+| `src/child-context.ts` | Declared by an agent's `subagentOnlyExtensions` only | Strips the markers and never injects |
 
-拆两个入口是因为前台子代理和主会话**无法从进程内区分**：前台子代理同进程、没有 `PI_SUBAGENT_CHILD`，环境和主会话一模一样；后台子代理是独立进程、有该变量。所以「只给主代理」的逻辑只能靠加载方式定受众。`main-context.ts` 里那句 `PI_SUBAGENT_CHILD === "1"` 就是用来挡后台子代理的——它同时被环境加载，不挡就漏。
+Two entry points are needed because a foreground subagent and the main session **cannot be
+distinguished from inside the process**: a foreground subagent runs in the same process and
+has no `PI_SUBAGENT_CHILD`, so its environment is identical to the main session's, whereas a
+background subagent is a separate process carrying that variable. Logic meant for the main
+agent alone therefore has to be selected by the loading path. The `PI_SUBAGENT_CHILD === "1"`
+check in `main-context.ts` exists to stop background subagents, which load it ambiently as
+well.
 
-和 pi-subagents 自带的 `inheritProjectContext: false` 不冲突：那个是全有全无（连文件都不读），适合仓库规则对子代理完全无意义的情况；标记法保留单文件、单份维护，适合仓库规则里还有子代理该遵守的部分。
+This does not conflict with pi-subagents' own `inheritProjectContext: false`, which is
+all-or-nothing and does not even read the file, suiting a repository whose rules are
+irrelevant to subagents. The marker approach keeps a single file under single maintenance,
+which suits a repository whose rules contain parts a subagent must follow.
 
-`context: "fork"` 的子代理拿的是父代理整份提示词，project context 一并带过去——要隔离就别用 fork context。
+A subagent started with `context: "fork"` receives the parent's entire prompt, project
+context included; isolation therefore requires avoiding fork context.
 
-## 配置来源
+## Configuration sources
 
-两条：pi-subagents 的 `extensionBindings`（每次派单时传），以及 agent profile（角色默认值，随 agent 定义声明一次）。都没有时扩展不生效，父会话与未绑定范围的子代理不受影响。已上锁的会话也不再注册下面的用法 skill。
+There are two: pi-subagents' `extensionBindings`, passed on each dispatch, and an agent
+profile, a per-role default declared once alongside the agent definition. Without either, the
+extension does nothing and neither the parent session nor an unscoped subagent is affected. A
+session that is already scoped does not register the usage skills below either.
 
-通配符：`**` 任意层目录、`*` 单层内任意字符、`?` 单字符。纯路径 glob 额外匹配该目录自身与其下所有内容：范围写 `src` 或 `src/**` 都覆盖 `src` 全目录。
+Wildcards: `**` matches any number of directory levels, `*` any characters within one level
+and `?` a single character. A pure path glob additionally matches the directory itself and
+everything beneath it, so `src` and `src/**` both cover the whole `src` directory.
 
-## Agent profile（角色默认值）
+## Agent profiles
 
-`extensionBindings` 有一个实际的缺口：它只能**每次派单时**由父代理手写，agent 定义里没有声明默认值的地方（pi-subagents 的 frontmatter 字段表里没有 bindings，设置文件里也没有）。忘了传不是「少了三条命令的禁令」，而是 `tool_call` 开头就 `return`——**全部限制消失**。
+`extensionBindings` has a practical gap: it can only be written by the parent agent **on each
+dispatch**, and an agent definition has no place to declare a default. The pi-subagents
+frontmatter field table has no bindings field and neither do the settings files. Omitting them
+does not remove three prohibitions but returns at the top of `tool_call`, so **every
+restriction disappears**.
 
-profile 把默认值挂在「agent 声明了哪个入口」上，因为受众只能靠加载方式区分（前台子代理和主会话在进程内无法区分，见上一节）。
+A profile attaches defaults to whichever entry point an agent declares, because the audience
+can only be distinguished by the loading path; see the previous section on why the process
+cannot tell a foreground subagent from the main session.
 
-**1. 在项目里写角色默认值** `.pi/subagent-bindings.json`（相对项目根）：
+**1. Write the per-role defaults in the project**, in `.pi/subagent-bindings.json` relative to
+the project root:
 
 ```json
 {
@@ -216,7 +378,7 @@ profile 把默认值挂在「agent 声明了哪个入口」上，因为受众只
 }
 ```
 
-**2. 每个角色一个两行的 loader**，声明角色名：
+**2. Add a two-line loader per role**, naming the role:
 
 ```ts
 // .pi/agent-profiles/writer.ts
@@ -224,112 +386,168 @@ import { profile } from "/home/shay/extensions/pi-subagent-extend/packages/pi-pl
 export default profile("writer");
 ```
 
-**3. agent 定义里把它和主入口一起声明**：
+**3. Declare it in the agent definition** alongside the main entry point:
 
 ```markdown
 subagentOnlyExtensions: …/src/index.ts, .pi/agent-profiles/writer.ts
 ```
 
-合并规则：
+Merging rules:
 
-- 本次调用的 `extensionBindings` 按 key 覆盖 profile 的默认值；`bash` **整个对象**覆盖（不合并数组，避免静默扩权）。
-- `bash.deny` 取并集，**调用方无法放宽**：项目的骨架命令（`git stash`、`git reset` 之类）即便被写进 `bash.read`/`bash.write` 也进不来。这是「结构性禁掉」和普通白名单的区别。
-- profile 不写 `scope` 是合法的（角色不知道本次任务的路径）：此时文件访问全拒、`bash` 白名单照常可用——漏传 bindings 是**响的**失败，子代理第一次读就被拦并汇报缺什么。
-- 声明了 profile 却读不到（文件缺失、JSON 坏、既无 `default` 也无该角色名）时**全拒**，不会退回「什么限制都没」。
+- The `extensionBindings` of the current call override the profile per key, and `bash`
+  overrides **as a whole object**; arrays are never merged, which avoids widening the grant
+  silently.
+- `bash.deny` is a union that **the caller cannot relax**. A project's structural commands,
+  such as `git stash` or `git reset`, cannot be allowed even when they are listed in
+  `bash.read` or `bash.write`. This is what distinguishes a structural prohibition from an
+  ordinary allowlist.
+- A profile may legitimately omit `scope`, since a role does not know the paths of a
+  particular task. File access is then refused entirely while the bash allowlist still
+  applies, so a forgotten binding is a **loud** failure: the subagent is stopped on its first
+  read and reports what is missing.
+- A declared profile that cannot be read, whether because the file is missing, the JSON is
+  malformed or neither `default` nor the role name is present, results in **deny-all** rather
+  than no restriction.
 
-主会话永远不加载这些 loader，所以项目默认值不会误锁主代理。
+The main session never loads these loaders, so project defaults cannot lock it down by
+accident.
 
-## 与 pi-subagents 配合（推荐用法）
+## Using it with pi-subagents
 
-前置条件：给需要上锁的 agent 声明扩展。前台子代理不加载 ambient extensions，所以推荐在 agent 定义的 frontmatter 里显式声明（对前台与后台子代理都生效）：
+Prerequisite: declare the extension for the agents that need scoping. Foreground subagents do
+not load ambient extensions, so declaring it in the agent definition's frontmatter is
+preferred, as that covers both foreground and background subagents:
 
 ```markdown
 ---
 name: worker
-description: 在指定范围内完成实现任务
+description: Implements a task within the given scope
 subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts
 ---
 ```
 
-`subagentOnlyExtensions` 只在该 agent 的子代理会话里加载本扩展，父会话不加载。
+`subagentOnlyExtensions` loads this extension only in that agent's subagent session, never in
+the parent session.
 
-父代理每次委派时通过 `extensionBindings` 传入本次任务的范围：
+The parent passes the scope of the current task through `extensionBindings` on each dispatch:
 
 ```text
 subagent(
   agent: "worker",
-  task: "修复 login.ts 里的空指针",
+  task: "Fix the null pointer in login.ts",
   extensionBindings: { "pi-subagent-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
 )
 ```
 
-bindings 字段：
+The bindings fields:
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Meaning |
 | --- | --- | --- |
-| `scope` | `string[]` | 任务范围的 glob 列表；必填，空数组 = 拒绝一切文件访问 |
-| `readOnly` | `boolean` | 默认 `false`；`true` 时范围内也禁止 `edit`/`write` |
-| `maxReads` | `number` | 可选，成功 read 次数上限 |
-| `allowTools` | `string[]` | 可选，额外放行的非执行器工具名 |
+| `scope` | `string[]` | Globs describing the task scope. Required; an empty array refuses all file access. |
+| `readOnly` | `boolean` | Defaults to `false`. When true, `edit` and `write` are refused even inside the scope. |
+| `maxReads` | `number` | Optional cap on successful reads. |
+| `allowTools` | `string[]` | Optional additional non-executor tool names to allow. |
 
-namespace 是 `pi-subagent-extend/1`。pi-subagents 把 bindings 编码进 `PI_SUBAGENT_EXTENSION_BINDINGS` 传给子代理，本扩展在激活时一次性读取（前台子代理的该环境变量只在会话启动前存在，之后恢复，不能懒读）。bindings 损坏或 `scope` 非法时 fail closed：会话保持运行但所有文件访问被拒绝，拒绝理由写明原因。
+The namespace is `pi-subagent-extend/1`. pi-subagents encodes the bindings into
+`PI_SUBAGENT_EXTENSION_BINDINGS` and passes that to the subagent, and the extension reads it
+once when it activates; the variable exists only until a foreground subagent's session starts
+and is then restored, so it cannot be read lazily. Malformed bindings or an invalid `scope`
+fail closed: the session keeps running, all file access is refused, and the refusal states the
+reason.
 
-父代理模型需要知道的约定打包成三个 skill，随扩展发布：
+What the parent model needs to know ships as three skills published with the extension:
 
-| skill | 内容 |
+| Skill | Contents |
 | --- | --- |
-| `skills/pi-subagent-extend` | 文件范围、bash 两列与 `re:` 正则、沙箱、调用模板 |
-| `skills/pi-subagent-extend-probes` | 四条探针判据、撞权限计数、warn/stop 语义、被停后怎么读汇报 |
-| `skills/pi-subagent-extend-context` | `<!-- main-agent-only:start -->` 标记、`.pi/main-only.md`、三个入口的分工 |
+| `skills/pi-subagent-extend` | File scope, the two bash columns and `re:` patterns, the sandbox, and a call template |
+| `skills/pi-subagent-extend-probes` | The four probe criteria, the denial count, warn and stop semantics, and how to read a report after a stop |
+| `skills/pi-subagent-extend-context` | The `<!-- main-agent-only:start -->` markers, `.pi/main-only.md`, and the division of labour between the three entry points |
 
-扩展用 `resources_discover` 把三个目录一起注册给会话：扩展被加载，skill 就进系统提示的可用列表，模型委派涉及范围限制的子代理时会读到对应那份。不需要往 `AGENTS.md` 或系统提示里写约定。`/skill:pi-subagent-extend`、`/skill:pi-subagent-extend-probes`、`/skill:pi-subagent-extend-context` 可手动加载。
+The extension registers all three directories with the session through `resources_discover`:
+when the extension is loaded, its skills enter the list available to the system prompt, and
+the model reads the relevant one when it delegates a scoped subagent. Nothing has to be
+written into `AGENTS.md` or the system prompt. `/skill:pi-subagent-extend`,
+`/skill:pi-subagent-extend-probes` and `/skill:pi-subagent-extend-context` load them manually.
 
-前提：父会话也要加载本扩展，skill 才能到达父代理。`./install.sh` 全局软链即可——父会话没有 bindings，扩展是空操作，无副作用；子代理那一侧的加载用 `subagentOnlyExtensions`（前台生效）或全局自动发现（仅后台子代理）覆盖。
+One prerequisite: the parent session must load the extension too, or the skills never reach
+the parent agent. `./install.sh` creates the global symlink for that purpose; the parent
+session has no bindings, so the extension is a no-op there and has no side effects. The
+subagent side is covered by `subagentOnlyExtensions`, which works for foreground subagents, or
+by ambient discovery, which reaches background subagents only.
 
-## 不经 pi-subagents 使用
+## Using it without pi-subagents
 
-配置通道只有 bindings 一个。没有父代理时，手工导出同一环境变量即可（内容是 bindings 的 JSON）：
+Bindings are the only configuration channel. Without a parent agent, export the same
+environment variable by hand; its content is the bindings JSON:
 
 ```bash
 PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagent-extend/1":{"scope":["src/**"],"readOnly":true}}' \
 pi -e ~/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts --tools read --no-session -p "<task>"
 ```
 
-## 安装
+## Installation
 
 ```bash
 cd packages/pi-plugin
 ./install.sh
 ```
 
-软链 `~/.pi/agent/extensions/pi-subagent-extend`，pi 自动发现。范围生效与否完全由配置决定：没有 bindings、环境变量和范围文件时扩展是空操作，全局链接对父会话无害。卸载 `./install.sh --uninstall`。
+This symlinks `~/.pi/agent/extensions/pi-subagent-extend`, which pi discovers automatically.
+Whether a scope applies is decided entirely by configuration: with no bindings, environment
+variable or scope file the extension is a no-op, so the global link is harmless in a parent
+session. `./install.sh --uninstall` removes it.
 
-不装全局链接、只在某个 agent 的子代理里加载时，用 frontmatter 的 `subagentOnlyExtensions`（路径指向本包的 `src/index.ts`；要同时剥上下文标记再加 `src/child-context.ts`），不需要安装步骤。项目级用法：把包目录软链进 `<项目>/.pi/extensions/`，那份加载的是 `index.ts` + `main-context.ts`（即 `package.json` 的 `pi.extensions`），主会话的上下文隔离靠它。
+To skip the global link and load it only inside one agent's subagents, use the frontmatter's
+`subagentOnlyExtensions`, pointing at this package's `src/index.ts` and adding
+`src/child-context.ts` when context markers must be stripped as well; no installation step is
+needed. For project-level use, symlink the package directory into `<project>/.pi/extensions/`,
+which loads `index.ts` and `main-context.ts`, that is the `pi.extensions` entry in
+`package.json`, and provides context isolation for the main session.
 
-## 开发
+## Development
 
 ```bash
 cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 ```
 
-`pnpm test` 是离线的（假 pi，不联网）：范围 27 例 + 上下文 10 例。端到端另有一个 script，跑真会话真模型：
+`pnpm test` runs offline against a fake pi and needs no network: 32 scope cases and 10 context
+cases. End-to-end verification is a separate script that runs real sessions with a real model:
 
 ```bash
-pnpm run test:e2e                     # 默认模型 buddy/coder-a
+pnpm run test:e2e                     # defaults to buddy/coder-a
 PI_E2E_MODEL=buddy/coder-b pnpm run test:e2e
-PI_E2E_KEEP=1 pnpm run test:e2e       # 保留临时工程，翻会话记录用
+PI_E2E_KEEP=1 pnpm run test:e2e       # keep the temporary project to inspect the transcripts
 ```
 
-它建一个一次性工程（AGENTS.md 带标记、`.pi/main-only.md`、`.pi/extensions/` 软链、两个 agent 定义），然后跑四种会话：主会话、前台子代理（`async:false`）、后台子代理（`async:true`）、以及不装扩展的对照组。判定靠「code 只存在于被隔离的内容里」：主会话与对照组必须答得出，两个子代理必须答 `NONE`。
+It creates a disposable project holding an `AGENTS.md` with markers, a `.pi/main-only.md`, a
+`.pi/extensions/` symlink and two agent definitions, then runs four sessions: the main session,
+a foreground subagent (`async:false`), a background subagent (`async:true`) and a control
+without the extension. The verdict rests on the codes existing only inside the isolated
+content: the main session and the control must produce them, while both subagents must answer
+`NONE`.
 
-为什么不是 `pi -p`：`-p` 在父代理空闲时就退出，后台子代理还在跑时进程就没了。它用官方导出的 `RpcClient`（RPC 模式），会话是长寿子进程，父轮不会提前结束，取证由测试自己控制。后台子代理那条的答案由子代理自己写文件，不依赖父轮是否被唤醒。
+`pi -p` is unsuitable because it exits as soon as the parent agent becomes idle, which loses
+the process while a background subagent is still running. The script therefore drives RPC mode
+through the officially exported `RpcClient`, a long-lived child process whose lifetime the
+test controls, so the parent turn cannot end early. The background subagent writes its answer
+to a file itself, so collecting that evidence does not depend on the parent turn being woken.
 
-离线测试不调模型，只验证范围判定与上下文隔离：`node test/extension.test.mjs`、`node test/context.test.mjs`（`pnpm test` 两个都跑）；`node test/e2e.test.mjs` 是真会话验证（见下）。
+Offline tests never call a model and only verify scope decisions and context isolation:
+`node test/extension.test.mjs` and `node test/context.test.mjs`, both run by `pnpm test`. The
+real-session verification is `node test/e2e.test.mjs`.
 
-## 边界与注意
+## Boundaries and caveats
 
-- 范围是文件级不是内容级：范围含 `docs/**` 即允许读全目录。
-- `bash` 一律拒绝是设计而非缺陷：shell 命令里的路径无法可靠解析，且能带走环境变量。
-- 扩展在 `tool_call` 阶段拦截，不替换沙箱：子代理继承父进程环境与凭据，防误用不防恶意；不可信输入需要容器级隔离。
-- 未知工具 fail closed 意味着别的扩展注册的工具也会被拦；确需使用的工具写进 `allowTools`。
-- 嵌套子代理不继承 bindings：范围外的子代理不带本扩展的绑定，扩展在其会话里不生效。需要约束嵌套就别给范围会话开 `allowNestedSubagents`，或给嵌套调用显式传 bindings。
+- The scope is a file-level boundary, not a content-level one: including `docs/**` permits
+  reading the whole directory.
+- Refusing `bash` outright is a design decision rather than a gap. The paths inside a shell
+  command cannot be parsed reliably, and a shell can carry environment variables away.
+- The extension intercepts at the `tool_call` stage and is not a sandbox replacement. A
+  subagent inherits the parent process's environment and credentials, so this guards against
+  misuse rather than malice; genuinely untrusted input needs container-level isolation.
+- Failing closed on unknown tools means tools registered by other extensions are refused as
+  well. List the tools that are genuinely needed in `allowTools`.
+- Nested subagents do not inherit bindings. An unscoped subagent does not carry this
+  extension's bindings, so the extension has no effect in its session. To constrain nesting,
+  either do not enable `allowNestedSubagents` for a scoped session or pass bindings explicitly
+  on the nested call.
