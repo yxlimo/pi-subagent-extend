@@ -47,7 +47,7 @@ too.
 | Tool | Behaviour |
 | --- | --- |
 | `read` | path resolved (a missing one means the working directory), allowed when inside the scope, subject to `maxReads` |
-| `edit` / `write` | as above; refused even inside the scope when `readOnly` is set |
+| `edit` / `write` | the target must be inside the write scope (`writeScope`, defaulting to `scope`); refused even inside it when `readOnly` is set |
 | `grep` / `find` / `ls` | as `read` |
 | `bash` | refused entirely without an allowlist; with one, only matching commands are allowed and each is rewritten to run under the helper |
 | `powershell` / `codemode` | always refused: there is no path to judge, so they would escape the scope |
@@ -57,6 +57,27 @@ too.
 
 The last rule is what makes the extension a boundary rather than a filter: a tool added by some
 other extension is refused until someone names it.
+
+### The three write layers
+
+Reads and writes are authorised by different lists, and neither is merged into the other:
+
+| Layer | Field | Governs |
+| --- | --- | --- |
+| read | `scope` | `read`, `grep`, `find`, `ls` |
+| write, tools | `writeScope` | `edit`, `write` |
+| write, processes | `bash.writablePaths` (with `bash.writable`) | the Landlock rules of bash subprocesses |
+
+Without the split, "read the whole repository, write only `.pi/reviews`" cannot be expressed: a
+reviewer either may edit `lib/` or may write nothing at all.
+
+Keeping the third layer separate is not tidiness. A `git commit` inside a worktree writes to the
+main checkout's `.git/objects`, which has to be granted — and `.git` must never appear in the write
+scope, because that is what opens repository metadata to hand editing.
+
+With `bash.writable`, the sandbox is therefore given the write scope plus git's own directory and
+`node_modules`, not the working directory wholesale. A subagent that may read `lib/` but not write
+it cannot route around the rule with a shell redirect.
 
 **A missing path is its own message.** `read` without a `path` assumes the repository root, and
 `write` without one cannot be judged at all. Both say so, instead of pretending the scope rule
@@ -86,6 +107,12 @@ count, or a subagent could circle with read-only `bash` and escape the criterion
 `maxDenies` defaults to five; an explicit `0` disables it. Only refusals that **widening the
 parent's authorisation could resolve** count: an out-of-scope path, a command not in the
 allowlist, the read budget, a `readOnly` write, a tool missing from `allowTools`, bash disabled.
+
+Write refusals have their own budget, `maxWriteDenies`, defaulting to two. It is separate on
+purpose: a reviewer that keeps trying to write its report is making a usage mistake, and the answer
+is to deliver the report another way, not to conclude that the parent granted the wrong scope. A
+single out-of-scope read therefore does not push a write refusal towards a stop, and the refusal
+says so — it names the write scope and points at the report.
 
 Usage errors and hard rules never count: a missing path, shell metacharacters, an empty command,
 `powershell`/`codemode`, or a command matched by a profile's `bash.deny`. Those cannot be fixed by

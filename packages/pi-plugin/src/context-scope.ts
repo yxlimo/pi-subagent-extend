@@ -89,5 +89,5 @@ export function injectMainOnly(options: { sections?: Record<string, string> }, c
  */
 export function unbalancedWarning(result: StripResult): string | undefined {
 	if (!result.unbalanced.length) return undefined;
-	return `${result.unbalanced.join(", ")} 里的 <!-- main-agent-only:start --> 没有闭合，该段未剥离`;
+	return `unclosed <!-- main-agent-only:start --> in ${result.unbalanced.join(", ")} — the section was kept`;
 }

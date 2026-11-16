@@ -12,6 +12,7 @@ When delegating a subagent, pass the scope of this task through `extensionBindin
 | Situation | Which field | See |
 | --- | --- | --- |
 | The subagent should only read/write the few files of this task | `scope`, plus `readOnly` for a read-only task | [The scope field](#the-scope-field) |
+| The subagent should read the whole task scope but write into one directory (a review allowed to write only its report) | `writeScope` | [The scope field](#the-scope-field) |
 | The subagent has to run typecheck, tests or a build itself | `bash.read` / `bash.write`, plus `writable` when the artefacts land on disk | [The bash field](#the-bash-field) |
 | The subagent runs in `worktree: true` and has to install dependencies | The project commits `.pi/worktree-setup.sh`, together with `writablePaths` / `network` | [bash in a worktree](#bash-in-a-worktree) |
 | You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | agent profile | "Profiles (per-role defaults)" below |
@@ -91,14 +92,26 @@ subagent(
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `scope` | `string[]` | Required. Globs describing the task scope; an empty array refuses all file access |
-| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused even inside the scope, which suits read-only research and review agents |
+| `scope` | `string[]` | Required. Globs describing what the subagent may read; an empty array refuses all file access |
+| `writeScope` | `string[]` | Optional. Globs describing what `edit`/`write` may touch. Omitted means the same as `scope`; `[]` means no writes at all while reads keep working |
+| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused even inside the scope — the same as `writeScope: []` — which suits read-only research and review agents |
 | `maxReads` | `number` | Optional. Upper bound on successful `read` calls; once it is exceeded, every read is refused |
+| `maxWriteDenies` | `number` | Optional. Write refusals have their own budget: defaults to 2, `0` disables. Kept apart from `maxDenies` because repeatedly trying to write is a usage mistake, answered by delivering a report |
 | `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way |
 
 Glob rules: `**` matches any number of levels (including zero), `*` matches characters within a single level, `?` matches a single character.
 
-For a directory, `dir`, `dir/` and `dir/**` are equivalent: all three cover the directory itself and its contents at any depth; `dir/*` covers only the direct children. So write the scope as directories, not as a list of files — listing files is easy to get wrong, and files added to the directory later are refused too.
+For a directory, `dir`, `dir/` and `dir/**` are equivalent: all three cover the directory itself and its contents at any depth; `dir/*` covers only the direct children. So write the scope as directories, not as a list of files — listing files is easy to get wrong, and files added to the directory later are refused too. A path directly under `dir/**`, such as `dir/a.ts`, is inside it.
+
+Reads and writes are authorised by three separate lists, and this is deliberate:
+
+| Layer | Field | Governs |
+| --- | --- | --- |
+| read | `scope` | `read`, `grep`, `find`, `ls` |
+| write, tools | `writeScope` | `edit`, `write` |
+| write, processes | `bash.writablePaths` (with `bash.writable`) | the Landlock rules of bash subprocesses |
+
+So "read the whole repository, write only `.pi/reviews`" is `scope: ["."]`, `writeScope: [".pi/reviews"]`. Keep `.git` out of `writeScope` — git's directory is granted to the sandbox on its own, and putting it in the write scope lets a subagent hand-edit repository metadata.
 
 ## The `bash` field
 
@@ -108,7 +121,7 @@ For a directory, `dir`, `dir/` and `dir/**` are equivalent: all three cover the 
 | `bash.read` | `string[]` | Read-only commands (typecheck, grep and the like). A literal is matched token by token as a prefix after splitting on whitespace; an entry starting with `re:` is matched as a regex against the whole string |
 | `bash.write` | `string[]` | Commands that write files (tests, builds and the like). The matching rules are the same; they count as "write activity" |
 | `bash.network` | `boolean` | Defaults to `false`, the sandbox has no network; turn it on only for commands that genuinely need the network |
-| `bash.writable` | `boolean` | Defaults to `false`, the sandbox root is read-only; when `true`, the directories matched by the scope, the cwd, the worktree root and `node_modules` are writable inside the sandbox (test artefacts, snapshots). When the cwd is a linked worktree, the main checkout's common git directory is writable as well — the worktree's index and refs live there, and without it `git add`/`commit`/`stash`/`switch -c` fail on `index.lock` |
+| `bash.writable` | `boolean` | Defaults to `false`, the sandbox root is read-only; when `true`, the directories matched by the **write scope**, git's own directory and `node_modules` are writable inside the sandbox (test artefacts, snapshots). In a linked worktree the main checkout's common git directory is added too — the worktree's index and refs live there, and without it `git add`/`commit`/`stash`/`switch -c` fail on `index.lock`. The working directory is not granted wholesale, so a subagent allowed to read `lib/` but not write it cannot route around that with a shell redirect; anything else it needs goes in `writablePaths` |
 | `bash.writablePaths` | `string[]` | Additional paths granted write access (absolute paths, starting with `~`, or relative to the cwd). Put the global directories the toolchain has to write here, such as the pnpm store |
 | `bash.env` | `object` | Environment variables injected into the sandbox (written into the spec's `env`). `XDG_RUNTIME_DIR` (the sandbox's private /tmp, which pnpm's lock directory relies on) and, in the worktree case, `MISE_STATE_DIR` are injected by default |
 | `bash.gitExcludes` | `boolean` | Defaults to `true`. Injects global exclude rules into git inside the sandbox (`node_modules/`, `.pnpm-store/`), so that `git add -A` does not pull the dependency directories into the index |

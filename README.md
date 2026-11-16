@@ -67,22 +67,25 @@ subagent(
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `scope` | `string[]` | Globs describing the task scope. Required; an empty array refuses all file access. |
-| `readOnly` | `boolean` | Refuse `edit` and `write` even inside the scope. |
+| `scope` | `string[]` | Globs describing what the subagent may read. Required; an empty array refuses all file access. |
+| `writeScope` | `string[]` | Globs describing what `edit` and `write` may touch. Defaults to `scope`; an empty array makes writing impossible while reads keep working. |
+| `readOnly` | `boolean` | Refuse `edit` and `write` even inside the scope; equivalent to `writeScope: []`. |
 | `maxReads` | `number` | Cap on successful reads. |
 | `allowTools` | `string[]` | Extra non-executor tool names to allow. |
 | `maxDenies` | `number` | Consecutive grant refusals before the run stops; `0` disables. Defaults to 5. |
+| `maxWriteDenies` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
 | `probe` | `object \| boolean` | Circles-and-collisions detection; see [probes](docs/architecture.md#probes). |
 | `bash.read` / `bash.write` | `string[]` | Commands allowed to only read or to write, matched per token as a prefix, or `re:` regexes. |
-| `bash.writable` | `boolean` | Grant write access to the scope, for tests and builds. |
+| `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directory and `node_modules` are added, so `git add`/`commit` and an install work. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
 | `bash.deny` | `string[]` | Commands no caller can allow; only a project profile can set this. |
 
-`/permission` shows the active scope, mode, bash allowlist, read count, denial count and probe
-state. The namespace is `pi-subagent-extend/1`; bindings reach the subagent through
-`PI_SUBAGENT_EXTENSION_BINDINGS`, or by hand when there is no parent agent:
+`/permission` shows the read scope, the write scope when it differs, the bash allowlist, both
+read and write denial counts, and the probe state. The namespace is `pi-subagent-extend/1`;
+bindings reach the subagent through `PI_SUBAGENT_EXTENSION_BINDINGS`, or by hand when there is no
+parent agent:
 
 ```bash
 PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagent-extend/1":{"scope":["src/**"],"readOnly":true}}' \

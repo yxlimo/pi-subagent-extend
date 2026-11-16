@@ -100,4 +100,4 @@ Also note subagents with `context: "fork"`: they take the parent's whole system 
 | The subagent still reads the content inside the markers | the agent definition does not declare `child-context.ts`; or that run was a fork context |
 | The subagent reads `.pi/main-only.md` | that file was put into AGENTS.md or into some skill, it does not spread by itself; or the agent used fork context |
 | The main session does not see `.pi/main-only.md` | the extension is not loaded via ambient loading (declaring it only in `subagentOnlyExtensions` means it is not loaded in the main session) |
-| You see 「没有闭合，该段未剥离」 | one half of the marker pair is missing, add `<!-- main-agent-only:end -->` |
+| You see a warning about an `unclosed <!-- main-agent-only:start -->` | one half of the marker pair is missing, add `<!-- main-agent-only:end -->` |

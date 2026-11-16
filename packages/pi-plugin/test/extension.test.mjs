@@ -184,7 +184,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const outside = await h.call("read", { path: "docs/design.md" })
   assert.equal(outside?.block, true, "out-of-scope read is blocked")
-  assert.match(outside.reason, /outside this task's scope/, "block reason names the scope")
+  assert.match(outside.reason, /outside the read scope/, "block reason names the read scope")
   const editOutside = await h.call("write", { path: "docs/notes.md" })
   assert.equal(editOutside?.block, true, "out-of-scope write is blocked")
 
@@ -273,7 +273,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
   const grep = await h.call("grep", { pattern: "x" })
   assert.equal(grep?.block, true, "pathless grep (cwd) is out of scope here")
-  assert.match(grep.reason, /outside (this task's |the )?scope/, "block reason teaches the scope")
+  assert.match(grep.reason, /outside (this task's |the )?(read )?scope/, "block reason teaches the scope")
   h.restore()
   console.log("  ok   缺省 path 视为 cwd 并按范围判定")
 }
@@ -616,7 +616,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   打转与撞权限默认开启；时间判据需显式配置")
 }
 
-// 22. Worktree ergonomics: writablePaths, env injection, worktree root binding.
+// 22. Worktree ergonomics: writablePaths, env injection, and a worktree root that is NOT granted.
 {
   const store = join(workdir, "pnpm-store")
   mkdirSync(store, { recursive: true })
@@ -648,8 +648,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     `scope dir inside the worktree is writable, got: ${spec.write.join(", ")}`,
   )
   assert.ok(
-    spec.write.some((dir) => dir.endsWith("/wt")),
-    `the worktree root itself is writable, got: ${spec.write.join(", ")}`,
+    !spec.write.some((dir) => dir.endsWith("/wt")),
+    `the worktree root itself is not writable (only the write scope is), got: ${spec.write.join(", ")}`,
   )
   assert.ok(
     spec.write.some((dir) => dir.endsWith("/pnpm-store")),
@@ -663,7 +663,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
   assert.match(spec.env.XDG_RUNTIME_DIR ?? "", /runtime$/, "pnpm's runtime lock dir moves off the read-only root")
   h.restore()
-  console.log("  ok   worktree 场景：writablePaths、env 注入、worktree 根可写、mise 信任绕过")
+  console.log("  ok   worktree 场景：writablePaths、env 注入、worktree 根不整体授权、mise 信任绕过")
 }
 
 // 23. Missing path must not read as "the child walked to the wrong directory".
@@ -674,7 +674,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const write = await h.call("write", { content: "x" })
   assert.equal(write?.block, true, "write without path is refused")
   assert.match(write.reason, /needs a path/, "write says the path argument is missing")
-  assert.ok(!/outside this task's scope/.test(write.reason), "write does not blame the scope")
+  assert.ok(!/outside the (read )?scope/.test(write.reason), "write does not blame the scope")
 
   const grep = await h.call("grep", { pattern: "foo" })
   assert.equal(grep?.block, true, "grep without path is refused")
@@ -745,7 +745,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     spec.write.some((dir) => dir.endsWith("/node_modules")),
     `node_modules is writable, got: ${spec.write.join(", ")}`,
   )
-  assert.ok(spec.write.includes(workdir), `the working directory is writable, got: ${spec.write.join(", ")}`)
+  assert.ok(
+    spec.write.some((dir) => dir.endsWith("/src")),
+    `the write scope is writable, got: ${spec.write.join(", ")}`,
+  )
+  assert.ok(!spec.write.includes(workdir), `the working directory is not writable by default, got: ${spec.write.join(", ")}`)
   assert.equal(spec.env.GIT_CONFIG_COUNT, "1", "git excludes are configured")
   assert.equal(spec.env.GIT_CONFIG_KEY_0, "core.excludesFile", "the exclude key is passed to git")
   assert.match(
@@ -1055,17 +1059,18 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     )
     ro.restore()
 
-    // 普通仓库：.git 在目录里且在 cwd 之内，不应额外追加。
+    // 普通仓库：cwd 不再整体授权，所以显式给 <repo>/.git（git add / commit 要写索引与 ref），
+    // 但仓库根本身不给 —— 那等于把整个 checkout 打开。
     const plain = await handler({ cwd: repoDir, bindings: bindings(true) })
     const plainInput = { command: "git status" }
     assert.equal(await plain.call("bash", plainInput), undefined, "plain repo passes too")
     assert.equal(
       specOf(plainInput.command).write.some((d) => d.endsWith("/.git")),
-      false,
-      "a normal repository gets no extra .git grant",
+      true,
+      "a normal repository gets its .git granted",
     )
     plain.restore()
-    console.log("  ok   linked worktree 的 common dir 可写；只读沙箱与普通仓库不追加")
+    console.log("  ok   linked worktree 的 common dir 可写；只读沙箱不给；普通仓只给 .git")
   }
 }
 
@@ -1297,6 +1302,126 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
   h.restore()
   console.log("  ok   写越界被标注为授权问题；授权内与宿主权限被拒都不误报")
+}
+
+// 41. writeScope: read the whole task scope, write only one directory.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["src", "lib", ".pi/reports"], writeScope: [".pi/reports"], maxDenies: 0, maxWriteDenies: 0 },
+    }),
+  })
+  assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "reading the source tree still works")
+  assert.equal(await h.call("grep", { path: "lib" }), undefined, "searching lib still works")
+  assert.equal(await h.call("write", { path: ".pi/reports/review.md", content: "x" }), undefined, "writing inside writeScope works")
+
+  const denied = await h.call("write", { path: "lib/x.ts", content: "x" })
+  assert.equal(denied?.block, true, "writing outside writeScope is refused even though it is readable")
+  assert.match(denied.reason, /readable but not writable/, "the refusal names the collision: readable, not writable")
+  assert.match(denied.reason, /write scope is \.pi\/reports/, "the refusal shows the write scope")
+  assert.match(denied.reason, /report/i, "the refusal points at the right way out: report it")
+  assert.equal(await h.call("read", { path: "lib/x.ts" }), undefined, "the same path stays readable")
+  h.restore()
+  console.log("  ok   writeScope：全范围可读，只有一份目录可写，拒绝文案说清撞的是写范围")
+}
+
+// 42. No writeScope means write == read; an empty one means read-only writes.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0 } }),
+  })
+  assert.equal(await h.call("write", { path: "src/a.ts", content: "x" }), undefined, "without writeScope, in-scope writes pass")
+  h.restore()
+
+  const empty = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], writeScope: [], maxDenies: 0, maxWriteDenies: 0 } }),
+  })
+  assert.equal(await empty.call("read", { path: "src/a.ts" }), undefined, "reads are unaffected by an empty writeScope")
+  const blocked = await empty.call("write", { path: "src/a.ts", content: "x" })
+  assert.equal(blocked?.block, true, "an empty writeScope refuses every write")
+  assert.match(blocked.reason, /readable but not writable/, "and says it is a write refusal, not an unreadable path")
+  empty.restore()
+  console.log("  ok   writeScope 缺省等于 scope；空数组等于只读")
+}
+
+// 43. readOnly wins over writeScope.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], writeScope: ["src/**"], readOnly: true } }),
+  })
+  const edit = await h.call("edit", { path: "src/a.ts", content: "x" })
+  assert.equal(edit?.block, true, "readOnly refuses the write even with a matching writeScope")
+  assert.match(edit.reason, /read-only/, "and says the session is read-only")
+  h.restore()
+  console.log("  ok   readOnly 压过 writeScope")
+}
+
+// 44. Write refusals have their own budget: misuse must not become a grant error.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["src/**"], writeScope: [".pi/reports"], maxDenies: 5, maxWriteDenies: 2 },
+    }),
+  })
+  const first = await h.call("write", { path: "src/a.ts", content: "x" })
+  assert.equal(first?.block, true, "the first write refusal blocks")
+  assert.equal(first.terminate, undefined, "and does not stop the run")
+  const second = await h.call("write", { path: "src/b.ts", content: "x" })
+  assert.match(second.reason, /one more refusal ends the run/, "the second write refusal warns")
+  assert.match(second.reason, /write scope does not cover/, "the warning is about the write scope, not the grant")
+  assert.match(second.reason, /report/, "and repeats the way out: deliver a report")
+  assert.equal(second.terminate, undefined, "still no stop at the limit")
+
+  // 读拒与写拒各算各的：一次范围外读不应把写预算推过阈值。
+  const readDenial = await h.call("read", { path: "docs/x.md" })
+  assert.equal(readDenial?.block, true, "an out-of-scope read is refused")
+  assert.doesNotMatch(readDenial.reason, /one more ends the run/, "the read refusal uses the other budget")
+  assert.doesNotMatch(readDenial.reason, /write scope does not cover/, "and it is not described as a write problem")
+
+  const third = await h.call("write", { path: "src/c.ts", content: "x" })
+  assert.equal(third?.block, true, "the third write refusal blocks")
+  assert.equal(third.terminate, true, "and hard-stops the run")
+  h.restore()
+  console.log("  ok   写拒单独计数：第 2 次警告、第 3 次硬停，不被读拒推高")
+}
+
+// 45. dir/** really covers files directly under dir (the shape a report suspected).
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["lib/router/**"], maxDenies: 0, maxWriteDenies: 0 } }),
+  })
+  assert.equal(await h.call("write", { path: "lib/router/stream-limits.ts", content: "x" }), undefined, "a file directly under dir/** is writable")
+  assert.equal(await h.call("read", { path: "lib/router" }), undefined, "the directory itself is in scope")
+  const out = await h.call("read", { path: "lib/other.ts" })
+  assert.equal(out?.block, true, "a sibling of the granted directory is refused")
+  assert.match(out.reason, /"lib\/other\.ts" is outside the read scope/, "the refusal names the full path, not a truncated parent")
+  h.restore()
+  console.log("  ok   dir/** 覆盖其下文件；拒绝文案给全路径")
+}
+
+// 46. bash writable dirs follow writeScope, not the read scope.
+{
+  // 两个目录都要真实存在：writableDirs 只收录存在的目录，不存在的话「不给」不算证据。
+  mkdirSync(join(workdir, "src"), { recursive: true })
+  mkdirSync(join(workdir, "lib"), { recursive: true })
+  const h = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": {
+        scope: ["src/**", "lib/**"],
+        writeScope: ["src/**"],
+        bash: { write: ["pnpm install"], writable: true },
+      },
+    }),
+  })
+  const input = { command: "pnpm install" }
+  assert.equal(await h.call("bash", input), undefined, "the listed command passes")
+  const spec = specOf(input.command)
+  assert.ok(spec.write.some((dir) => dir.endsWith("/src")), `the write scope is writable, got: ${spec.write.join(", ")}`)
+  assert.ok(!spec.write.some((dir) => dir.endsWith("/lib")), `a readable-only directory is not writable, got: ${spec.write.join(", ")}`)
+  assert.ok(!spec.write.includes(workdir), `the working directory is not granted wholesale, got: ${spec.write.join(", ")}`)
+  h.restore()
+  console.log("  ok   bash 可写面跟随 writeScope，读范围不自动变可写")
 }
 
 rmSync(workdir, { recursive: true, force: true })

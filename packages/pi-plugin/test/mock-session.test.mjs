@@ -151,9 +151,9 @@ const SCOPE = { "pi-subagent-extend/1": { scope: ["src/**"] } };
 		],
 		bindings: { "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 1 } },
 	});
-	const denials = run1.results.filter((r) => /outside this task's scope|denial budget/.test(r.text));
+	const denials = run1.results.filter((r) => /outside the read scope|denial budget/.test(r.text));
 	assert.equal(denials.length, 2, `two refusals expected, saw ${denials.length}. stderr: ${run1.stderr.slice(-500)}`);
-	assert.match(denials[0].text, /outside this task's scope/, "the first refusal names the scope boundary");
+	assert.match(denials[0].text, /outside the read scope/, "the first refusal names the read scope");
 	assert.match(denials[0].text, /Do not retry/, "the first refusal is actionable");
 	assert.match(denials[1].text, /denial budget/, "the second refusal names the stop criterion");
 	assert.equal(run1.consumed, 2, "the run ended: the mock never served a third turn");
@@ -178,7 +178,7 @@ const SCOPE = { "pi-subagent-extend/1": { scope: ["src/**"] } };
 	});
 	assert.deepEqual(run2.marker, ["contact_supervisor"], "the rescue tool really executed");
 	assert.equal(
-		run2.results.some((r) => /outside this task's scope/.test(r.text)),
+		run2.results.some((r) => /outside the read scope/.test(r.text)),
 		true,
 		"the out-of-scope read was still refused",
 	);
@@ -195,7 +195,7 @@ const SCOPE = { "pi-subagent-extend/1": { scope: ["src/**"] } };
 	});
 	assert.equal(run3.results.length, 1, "exactly one tool result");
 	assert.equal(
-		/outside this task's scope|denial budget/.test(run3.results[0].text),
+		/outside the read scope|denial budget/.test(run3.results[0].text),
 		false,
 		`in-scope read must pass, got: ${run3.results[0].text.slice(0, 200)}`,
 	);
@@ -227,7 +227,7 @@ const SCOPE = { "pi-subagent-extend/1": { scope: ["src/**"] } };
 		],
 		bindings: { "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 1 } },
 	});
-	const denials = run4.results.filter((r) => /outside this task's scope|denial budget/.test(r.text));
+	const denials = run4.results.filter((r) => /outside the read scope|denial budget/.test(r.text));
 	assert.equal(denials.length, 3, `expected warn, stop, then the latched stop; saw ${denials.length}`);
 	assert.match(denials[1].text, /denial budget/, "the second denial is the stop");
 	const latched = denials[2].text;

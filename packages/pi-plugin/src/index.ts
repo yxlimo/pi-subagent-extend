@@ -78,6 +78,9 @@ const SHELL_META = /[;&|<>()`$\n\r\\]/;
 interface Policy {
 	globs: string[];
 	regexps: RegExp[];
+	/** 写范围（edit / write 工具）。没配 writeScope 时等于读范围；readOnly 时为空。 */
+	writeGlobs: string[];
+	writeRegexps: RegExp[];
 	source: string;
 	readOnly: boolean;
 	maxReads: number;
@@ -87,18 +90,23 @@ interface Policy {
 	probe: unknown;
 	/** 连续被拒多少次算「撞权限」；0 = 关闭。 */
 	maxDenies: number;
+	/** 写拒的独立预算：写拒是用法错，换个交付方式就能解决，不该跟读拒共用额度。 */
+	maxWriteDenies: number;
 	active: boolean;
 }
 
 const INACTIVE: Policy = {
 	globs: [],
 	regexps: [],
+	writeGlobs: [],
+	writeRegexps: [],
 	source: "not configured",
 	readOnly: true,
 	maxReads: 0,
 	allowTools: [],
 	probe: undefined,
 	maxDenies: 0,
+	maxWriteDenies: 0,
 	active: false,
 };
 
@@ -107,12 +115,15 @@ function denyAll(source: string): Policy {
 	return {
 		globs: [],
 		regexps: [],
+		writeGlobs: [],
+		writeRegexps: [],
 		source,
 		readOnly: true,
 		maxReads: 0,
 		allowTools: [],
 		probe: undefined,
 		maxDenies: 0,
+		maxWriteDenies: 0,
 		active: true,
 	};
 }
@@ -236,6 +247,27 @@ function mergeConfig(
  * 本次任务管哪些路径，此时文件访问全拒但 bash 白名单照常可用——漏传 bindings 是
  * 「响的」失败，不是「什么限制都没有」。
  */
+/**
+ * 写范围（edit / write 工具），与 bash.writablePaths（进程层）分开：
+ *   不写 writeScope → 等于读范围，现有派单行为不变；
+ *   readOnly → 压过一切，等价于空写范围；
+ *   写了 → 只认这一份，写超出即拒，读不受影响。
+ */
+function parseWriteScope(
+	config: Record<string, unknown>,
+	globs: string[],
+	readOnly: boolean,
+	source: string,
+): { writeGlobs?: string[]; error?: string } {
+	if (readOnly) return { writeGlobs: [] };
+	if (config.writeScope === undefined) return { writeGlobs: globs };
+	const ws = config.writeScope;
+	if (!Array.isArray(ws) || ws.some((g) => typeof g !== "string" || !g.trim())) {
+		return { error: `${source}.writeScope must be an array of strings; everything is refused` };
+	}
+	return { writeGlobs: (ws as string[]).map((g) => g.trim()).filter(Boolean) };
+}
+
 function parsePolicyObject(
 	config: Record<string, unknown>,
 	source: string,
@@ -250,14 +282,20 @@ function parsePolicyObject(
 		return denyAll(`${source}.scope is missing; everything is refused`);
 	}
 	const globs = scopeGiven ? (scope as string[]).map((g) => g.trim()).filter(Boolean) : [];
+	const readOnly = config.readOnly === true;
+	const write = parseWriteScope(config, globs, readOnly, source);
+	if (write.error) return denyAll(write.error);
+	const writeGlobs = write.writeGlobs as string[];
 	const allowTools = Array.isArray(config.allowTools)
 		? (config.allowTools as unknown[]).filter((t): t is string => typeof t === "string" && t.trim() !== "")
 		: [];
 	return {
 		globs,
 		regexps: compile(globs),
+		writeGlobs,
+		writeRegexps: compile(writeGlobs),
 		source,
-		readOnly: config.readOnly === true,
+		readOnly,
 		maxReads: positiveInt(config.maxReads),
 		allowTools,
 		bash: parseBashRule(config.bash),
@@ -265,15 +303,18 @@ function parsePolicyObject(
 		// 撞权限是纯错误信号：不配也开，父代理可以显式写 0 关掉。
 		// 缺省 5：停机是硬停，判早一次就丢掉整轮任务，而多给几次只浪费几个调用。
 		maxDenies: config.maxDenies === 0 ? 0 : positiveInt(config.maxDenies) || 5,
+		// 缺省 2：写拒是用法错（该回报告而不是落盘），给两次机会换做法就够。
+		maxWriteDenies: config.maxWriteDenies === 0 ? 0 : positiveInt(config.maxWriteDenies) || 2,
 		active: true,
 	};
 }
 
-function isAllowed(policy: Policy, cwd: string, target: string): boolean {
-	if (policy.globs.length === 0) return false;
+/** 目标是否落在某个范围里：相对路径与绝对路径都试，scope 写哪种都认。 */
+function matches(regexps: RegExp[], cwd: string, target: string): boolean {
+	if (regexps.length === 0) return false;
 	const abs = resolve(cwd, target);
 	const rel = relative(cwd, abs);
-	for (const re of policy.regexps) {
+	for (const re of regexps) {
 		if (re.test(rel) || re.test(abs)) return true;
 	}
 	return false;
@@ -293,11 +334,16 @@ function isRootish(raw: string, cwd: string): boolean {
  * 普通仓库直接返回 undefined：那边 .git 在 cwd 之内，不需要额外授权，也省掉一次 spawn。
  * 结果按 cwd 缓存：bash 白名单命令会反复拼 spec。
  */
-const gitCommonCache = new Map<string, string | undefined>();
-function gitCommonDir(cwd: string): string | undefined {
+const gitDirsCache = new Map<string, { gitDir: string; common: string } | undefined>();
+/**
+ * git 需要可写的两个目录：本次 checkout 的 gitdir，以及（linked worktree 时）主仓的
+ * 公共目录。索引与 ref 分别住在两处，只给一个时 git add / commit / stash 会拼在
+ * index.lock 上。普通仓两者相同，只需 .git 本身。
+ */
+function gitDirs(cwd: string): { gitDir: string; common: string } | undefined {
 	const key = resolve(cwd);
-	if (gitCommonCache.has(key)) return gitCommonCache.get(key);
-	let found: string | undefined;
+	if (gitDirsCache.has(key)) return gitDirsCache.get(key);
+	let found: { gitDir: string; common: string } | undefined;
 	try {
 		const out = execFileSync("git", ["rev-parse", "--absolute-git-dir", "--git-common-dir"], {
 			cwd: key,
@@ -308,12 +354,13 @@ function gitCommonDir(cwd: string): string | undefined {
 		const [gitDirRaw, commonRaw] = out.trim().split("\n");
 		const gitDir = gitDirRaw?.trim();
 		const common = commonRaw ? resolve(key, commonRaw.trim()) : "";
-		// common == gitDir 就是普通仓库（或 bare），额外授权无从谈起。
-		if (gitDir && common && common !== gitDir && existsSync(common)) found = common;
+		if (gitDir && existsSync(gitDir)) {
+			found = { gitDir, common: common && existsSync(common) ? common : gitDir };
+		}
 	} catch {
 		found = undefined;
 	}
-	gitCommonCache.set(key, found);
+	gitDirsCache.set(key, found);
 	return found;
 }
 
@@ -335,7 +382,8 @@ function helperPath(): string | undefined {
 /** scope 里可写的那几个目录：取每条 glob 的静态前缀，存在才 bind。 */
 function writableDirs(policy: Policy, cwd: string): string[] {
 	const dirs = new Set<string>();
-	for (const glob of policy.globs) {
+	// 按写范围派生，不用读范围：bash 的可写面不该比 edit / write 更宽。
+	for (const glob of policy.writeGlobs) {
 		const literal = glob.split(/[*?]/)[0].replace(/\/+$/, "");
 		if (!literal) continue;
 		const abs = resolve(cwd, literal);
@@ -391,18 +439,14 @@ function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): strin
 	const dirs = new Set<string>();
 	if (rule.writable) {
 		for (const dir of writableDirs(policy, cwd)) dirs.add(dir);
-		// cwd 本身要可写：根只读，不给的话 git 连索引都写不了，子代理任何落盘
-		// 操作都会失败。（cwd 落在 /tmp 下时，helper 不会给它盖私有 tmpfs，见
-		// namespace.rs。）
-		dirs.add(cwd);
-		const worktreeRoot = findWorktreeRoot(cwd);
-		if (worktreeRoot) {
-			dirs.add(worktreeRoot);
-			// linked worktree 的索引与 ref 在**主仓**的 .git 里（<common>/worktrees/<id>/index、
-			// <common>/refs），只给 worktree 自己时 git add / commit / stash / switch -c 会失败在
-			// index.lock 上。Lab 实测见 Lab/git-worktree/probe.sh。
-			const common = gitCommonDir(cwd);
-			if (common) dirs.add(common);
+		// git 的索引与 ref 必须可写，否则 add / commit / stash 全拼在 index.lock 上；但只给
+		// git 目录本身，不因此把整个 checkout 打开。linked worktree 的索引与 ref 在**主仓**的
+		// gitdir 里（<common>/worktrees/<id>/index、<common>/refs），普通仓就是 <repo>/.git。
+		// Lab 实测见 Lab/git-worktree/probe.sh。
+		const git = gitDirs(cwd);
+		if (git) {
+			dirs.add(git.gitDir);
+			dirs.add(git.common);
 		}
 		// node_modules 也要可写：pnpm install 要写 .bin 里的 shim。它通常不在
 		// scope 里，但装依赖是任务的必要步骤。worktree 里它是符号链接，要给
@@ -695,6 +739,8 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		policy = parsePolicyObject(call.config, `extensionBindings ${BINDING_NAMESPACE}`, { requireScope: true });
 	}
 	let denyCounter = new DenyCounter(policy.maxDenies);
+	// 写拒单独计数：写拒的正解是换交付方式（回报告），跟「授权写错」不是一类信号。
+	let writeDenyCounter = new DenyCounter(policy.maxWriteDenies, "write");
 	let allowedReads = 0;
 	// 停机是硬停：每个被拦的结果都带 terminate，pi 在整批结果都 terminating 时结束本轮
 	// （docs/extensions.md："terminate only applies to a blocked call; the agent stops early
@@ -731,6 +777,87 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
 	// 可用列表；父代理据此知道委派时传 extensionBindings。已上锁的会话不注册——
 	// 它不委派，也不该去读一个自己被范围拦住的文件。
+	// 判定函数放在 activate 作用域：tool_call 回调保持扁平，计数器也在这里。
+	const deny = (reason: string) => ({ block: true, reason } as const);
+	const bail = (reason: string) => {
+		const counted = denyCounter.record();
+		if (!counted.yes) return deny(reason);
+		const composed = counted.note ? `${reason}\n\n${counted.note}` : reason;
+		return counted.stop ? stop(composed) : deny(composed);
+	};
+	// 写拒自己的预算：文案必须给出「改用回报告」这条出路，否则子代理只会换个路径再试。
+	const writeBail = (reason: string) => {
+		const counted = writeDenyCounter.record();
+		if (!counted.yes) return deny(reason);
+		const composed = counted.note ? `${reason}\n\n${counted.note}` : reason;
+		return counted.stop ? stop(composed) : deny(composed);
+	};
+
+	/** 路径类工具的判定：读认读范围，写认写范围，两类拒绝各自计数、各自文案。 */
+	const pathToolVerdict = (
+		event: { toolName: string; input?: unknown },
+		cwd: string,
+	): { block: true; reason: string; terminate?: boolean } | undefined => {
+		if (!PATH_TOOLS.includes(event.toolName)) return undefined;
+		const input = (event as { input?: { path?: unknown } }).input;
+		const raw = typeof input?.path === "string" ? input.path.trim() : "";
+		const target = raw || ".";
+		const isWrite = WRITE_TOOLS.includes(event.toolName);
+		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
+			return bail(`pi-subagent-extend: read budget exhausted (${policy.maxReads} reads).`);
+		}
+		if (isWrite && policy.readOnly) {
+			return bail(`pi-subagent-extend: this session is read-only; ${event.toolName} is refused (source: ${policy.source}).`);
+		}
+		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
+		// 这是用法错误不是权限错误，不计入撞权限计数。
+		if (isWrite && !raw) {
+			return deny(
+				`pi-subagent-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
+			);
+		}
+		const readOk = matches(policy.regexps, cwd, target);
+		if (isWrite) {
+			if (!matches(policy.writeRegexps, cwd, target)) {
+				// 读得到、写不到：这是最常见也最容易误导的拒绝，文案要直说撞的是写范围，
+				// 并给出正解——回报告——而不是「换个路径再试」。
+				if (readOk) {
+					return writeBail(
+						`pi-subagent-extend: "${target}" is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+					);
+				}
+				return bail(
+					`pi-subagent-extend: "${target}" is outside the scope — neither readable nor writable (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}\nWrite scope: ${preview(policy.writeGlobs)}`,
+				);
+			}
+		} else if (!readOk) {
+			// 缺 path 时目标其实是 cwd，说清这一点，免得被当成「子代理走错目录」。
+			if (!raw) {
+				// 缺 path：用法错误，不计入撞权限计数。
+				return deny(
+					`pi-subagent-extend: no path was given; the working directory (${cwd}) was assumed and is outside the read scope (source: ${policy.source}). Pass a path inside the scope.\nRead scope: ${preview(policy.globs)}`,
+				);
+			}
+			// cwd / 仓库根：读起来像 scope 写错，其实多半是「想要全仓搜索」。计数（这是
+			// 授权问题），但要说清这不是某个文件路径写错。
+			if (isRootish(raw, cwd)) {
+				return bail(
+					`pi-subagent-extend: "${raw}" is the repository root, not a file in the read scope (source: ${policy.source}). Pass the concrete path; if repo-wide access is really needed, say so and the parent can widen the scope.\nRead scope: ${preview(policy.globs)}`,
+				);
+			}
+			return bail(
+				`pi-subagent-extend: "${target}" is outside the read scope (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}`,
+			);
+		}
+		if (isWrite) {
+			const junk = probe?.checkWriteTarget(target);
+			if (junk) return { block: true, reason: junk.reason, terminate: false };
+			probe?.noteWriteActivity();
+		}
+		if (event.toolName === READ_TOOL) allowedReads += 1;
+		return undefined;
+	};
+
 	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: SKILL_DIRS }));
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -743,6 +870,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			probe?.dispose();
 			policy = resolved;
 			denyCounter = new DenyCounter(policy.maxDenies);
+			writeDenyCounter = new DenyCounter(policy.maxWriteDenies, "write");
 			allowedReads = 0;
 			armProbe();
 		}
@@ -754,8 +882,10 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		const probeLine = probe ? ", probe on" : "";
 		const storeLine = policy.bash ? `, pnpm store ${detectPnpmStore(cwd).path ?? "detection failed"}` : "";
 		const mode = policy.readOnly ? "read-only" : "read-write";
+		const sameWrite = policy.writeGlobs.join("\n") === policy.globs.join("\n");
+		const writeNote = sameWrite ? "" : `, write scope ${policy.writeGlobs.length} entries`;
 		const msg = policy.globs.length
-			? `scope active (${policy.source}, ${policy.globs.length} entries, ${mode}${budget}${bash}${probeLine}${storeLine})`
+			? `scope active (${policy.source}, ${policy.globs.length} entries${writeNote}, ${mode}${budget}${bash}${probeLine}${storeLine})`
 			: `scope is empty: every file access is refused${budget}${bash}${probeLine}${storeLine}`;
 		ctx.ui.notify(`pi-subagent-extend: ${msg}`, "info");
 	});
@@ -811,7 +941,6 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		currentCtx = ctx;
 		if (!policy.active) return;
 		const cwd = ctx.cwd ?? process.cwd();
-		const deny = (reason: string) => ({ block: true, reason } as const);
 		// 求援通道不受任何停机影响：被停住的子代理最需要的就是「报告我卡在哪」。
 		if (SAFE_TOOLS.includes(event.toolName)) return undefined;
 		if (stopped) return { block: true, reason: stopReason, terminate: true };
@@ -828,12 +957,6 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		//   不能 → 只拒不计（deny）：用法错误（缺 path、空命令、shell 元字符）、
 		//          项目 profile 的硬禁令、永远不开放的工具、环境/内核缺能力。
 		// 把后一类算进预算，会让一次参数写错就提前判死长任务。
-		const bail = (reason: string) => {
-			const counted = denyCounter.record();
-			if (!counted.yes) return deny(reason);
-			const composed = counted.note ? `${reason}\n\n${counted.note}` : reason;
-			return counted.stop ? stop(composed) : deny(composed);
-		};
 
 		if (event.toolName === "bash") {
 			const command = String((event.input as { command?: unknown })?.command ?? "").trim();
@@ -909,50 +1032,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (policy.allowTools.includes(event.toolName)) return undefined;
 
 		if (PATH_TOOLS.includes(event.toolName)) {
-			const input = (event as { input?: { path?: unknown } }).input;
-			const raw = typeof input?.path === "string" ? input.path.trim() : "";
-			const target = raw || ".";
-			if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
-				return bail(`pi-subagent-extend: read budget exhausted (${policy.maxReads} reads).`);
-			}
-			if (WRITE_TOOLS.includes(event.toolName)) {
-				if (policy.readOnly) {
-					return bail(`pi-subagent-extend: this session is read-only; ${event.toolName} is refused (source: ${policy.source}).`);
-				}
-				// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
-				// 这是用法错误不是权限错误，不计入撞权限计数。
-				if (!raw) {
-					return deny(
-						`pi-subagent-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nScope: ${preview(policy.globs)}`,
-					);
-				}
-			}
-			if (!isAllowed(policy, cwd, target)) {
-				// 缺 path 时目标其实是 cwd，说清这一点，免得被当成「子代理走错目录」。
-				if (!raw) {
-					// 缺 path：用法错误，不计入撞权限计数。
-					return deny(
-						`pi-subagent-extend: no path was given; the working directory (${cwd}) was assumed and is outside the scope (source: ${policy.source}). Pass a path inside the scope.\nScope: ${preview(policy.globs)}`,
-					);
-				}
-				// cwd / 仓库根：读起来像 scope 写错，其实多半是「想要全仓搜索」。计数（这是
-				// 授权问题），但要说清这不是某个文件路径写错。
-				if (isRootish(raw, cwd)) {
-					return bail(
-						`pi-subagent-extend: "${raw}" is the repository root, not a file in the task scope (source: ${policy.source}). Pass the concrete path; if repo-wide access is really needed, say so and the parent can widen the scope.\nScope: ${preview(policy.globs)}`,
-					);
-				}
-				return bail(
-					`pi-subagent-extend: "${target}" is outside this task's scope (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nScope: ${preview(policy.globs)}`,
-				);
-			}
-			if (WRITE_TOOLS.includes(event.toolName)) {
-				const junk = probe?.checkWriteTarget(target);
-				if (junk) return { block: true, reason: junk.reason, terminate: false };
-				probe?.noteWriteActivity();
-			}
-			if (event.toolName === READ_TOOL) allowedReads += 1;
-			return undefined;
+			return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd);
 		}
 
 		return bail(
@@ -968,6 +1048,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				? [
 					`Source: ${policy.source}`,
 					`Mode: ${policy.readOnly ? "read-only" : "read-write"}`,
+					policy.readOnly || policy.writeGlobs.join("\n") === policy.globs.join("\n")
+						? undefined
+						: `Write scope: ${policy.writeGlobs.join(" | ") || "(none)"}`,
+					`Read scope: ${policy.globs.join(" | ") || "(none)"}`,
+					`Read denials: ${denyCounter.status()} · write denials: ${writeDenyCounter.status()}`,
 					policy.bash
 						? `bash read: ${policy.bash.read.join(" | ") || "(none)"}`
 						: "bash: off",
@@ -987,9 +1072,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 						: undefined,
 					policy.bash ? `pnpm store: ${describePnpmStore(cwd)}` : undefined,
 					`Reads: ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""}`,
-					`Denials: ${denyCounter.status()}`,
 					...(probe ? probe.status() : ["Probe: off"]),
-					...policy.globs.map((g) => `  ${g}`),
 				].filter((l): l is string => Boolean(l))
 				: ["Inactive (no pi-subagent-extend bindings and no profile declared in this session)"];
 			ctx.ui.notify(`pi-subagent-extend:\n${lines.join("\n")}`, "info");
