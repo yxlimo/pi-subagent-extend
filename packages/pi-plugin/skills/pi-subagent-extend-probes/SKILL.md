@@ -70,6 +70,7 @@ warn 只拦一次 tool_call 并把理由写给它；stop 是**硬停**：被拦�
 
 - **停机之后没有收尾回合**。子代理不会再有「写最终汇报」的机会，父代理要靠它停下前已产出的内容加上被拒理由判断发生了什么。想让子代理自己交代，就该在它还没撞线时让它报。
 - **求援通道不受停机影响**。`contact_supervisor` / `intercom` / `structured_output` 先于停机判定，永远放行——这一点在**同一批里有放行结果**时（整批不全是 terminating，本轮继续）才真正救命：被停的子代理仍能把「我卡在哪、需要什么」送出来。
+- 结果末尾的 `[sandbox]` 标注（网络被禁、写越界）**不是拒绝**：它只解释已经在沙箱里失败的那次调用，不计入撞权限、不触发停机、不消耗 read 预算。看见它不必当作「又被拒了一次」，直接按里面的建议处理（要授权就 `contact_supervisor`）。
 - 停机理由不会被当成当前调用的判定。文案会明确写「which criterion stopped the run」以及触发它的那次调用；不要把里面的路径当成「刚被拒的路径」——那是历史。
 
 ## 作为父代理的注意事项
@@ -87,7 +88,7 @@ warn 只拦一次 tool_call 并把理由写给它；stop 是**硬停**：被拦�
 
 pi-subagents 的 skill 已经规定了等待方式——派完活让出回合，靠原生完成通知唤醒，不要 sleep、不要轮询、不要对普通子代理用 `bg_wait`。要查细节按需读一节，不要通读：
 
-```
+```js
 subagent({ action: "guide", options: { topic: "tool-reference/execution-parameters" } })
 subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination-child-asks-parent" } })
 ```

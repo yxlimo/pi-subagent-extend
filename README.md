@@ -548,12 +548,12 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 
 `pnpm test` runs three layers, all offline: no model, no network beyond localhost.
 
-1. **Scope suite** (36 cases) and **context suite** (10 cases) check the extension's own
+1. **Scope suite** (38 cases) and **context suite** (10 cases) check the extension's own
    judgement against a fake pi API. Kernel requirements are met by the helper's own tests
    (`cargo test` in `packages/helper`), and where the kernel's Landlock ABI is below the
    required 7 the scope suite runs against a stub helper that reports ABI 7, saying so in its
    output.
-2. **Mock session suite** (4 cases) runs a real pi process driven by `test/mock-llm.mjs`, a
+2. **Mock session suite** (6 cases) runs a real pi process driven by `test/mock-llm.mjs`, a
    dependency-free OpenAI-compatible server. The "model" is a script of tool calls, so the
    boundaries are exact rather than left to chance: whether a run continued is simply whether
    the next script step was requested. It covers the hard stop, the rescue-channel exemption
