@@ -7,7 +7,7 @@
 //   node test/extension.test.ts
 
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { homedir, tmpdir } from "node:os"
 import { join, dirname } from "node:path"
@@ -1577,6 +1577,76 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(existsSync(join(repo, "target")), false, "but looking at the policy does not create it")
   h.restore()
   console.log("  ok   /permission 只报告产物目录，不创建")
+}
+
+// 50b. 软链是唯一能绕过词法比较的向量：`src/link` 指到树外时，词法上它仍在 `src/` 之下。
+//      edit/write 在父进程里跑，没有 Landlock 兜底，所以判定必须看真实路径。
+{
+  const dir = join(workdir, "symlink-escape")
+  const outside = join(workdir, "symlink-outside")   // workdir 之内、但不在 dir 之内
+  mkdirSync(join(dir, "src"), { recursive: true })
+  mkdirSync(outside, { recursive: true })
+  symlinkSync(outside, join(dir, "src", "link"))
+
+  const narrow = await handler({ cwd: dir, bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], writeScope: ["src/**"] } }) })
+  const writeThrough = await narrow.call("write", { path: "src/link/evil.txt", content: "x" })
+  assert.equal(writeThrough?.block, true, "a write through a symlink leaving the scope is refused")
+  assert.match(writeThrough.reason, /outside the (read |write )?scope/, "and the reason is the scope, not something else")
+  const readThrough = await narrow.call("read", { path: "src/link/evil.txt" })
+  assert.equal(readThrough?.block, true, "a read through the same symlink is refused too")
+  // 同一棵树内部、指向树内的软链仍然放行：这是正常布局，不该被误伤。
+  symlinkSync(join(dir, "src"), join(dir, "src", "self"))
+  const inside = await narrow.call("read", { path: "src/self/index.ts" })
+  assert.equal(inside, undefined, "a symlink that stays inside the tree still resolves")
+  narrow.restore()
+
+  // 整棵树的范围（"." / "**"）也不能把软链出口放进来。
+  const whole = await handler({ cwd: dir, bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."] } }) })
+  const escaped = await whole.call("write", { path: "src/link/evil2.txt", content: "x" })
+  assert.equal(escaped?.block, true, "a whole-tree scope still does not follow a symlink out of the tree")
+  whole.restore()
+  console.log("  ok   软链指到树外被真实路径判定拦下；树内软链仍放行")
+}
+
+// 52. 撞权限判据是「连续」而不是「累计」：文档、skill 与拒绝文案都这么写。
+//      中间有一次放行的调用就重新计数，否则早期的一次误判会在几十轮之后把任务判死。
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 2, maxWriteDenies: 2 } }) })
+  mkdirSync(join(workdir, "src"), { recursive: true })
+  writeFileSync(join(workdir, "src", "ok.ts"), "export {}\n")
+
+  const first = await h.call("read", { path: "outside/a.ts" })
+  assert.equal(first?.block, true, "the first refusal blocks")
+  assert.equal(await h.call("read", { path: "src/ok.ts" }), undefined, "an allowed call in between")
+  const second = await h.call("read", { path: "outside/b.ts" })
+  assert.equal(second?.block, true, "the refusal after an allowed call blocks")
+  assert.doesNotMatch(second.reason, /in a row/, "it is back to refusal 1, below the warning threshold")
+  assert.equal(second.terminate, undefined, "an allowed call reset the counter: no warning, no stop")
+
+  // 连续两次才到 warn，第三次才停 —— 和之前一样。
+  const third = await h.call("read", { path: "outside/c.ts" })
+  assert.match(third?.reason ?? "", /in a row/, "two in a row now warns")
+  assert.equal(third?.terminate, undefined, "the warning still does not stop")
+  const fourth = await h.call("read", { path: "outside/d.ts" })
+  assert.equal(fourth?.terminate, true, "three in a row ends the run")
+  h.restore()
+  console.log("  ok   撞权限按「连续」计：中间放行一次就重新计数")
+}
+
+// 53. 绑定写坏时不能变成「全拒但永不停止」：每个调用都被拒却永远不计满，子代理会磨到超时。
+//      预算改成缺省值之后，拒几次就硬停，真实原因留在拒绝文案里。
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": {} }) })
+  const first = await h.call("read", { path: "src/a.ts" })
+  assert.equal(first?.block, true, "a broken binding refuses everything")
+  assert.match(first.reason, /scope is missing/i, "and the reason names what is wrong with the binding")
+  assert.equal(first.terminate, undefined, "the first refusal does not stop the run")
+
+  let last: Outcome = first
+  for (let i = 0; i < 5; i += 1) last = await h.call("read", { path: `src/${i}.ts` })
+  assert.equal(last?.terminate, true, "a broken binding hard-stops instead of looping forever")
+  h.restore()
+  console.log("  ok   绑定写坏：拒绝文案点名原因，且会硬停而不是无限重试")
 }
 
 // 49. A real toolchain can write its own artefacts through the rewritten command.

@@ -111,7 +111,13 @@ Reads and writes are authorised by three separate lists, and this is deliberate:
 | write, tools | `writeScope` | `edit`, `write` |
 | write, processes | `bash.writablePaths` (with `bash.writable`) | the Landlock rules of bash subprocesses |
 
-So "read the whole repository, write only `.pi/reviews`" is `scope: ["."]`, `writeScope: [".pi/reviews"]`. Keep `.git` out of `writeScope` — git's directory is granted to the sandbox on its own, and putting it in the write scope lets a subagent hand-edit repository metadata.
+So "read the whole repository, write only `.pi/reviews`" is `scope: ["."]`, `writeScope: [".pi/reviews"]`.
+
+`"."` and `"./x"` are normalised, so they mean the whole tree and `x`; they are not matched literally.
+
+Targets are judged by their **real** path, not the text of the call. A symlink inside the scope that points outside it is refused, and so is any target whose real path leaves the working tree — including under `scope: ["."]`. A scope is written relative to the project, and the project is that tree, so `src/link` pointing elsewhere is not "inside `src/`" just because the string says so. This matters for `edit`/`write`, which run in the parent process where no sandbox backs them up.
+
+Keep `.git` out of `writeScope` — git's directory is granted to the sandbox on its own, and putting it in the write scope lets a subagent hand-edit repository metadata.
 
 ## The `bash` field
 
@@ -242,6 +248,7 @@ Skipping silently is the most expensive failure mode here: the declaration exits
 - **Network failures inside the sandbox are annotated**: when an offline bash hits `ENETUNREACH` / `EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo failed`, a `[sandbox]` note is appended at the end of the result: the network was turned off by the parent agent, the machine is not broken, changing the registry / flag / timeout fails the same way, and if the network is needed, ask `contact_supervisor` (`"network": true`). `ECONNREFUSED` is not annotated — loopback works, that is a normal test result.
 - **Out-of-scope writes are annotated as well**: when bash writes outside the granted scope, the kernel returns `EACCES` / `Permission denied` — the same wording as an ordinary file permission problem. The decision is not made by guessing at the wording: the extension takes the path out of the failure line and compares it with this command's `spec.write`; if the path is outside the grant and the host can read it, a `[sandbox]` note is appended at the end of the result, saying that this is an authorisation rather than a filesystem fault, and that writing requires `contact_supervisor`. Failures inside the grant, and failures caused by insufficient host permissions themselves (such as reading `/etc/shadow`), are not annotated.
 - The text of an out-of-scope refusal is in English, and it spells out "which path is out of scope, do not retry, report it if you need it", and lists the current scope. A refusal for a missing path does not count as a permission problem: `grep`/`find` without a path are handled as the cwd (the text says `no path was given`), and `write`/`edit` must be given a path (the text says `needs a path`). Such refusals do not count towards the collision count.
+- **Refusal counts are consecutive**: any allowed working call resets both budgets, so a mistake that has been corrected is not carried to the end of the run. `contact_supervisor` and `structured_output` are exempt from that reset — they are a report, not progress, so alternating a probe with an escalation does not keep the run alive at the warning level.
 - Inside the scope a session can use `/permission` to see the current scope, the two bash columns, the sandbox's writable paths, the pnpm store, the read count, the collision count and the probe state (the key names are in English: `Source`, `Mode`, `bash read`, `bash write`, `bash deny`, `Sandbox`, `Sandbox writable paths`, `Reads`, `Denials`).
 
 ## Notes for the parent agent

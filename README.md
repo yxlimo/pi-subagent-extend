@@ -72,7 +72,7 @@ subagent(
 | `readOnly` | `boolean` | Refuse `edit` and `write` even inside the scope; equivalent to `writeScope: []`. |
 | `maxReads` | `number` | Cap on successful reads. |
 | `allowTools` | `string[]` | Extra non-executor tool names to allow. |
-| `maxDenies` | `number` | Consecutive grant refusals before the run stops; `0` disables. Defaults to 5. |
+| `maxDenies` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
 | `maxWriteDenies` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
 | `probe` | `object \| boolean` | Circles-and-collisions detection; see [probes](docs/architecture.md#probes). |
 | `bash.read` / `bash.write` | `string[]` | Commands allowed to only read or to write, matched per token as a prefix, or `re:` regexes. |

@@ -139,6 +139,15 @@ Usage errors and hard rules never count: a missing path, shell metacharacters, a
 `powershell`/`codemode`, or a command matched by a profile's `bash.deny`. Those cannot be fixed by
 granting more, so charging them against the budget would stop a task for the wrong reason.
 
+The budget is **consecutive**, which is what the refusal text and the README promise: any allowed
+working call resets both counters, so a subagent that tries a path, learns, and moves on is never
+stopped for a mistake it already corrected. The rescue channel is the exception — `contact_supervisor`
+and `structured_output` are always allowed, but they are a report, not progress, and counting them as
+progress would let a subagent alternate a probe with an escalation and sit at the warning level
+forever. A broken binding (unparseable `extensionBindings`, a `scope` that is missing or malformed)
+uses the default budgets rather than `0`: everything is refused, and the run has to stop after a few
+refusals instead of retrying until the deadline.
+
 ### The stop is hard
 
 At the budget the subagent is warned that the parent most likely authorised the wrong paths, and
@@ -264,6 +273,12 @@ register them.
 
 - The scope is a file-level boundary, not a content-level one: including `docs/**` permits reading
   the whole directory.
+- The tool layer judges the **real** path, not the textual one. A symlink inside the scope that
+  points outside it is refused, and so is any target whose real path leaves the working tree, even
+  under a whole-tree scope (`"."` or `"**"`): a scope is written relative to the project, and the
+  project is that tree. This matters because `edit`/`write` run in the parent process with no
+  Landlock underneath — the sandbox judges inodes, they do not. Measured before the fix: `write
+  src/link/evil` where `src/link -> /elsewhere` was allowed and landed outside.
 - Reads are unrestricted inside the sandbox, because a test suite must read the tree, its
   `node_modules` and its configuration. Read confinement stays with `read`, `grep` and `find`.
 - The extension intercepts at `tool_call`. A subagent inherits the parent's environment and

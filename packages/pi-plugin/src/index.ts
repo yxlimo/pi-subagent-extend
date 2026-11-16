@@ -37,11 +37,11 @@
  * 该目录自身与其下所有内容；"dir/**" 也匹配 "dir" 本身。
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
@@ -110,7 +110,17 @@ const INACTIVE: Policy = {
 	active: false,
 };
 
-/** bindings 存在但无法使用时的策略：会话保持活跃，但什么都拿不到。 */
+/** 撞权限的缺省预算；两处都要用，所以提出来。 */
+const DEFAULT_MAX_DENIES = 5;
+const DEFAULT_MAX_WRITE_DENIES = 2;
+
+/**
+ * bindings 存在但无法使用时的策略：会话保持活跃，但什么都拿不到。
+ *
+ * 预算用缺省值而不是 0：0 表示「永不计数」，那会让一次写坏的绑定变成无限重试的会话 ——
+ * 每个调用都被拒、却永远不会停，正是这条判据要避免的状态。拒几次就硬停，父代理能从拒绝
+ * 文案里看到真实原因（哪一份绑定、哪里写错）。
+ */
 function denyAll(source: string): Policy {
 	return {
 		globs: [],
@@ -122,8 +132,8 @@ function denyAll(source: string): Policy {
 		maxReads: 0,
 		allowTools: [],
 		probe: undefined,
-		maxDenies: 0,
-		maxWriteDenies: 0,
+		maxDenies: DEFAULT_MAX_DENIES,
+		maxWriteDenies: DEFAULT_MAX_WRITE_DENIES,
 		active: true,
 	};
 }
@@ -307,18 +317,45 @@ function parsePolicyObject(
 		probe: config.probe,
 		// 撞权限是纯错误信号：不配也开，父代理可以显式写 0 关掉。
 		// 缺省 5：停机是硬停，判早一次就丢掉整轮任务，而多给几次只浪费几个调用。
-		maxDenies: config.maxDenies === 0 ? 0 : positiveInt(config.maxDenies) || 5,
+		maxDenies: config.maxDenies === 0 ? 0 : positiveInt(config.maxDenies) || DEFAULT_MAX_DENIES,
 		// 缺省 2：写拒是用法错（该回报告而不是落盘），给两次机会换做法就够。
-		maxWriteDenies: config.maxWriteDenies === 0 ? 0 : positiveInt(config.maxWriteDenies) || 2,
+		maxWriteDenies: config.maxWriteDenies === 0 ? 0 : positiveInt(config.maxWriteDenies) || DEFAULT_MAX_WRITE_DENIES,
 		active: true,
 	};
+}
+
+/**
+ * 真实路径。目标可能还不存在（写新文件），所以取最深的已存在祖先做 realpath，再把剩下的段拼回去。
+ *
+ * 为什么必须 realpath：词法比较只看路径字符串，软链是唯一能绕过它的向量 —— `src/link` 指到树外时，
+ * `write src/link/evil` 在词法上仍是 `src/` 之下。bash 那条路有 Landlock 按 inode 兜底，edit/write
+ * 工具在父进程里跑，没有第二层。
+ */
+function canonical(path: string): string {
+	let head = path;
+	const rest: string[] = [];
+	for (;;) {
+		try {
+			const real = realpathSync(head);
+			return rest.length === 0 ? real : join(real, ...rest.slice().reverse());
+		} catch {
+			const parent = dirname(head);
+			if (parent === head) return path;
+			rest.push(basename(head));
+			head = parent;
+		}
+	}
 }
 
 /** 目标是否落在某个范围里：相对路径与绝对路径都试，scope 写哪种都认。 */
 function matches(regexps: RegExp[], cwd: string, target: string): boolean {
 	if (regexps.length === 0) return false;
-	const abs = resolve(cwd, target);
-	const rel = relative(cwd, abs);
+	const base = canonical(cwd);
+	const abs = canonical(resolve(cwd, target));
+	const rel = relative(base, abs);
+	// 落在工作树之外的一律不认。范围是相对项目写的，项目就是这棵树；软链指到树外时真实路径
+	// 会带 ".."，整棵树的范围（"." / "**"）也不该把它放进来。
+	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
 	for (const re of regexps) {
 		if (re.test(rel) || re.test(abs)) return true;
 	}
@@ -1104,7 +1141,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		return changed ? { messages } : undefined;
 	});
 
-	pi.on("tool_call", async (event, ctx) => {
+	const judgeToolCall = async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined | void> => {
 		currentCtx = ctx;
 		if (!policy.active) return;
 		const cwd = ctx.cwd ?? process.cwd();
@@ -1205,6 +1242,20 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		return bail(
 			`pi-subagent-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools).`,
 		);
+	};
+
+	pi.on("tool_call", async (event, ctx) => {
+		const verdict = await judgeToolCall(event, ctx);
+		// 放行的调用把两类「连续」计数都清零。判据是连续而不是累计：子代理改了做法就该重新计数，
+		// 否则早期的一次误判会在几十轮之后把任务判死。
+		//
+		// 求援通道不清零：它是报告，不是进展。否则每次试探之间插一句 contact_supervisor 就能
+		// 永远停在「警告」档，硬停判据直接失效。
+		if (verdict === undefined && !SAFE_TOOLS.includes(event.toolName)) {
+			denyCounter.reset();
+			writeDenyCounter.reset();
+		}
+		return verdict;
 	});
 
 	pi.registerCommand("permission", {

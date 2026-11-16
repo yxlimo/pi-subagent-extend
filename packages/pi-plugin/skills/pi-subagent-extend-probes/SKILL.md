@@ -26,7 +26,7 @@ When `probe` is not written, only two pure error signals are active, so collater
 | Criterion | Default | Notes |
 | --- | --- | --- |
 | repeating a command | on, `repeatBash: 3` | The same bash command verbatim (after trim) the 3rd time → warn, the 4th → stop |
-| permission refusal | on, `maxDenies: 5` and `maxWriteDenies: 2` | The 5th consecutive **authorization-type** refusal → warn (asking it to escalate), the 6th → hard stop. Only refusals that a parent agent granting broader authorization could resolve are counted: paths outside the read scope, commands not in the allowlist, read budget, tools not in `allowTools`, bash entirely disabled. **Write refusals have their own budget**: the 2nd write refusal warns, the 3rd hard-stops; the two budgets do not share a counter |
+| permission refusal | on, `maxDenies: 5` and `maxWriteDenies: 2` | The 5th consecutive **authorization-type** refusal → warn (asking it to escalate), the 6th → hard stop. Only refusals that a parent agent granting broader authorization could resolve are counted: paths outside the read scope, commands not in the allowlist, read budget, tools not in `allowTools`, bash entirely disabled. **Write refusals have their own budget**: the 2nd write refusal warns, the 3rd hard-stops; the two budgets do not share a counter. Both are **consecutive**: an allowed working call resets the count, while `contact_supervisor`/`structured_output` do not count as progress and do not reset it |
 
 The three criteria that can misfire on slow tasks must be explicitly configured: `probe: {}` turns on all defaults at once, writing only some fields turns on just those, and `probe: false` turns everything off.
 

@@ -31,6 +31,17 @@ export class DenyCounter {
 		return this.#count;
 	}
 
+	/**
+	 * 一次放行的调用：连续计数归零（warned 一起归零，否则清零后第一次警告会被吃掉）。
+	 *
+	 * 文档、skill 和拒绝文案承诺的都是「连续 N 次」；不在这里清零，早期一次误判会一直带到最后，
+	 * 硬停一次就丢掉整轮任务 —— 正是这条判据本来要避免的事。
+	 */
+	reset(): void {
+		this.#count = 0;
+		this.#warned = false;
+	}
+
 	/** 一次被范围规则拒绝。 */
 	record(): DenyCountResult {
 		if (this.#limit <= 0) return { yes: false, stop: false };
