@@ -136,16 +136,25 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
     let cwd = spec.cwd.clone();
     let namespaces = match namespace::isolate(spec.offline, cwd.as_deref()) {
         Ok(isolated) => {
-            if !isolated.shadowed.is_empty() {
+            // Say it once, and always for an offline command: whether the
+            // namespaces are real is the difference between a structural "no
+            // route out" and Landlock's coarse port rules, and a run that says
+            // nothing is indistinguishable from one that fell back.
+            if spec.offline {
                 let shadowed: Vec<String> = isolated
                     .shadowed
                     .iter()
                     .map(|dir| dir.display().to_string())
                     .collect();
-                eprintln!(
-                    "pi-subagent-extend-helper: network isolated, resolver sockets shadowed: {}",
-                    shadowed.join(", ")
-                );
+                match shadowed.is_empty() {
+                    true => eprintln!(
+                        "pi-subagent-extend-helper: network isolated, no resolver sockets to shadow"
+                    ),
+                    false => eprintln!(
+                        "pi-subagent-extend-helper: network isolated, resolver sockets shadowed: {}",
+                        shadowed.join(", ")
+                    ),
+                }
             }
             true
         }
