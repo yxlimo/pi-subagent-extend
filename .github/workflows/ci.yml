@@ -11,12 +11,15 @@ permissions:
 jobs:
   check:
     # Three legs, because the helper behaves differently on each shape a host
-    # can present, and the default runner only shows one of them. The ABI and
-    # namespace numbers below were measured on these images:
+    # can present, and one image only shows one of them. The ABI and namespace
+    # numbers below were measured on these images:
     #
-    #   ubuntu-latest (7.x)  ABI 8, user namespaces refused by AppArmor
-    #   ubuntu-24.04  (6.x)  ABI 8, user namespaces refused by AppArmor
-    #   ubuntu-22.04  (5.15) ABI 4, user namespaces allowed
+    #   ubuntu-26.04 (7.0)   ABI 8, user namespaces refused by AppArmor
+    #   ubuntu-22.04 (5.15)  ABI 4, user namespaces allowed
+    #
+    # The images are pinned by version on purpose: `ubuntu-latest` moved from
+    # 24.04 to 26.04 under us, and what these legs assert is a property of the
+    # kernel. A floating label would change the subject of the test silently.
     #
     #   namespaces   modern kernel, restriction lifted -> the real sandbox
     #   fallback     modern kernel, restriction in place -> Landlock alone
@@ -28,12 +31,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-26.04
             mode: namespaces
             lift: "yes"
             expect: network isolated
             expect_exit: 0
-          - os: ubuntu-latest
+          - os: ubuntu-26.04
             mode: fallback
             lift: "no"
             expect: cannot enter the namespaces
