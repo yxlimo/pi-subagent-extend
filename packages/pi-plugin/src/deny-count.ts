@@ -36,8 +36,8 @@ export class DenyCounter {
 				yes: true,
 				stop: false,
 				note:
-					`That is refusal ${this.#count} in a row. Repeated refusals usually mean the grant does not match the task, ` +
-					"not that you are in the wrong place. Use contact_supervisor to say what you need and why — one more refusal ends the run.",
+					`Refusal ${this.#count} in a row — usually the grant does not fit the task. ` +
+					"Use contact_supervisor to say what you need; one more ends the run.",
 			};
 		}
 		return {
@@ -46,7 +46,7 @@ export class DenyCounter {
 			// 硬停之后模型没有下一轮，这段文字的实际读者是父代理：写成诊断，而不是叮嘱。
 			note:
 				`Refusal ${this.#count} (criterion: denial budget): the run is over. For the parent session — ` +
-				"the subagent can no longer act. If the need was not escalated, re-dispatch with a wider grant or a clearer task.",
+				"the subagent can no longer act; re-dispatch with a wider grant if the need was not escalated.",
 		};
 	}
 

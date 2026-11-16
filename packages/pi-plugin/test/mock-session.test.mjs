@@ -154,7 +154,7 @@ const SCOPE = { "pi-subagent-extend/1": { scope: ["src/**"] } };
 	const denials = run1.results.filter((r) => /outside this task's scope|denial budget/.test(r.text));
 	assert.equal(denials.length, 2, `two refusals expected, saw ${denials.length}. stderr: ${run1.stderr.slice(-500)}`);
 	assert.match(denials[0].text, /outside this task's scope/, "the first refusal names the scope boundary");
-	assert.match(denials[0].text, /Do not retry paths outside the scope/, "the first refusal is actionable");
+	assert.match(denials[0].text, /Do not retry/, "the first refusal is actionable");
 	assert.match(denials[1].text, /denial budget/, "the second refusal names the stop criterion");
 	assert.equal(run1.consumed, 2, "the run ended: the mock never served a third turn");
 	assert.equal(run1.assistantText.includes(MARKER), false, "no closing assistant turn after the hard stop");

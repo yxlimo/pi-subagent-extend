@@ -32,11 +32,11 @@ export function handoffPath(text: string): string | undefined {
 /** 要补的那段提示。`cleanup` 为 complete 与 partial 两种结局分别说清。 */
 export function handoffHint(path: string): string {
 	return [
-		`${MARK} managed-worktree delivery — read ${path} before calling this delegation done.`,
-		"groups[].children[].patch is the deliverable: diffStat / filesChanged / insertions are what was really produced.",
-		'With cleanup "complete" the worktree and branch are already deleted, so a branch name or short SHA quoted by the child no longer resolves.',
-		"Nothing was applied to this checkout; apply the patch yourself if you want the change.",
-		'With cleanup "partial" the worktree was kept instead — tasks[].reason says why.',
+		`${MARK} read ${path} before calling this delegation done.`,
+		"groups[].children[].patch is the deliverable: diffStat / filesChanged / insertions show what was produced.",
+		'cleanup "complete": the worktree and branch are gone, so a branch name or short SHA quoted by the child no longer resolves.',
+		"Nothing was applied to this checkout; apply the patch yourself.",
+		'cleanup "partial": the worktree was kept — tasks[].reason says why.',
 	].join("\n")
 }
 
@@ -44,7 +44,7 @@ export function handoffHint(path: string): string {
 export function unavailableHint(): string {
 	return [
 		`${MARK} the handoff manifest could not be written; the worktree and branch were left in place, not deleted.`,
-		"Run `git worktree list` (under the configured worktree base dir) and inspect it — uncommitted work may still be there.",
+		"Check `git worktree list` under the configured base dir — uncommitted work may still be there.",
 	].join("\n")
 }
 

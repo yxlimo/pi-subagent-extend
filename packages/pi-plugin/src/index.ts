@@ -840,7 +840,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const rule = policy.bash;
 			if (!rule) {
 				return bail(
-					`pi-subagent-extend: bash is not allowed in this session (source: ${policy.source}). To run tests or a typecheck, the parent must name the commands in bash.read / bash.write.`,
+					`pi-subagent-extend: bash is not allowed here (source: ${policy.source}). For tests or a typecheck the parent must list the commands in bash.read / bash.write.`,
 				);
 			}
 			if (!command) return deny("pi-subagent-extend: empty bash command");
@@ -848,12 +848,12 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const forbidden = deniedEntry(rule, command);
 			if (forbidden) {
 				return deny(
-					`pi-subagent-extend: command blocked by the project profile: "${forbidden}" (source: ${policy.source}). This ban is not liftable by extensionBindings.`,
+					`pi-subagent-extend: command blocked by the project profile: "${forbidden}" (source: ${policy.source}); extensionBindings cannot lift it.`,
 				);
 			}
 			if (SHELL_META.test(command)) {
 				return deny(
-					`pi-subagent-extend: the command contains shell metacharacters (; & | < > \` $ ...). Only a single allowlisted command may be run: ${preview(allEntries(rule))}`,
+					`pi-subagent-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Allowed: ${preview(allEntries(rule))}`,
 				);
 			}
 			const match = classifyCommand(rule, command);
@@ -876,7 +876,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const helper = helperPath();
 			if (!helper) {
 				return deny(
-					"pi-subagent-extend: the sandbox helper (pi-subagent-extend-helper) was not found. Run `pnpm run build:helper` in pi-plugin, or point PI_SUBAGENT_EXTEND_HELPER at it.",
+					"pi-subagent-extend: the sandbox helper (pi-subagent-extend-helper) was not found; run `pnpm run build:helper` in pi-plugin, or set PI_SUBAGENT_EXTEND_HELPER.",
 				);
 			}
 			const caps = describeHelper(helper);
@@ -887,7 +887,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const spec = buildSpec(cwd, rule, policy);
 			const specFile = writeSpecFile(spec);
 			if (!specFile) {
-				return deny("pi-subagent-extend: cannot write the sandbox spec (check that ~/.cache/pi-subagent-extend is writable)");
+				return deny("pi-subagent-extend: cannot write the sandbox spec; check that ~/.cache/pi-subagent-extend is writable");
 			}
 			// 记下这条命令的写权限清单：tool_result 判「写越界」时要用它当事实依据，
 			// 不靠文案猜。挡住条数上限，避免结果永远不回来的调用把表撑大。
@@ -902,7 +902,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (EXEC_TOOLS.includes(event.toolName)) {
 			// 从来不可用：给多宽的范围、多长的命令白名单都不会打开，所以不计入撞权限。
 			return deny(
-				`pi-subagent-extend: ${event.toolName} is never available inside a scoped session, whatever the grant; it is not a permission the parent can widen. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
+				`pi-subagent-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
 			);
 		}
 		// SAFE_TOOLS 已经在最前面处理过，这里只管调用方显式放行的工具。
@@ -923,7 +923,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				// 这是用法错误不是权限错误，不计入撞权限计数。
 				if (!raw) {
 					return deny(
-						`pi-subagent-extend: ${event.toolName} needs a path; none was supplied, so the target cannot be checked against the scope. Pass the path explicitly.\nScope: ${preview(policy.globs)}`,
+						`pi-subagent-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nScope: ${preview(policy.globs)}`,
 					);
 				}
 			}
@@ -932,18 +932,18 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				if (!raw) {
 					// 缺 path：用法错误，不计入撞权限计数。
 					return deny(
-						`pi-subagent-extend: no path was given, so the working directory (${cwd}) was used, and it is outside the scope (source: ${policy.source}). Pass a path inside the scope.\nScope: ${preview(policy.globs)}`,
+						`pi-subagent-extend: no path was given; the working directory (${cwd}) was assumed and is outside the scope (source: ${policy.source}). Pass a path inside the scope.\nScope: ${preview(policy.globs)}`,
 					);
 				}
 				// cwd / 仓库根：读起来像 scope 写错，其实多半是「想要全仓搜索」。计数（这是
 				// 授权问题），但要说清这不是某个文件路径写错。
 				if (isRootish(raw, cwd)) {
 					return bail(
-						`pi-subagent-extend: "${raw}" is the repository root, not a file inside the task scope (source: ${policy.source}). Pass the concrete file or directory you need; if the task genuinely needs repo-wide access, say so and the parent can widen the scope.\nScope: ${preview(policy.globs)}`,
+						`pi-subagent-extend: "${raw}" is the repository root, not a file in the task scope (source: ${policy.source}). Pass the concrete path; if repo-wide access is really needed, say so and the parent can widen the scope.\nScope: ${preview(policy.globs)}`,
 					);
 				}
 				return bail(
-					`pi-subagent-extend: "${target}" is outside this task's scope (source: ${policy.source}). Do not retry paths outside the scope; if the task needs this one, report what you need and why.\nScope: ${preview(policy.globs)}`,
+					`pi-subagent-extend: "${target}" is outside this task's scope (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nScope: ${preview(policy.globs)}`,
 				);
 			}
 			if (WRITE_TOOLS.includes(event.toolName)) {
@@ -956,7 +956,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		}
 
 		return bail(
-			`pi-subagent-extend: tool ${event.toolName} is not on the allow list (fail closed; list it in allowTools if the task needs it).`,
+			`pi-subagent-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools).`,
 		);
 	});
 

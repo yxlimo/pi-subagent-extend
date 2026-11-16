@@ -194,8 +194,8 @@ export class Probe {
 		this.#bashCounts.set(key, count);
 		if (count === this.#cfg.repeatBash) {
 			const message =
-				`The same bash command has been repeated ${count} times (criterion: spinning): ${key.slice(0, 160)}. ` +
-				`One more repeat stops the run. Change approach, or report your current conclusion to the parent.`;
+				`Same bash command repeated ${count} times (criterion: spinning): ${key.slice(0, 160)}. ` +
+				`One more stops the run — change approach or report to the parent.`;
 			this.#repeat = {
 				armed: true,
 				warned: true,
@@ -209,8 +209,8 @@ export class Probe {
 		if (count > this.#cfg.repeatBash) {
 			return {
 				reason:
-					`The same bash command has been repeated ${count} times (criterion: spinning): ${key.slice(0, 160)}. ` +
-					"The run stops here. Write up what you kept retrying, where you got stuck, and what the parent must supply.",
+					`Same bash command repeated ${count} times (criterion: spinning): ${key.slice(0, 160)}. ` +
+					"The run stops here: state what you kept retrying and what the parent must supply.",
 				stop: true,
 			};
 		}
@@ -233,8 +233,8 @@ export class Probe {
 			if (p.re.test(path)) {
 				return {
 					reason:
-						`pi-subagent-extend: refusing to write "${path}" into the repository (criterion: junk files, matched forbidWritePatterns "` +
-						`${p.source}"). Debug and temporary artifacts do not belong in the tree; write them under /tmp instead.`,
+						`pi-subagent-extend: refusing to write "${path}" into the repo (criterion: junk files, matched "` +
+						`${p.source}"); put debug and temp files under /tmp.`,
 					stop: false,
 				};
 			}
@@ -254,7 +254,7 @@ export class Probe {
 		if (expired) {
 			this.#stopped = true;
 			this.#clearTimers();
-			this.#stopReason = `${expired.message}\nThe grace window expired; the run stops here. Summarize what changed, where you are now, and what blocks you.`;
+			this.#stopReason = `${expired.message}\nGrace expired; the run stops here. Summarize what changed and what blocks you.`;
 			return { reason: this.#stopReason, stop: true };
 		}
 		const armed = [this.#repeat, this.#idle].find((w) => w.armed);
@@ -275,8 +275,8 @@ export class Probe {
 				armed: true,
 				warned: false,
 				message:
-					`Nothing has been written for ${ms(this.#cfg.idleWriteMs)} and no write-capable bash command has run (criterion: idle). ` +
-					"If you have read enough, start making the change; if you genuinely need more context, report what blocks you to the parent.",
+					`Nothing written for ${ms(this.#cfg.idleWriteMs)} and no write-capable bash ran (criterion: idle). ` +
+					"Start the change, or report what blocks you to the parent.",
 				abortAt: this.#host.now() + this.#cfg.abortGraceMs,
 			};
 			this.#idleTimer = this.#schedule(() => this.#fireIdleAbort(), this.#cfg.abortGraceMs);
@@ -290,9 +290,8 @@ export class Probe {
 		this.#stopped = true;
 		this.#clearTimers();
 		this.#stopReason =
-			`Criterion: idle (nothing written). No file was written for over ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} ` +
-			"and no write-capable bash command ran. The run stops here: state the facts you confirmed, what you meant to change, " +
-			"and why you never made a change.";
+			`Criterion: idle — nothing written for over ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} ` +
+			"and no write-capable bash ran. The run stops here: state what you confirmed and why nothing changed.";
 		this.#hooks.warn(this.#stopReason);
 	}
 
@@ -311,7 +310,7 @@ export class Probe {
 			this.#stopped = true;
 			this.#clearTimers();
 			this.#stopReason =
-				`Criterion: work is done. Verification already passed (matched success marker "${marker}") and nothing changed in the last ${ms(this.#cfg.successIdleMs)}. ` +
+				`Criterion: work is done — success marker "${marker}" matched and nothing changed for ${ms(this.#cfg.successIdleMs)}. ` +
 				"The run stops here; report the result.";
 			this.#hooks.warn(this.#stopReason);
 		}, this.#cfg.successIdleMs);
