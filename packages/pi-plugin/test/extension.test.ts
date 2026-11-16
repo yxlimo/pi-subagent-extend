@@ -4,7 +4,7 @@
 // checked without a live pi session. The policy is captured when the extension
 // activates, so every case re-activates with its own environment.
 //
-//   node test/extension.test.mjs
+//   node test/extension.test.ts
 
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
@@ -12,6 +12,19 @@ import { spawnSync } from "node:child_process"
 import { homedir, tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
+import type {
+  CommandSpec,
+  EventHandler,
+  ExtensionModule,
+  FakeExtensionApi,
+  HandlerOptions,
+  Harness,
+  AnnotatedMessages,
+  Outcome,
+  PatchedResult,
+  SandboxSpec,
+  SessionContext,
+} from "./types.ts"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
@@ -29,10 +42,15 @@ if (!existsSync(helperBin)) {
 // helper refuses bash, and the suite would report a failure that says nothing about
 // the extension. Point the environment at a stub instead: enforcement is covered by
 // the helper's own cargo tests and by running this suite on a 6.15 or later kernel.
-function helperAbi(bin) {
+interface HelperDescription {
+  landlock?: { kernel_abi?: number; supported?: boolean }
+  network_namespace?: boolean
+}
+
+function helperAbi(bin: string): HelperDescription | undefined {
   const out = spawnSync(bin, ["--describe"], { encoding: "utf8" });
   try {
-    return JSON.parse(out.stdout);
+    return JSON.parse(out.stdout) as HelperDescription;
   } catch {
     return undefined;
   }
@@ -61,26 +79,26 @@ if (described?.landlock?.supported) {
 }
 
 /** The sandbox spec the extension wrote for a rewritten bash command. */
-function specOf(command) {
+function specOf(command: string): SandboxSpec {
   const match = /'--spec' '([^']+)'/.exec(command)
   assert.ok(match, `no --spec in: ${command}`)
-  return JSON.parse(readFileSync(match[1], "utf8"))
+  return JSON.parse(readFileSync(match[1], "utf8")) as SandboxSpec
 }
 
-const ext = await import(join(repo, "src", "index.ts"))
+const ext = (await import(join(repo, "src", "index.ts"))) as unknown as ExtensionModule
 
 /**
  * Activate the extension with the given bindings env and return its tool_call handler.
  * Pass `profile` to activate through the profile loader (per-role defaults).
  */
-async function handler({ bindings, cwd = workdir, profile, profileFile } = {}) {
+async function handler({ bindings, cwd = workdir, profile, profileFile }: HandlerOptions = {}): Promise<Harness> {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
 
-  const handlers = {}
-  const commands = {}
-  const ui = []
+  const handlers: Record<string, EventHandler> = {}
+  const commands: Record<string, CommandSpec> = {}
+  const ui: string[] = []
   ext.activate({
     on(event, fn) {
       handlers[event] = fn
@@ -90,18 +108,22 @@ async function handler({ bindings, cwd = workdir, profile, profileFile } = {}) {
     },
   }, profile ? { profileName: profile, profileFile } : {})
 
-  const ctx = { cwd, ui: { notify: (message) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
-  const aborts = []
+  const aborts: string[] = []
+  const ctx: SessionContext = { cwd, ui: { notify: (message: string) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
   if (handlers.session_start) {
     // session_start is async but only reports; flush it before returning.
     await handlers.session_start({ type: "session_start" }, ctx)
   }
 
-  const call = async (toolName, input) =>
-    handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx)
-  const result = async (toolName, content) =>
-    handlers.tool_result?.({ type: "tool_result", toolCallId: "t1", toolName, input: {}, content, isError: false }, ctx)
-  const context = async (messages) => handlers.context?.({ type: "context", messages }, ctx)
+  const call = async (toolName: string, input?: Record<string, unknown>): Promise<Outcome> =>
+    (await handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx)) as Outcome
+  const result = async (toolName: string, content: unknown): Promise<PatchedResult | undefined> =>
+    (await handlers.tool_result?.(
+      { type: "tool_result", toolCallId: "t1", toolName, input: {}, content, isError: false },
+      ctx,
+    )) as PatchedResult | undefined
+  const context = async (messages: unknown[]): Promise<AnnotatedMessages | undefined> =>
+    (await handlers.context?.({ type: "context", messages }, ctx)) as AnnotatedMessages | undefined
 
   return {
     call,
@@ -118,20 +140,26 @@ async function handler({ bindings, cwd = workdir, profile, profileFile } = {}) {
 }
 
 /** Deterministic clock: setTimeout is driven manually via advance(). */
-function fakeClock() {
+interface TimerHost {
+  now(): number
+  setTimeout(fn: () => void, delay: number): number
+  clearTimeout(id: number): void
+}
+
+function fakeClock(): { host: TimerHost; advance(ms: number): void } {
   let now = 0
   let seq = 0
-  const timers = new Map()
-  const host = {
+  const timers = new Map<number, { at: number; fn: () => void }>()
+  const host: TimerHost = {
     now: () => now,
     setTimeout: (fn, delay) => {
       const id = ++seq
       timers.set(id, { at: now + delay, fn })
       return id
     },
-    clearTimeout: (id) => timers.delete(id),
+    clearTimeout: (id) => void timers.delete(id),
   }
-  const advance = (ms) => {
+  const advance = (ms: number) => {
     const target = now + ms
     for (;;) {
       const due = [...timers.entries()].filter(([, t]) => t.at <= target).sort((a, b) => a[1].at - b[1].at)
@@ -263,7 +291,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], allowTools: ["todo_write"] } }),
   })
   assert.equal(await h.call("todo_write", { items: [] }), undefined, "allowTools entry passes")
-  assert.equal((await h.call("bash", { command: "ls" }))?.block, true, "allowTools cannot re-enable executors")
+  const executor = await h.call("bash", { command: "ls" })
+  assert.equal(executor?.block, true, "allowTools cannot re-enable executors")
   h.restore()
   console.log("  ok   allowTools 放行点名工具，但执行器类仍拒绝")
 }
@@ -280,15 +309,19 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 10. The bundled usage skill ships with the extension via resources_discover.
 {
-  const handlers = {}
-  ext.activate({
+  const handlers: Record<string, EventHandler> = {}
+  const api: FakeExtensionApi = {
     on(event, fn) {
       handlers[event] = fn
     },
     registerCommand() {},
-  })
-  assert.equal(typeof handlers.resources_discover, "function", "the extension registers resources_discover")
-  const result = await handlers.resources_discover({ type: "resources_discover", cwd: workdir, reason: "startup" })
+  }
+  ext.activate(api)
+  const discover = handlers.resources_discover
+  assert.ok(discover, "the extension registers resources_discover")
+  const result = (await discover({ type: "resources_discover", cwd: workdir, reason: "startup" }, { cwd: workdir, ui: { notify() {} } })) as
+    | { skillPaths?: string[] }
+    | undefined
   const dirs = result?.skillPaths ?? []
   assert.equal(dirs.length, 3, "all usage skills are registered")
   const names = dirs.map((dir) => {
@@ -309,15 +342,20 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } })
-  const handlers = {}
-  ext.activate({
+  const handlers: Record<string, EventHandler> = {}
+  const api: FakeExtensionApi = {
     on(event, fn) {
       handlers[event] = fn
     },
     registerCommand() {},
-  })
-  const result = await handlers.resources_discover({ type: "resources_discover", cwd: workdir, reason: "startup" })
-  assert.equal(result?.skillPaths, undefined, "a scoped session gets no skill path")
+  }
+  ext.activate(api)
+  const scopedDiscover = handlers.resources_discover
+  assert.ok(scopedDiscover, "the extension registers resources_discover")
+  const scoped = (await scopedDiscover({ type: "resources_discover", cwd: workdir, reason: "startup" }, { cwd: workdir, ui: { notify() {} } })) as
+    | { skillPaths?: string[] }
+    | undefined
+  assert.equal(scoped?.skillPaths, undefined, "a scoped session gets no skill path")
   if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous
   console.log("  ok   已上锁的会话不注册委派 skill")
@@ -364,7 +402,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const meta = await h.call("bash", inject)
   assert.equal(meta?.block, true, "shell metacharacters are rejected even behind a listed prefix")
 
-  assert.equal((await h.call("powershell", { command: "dir" }))?.block, true, "powershell stays denied")
+  const powershell = await h.call("powershell", { command: "dir" })
+  assert.equal(powershell?.block, true, "powershell stays denied")
   h.restore()
   console.log("  ok   bash 白名单命中即放行并交给 helper 沙箱，其余拒绝")
 }
@@ -427,7 +466,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   }
   const denied = ["web/other.ts", "web/srcs/a.ts", "lib/a.ts", "a/b", "two.ts"]
   for (const path of denied) {
-    assert.equal((await h.call("ls", { path }))?.block, true, `"${path}" is outside the scope`)
+    const refused = await h.call("ls", { path })
+    assert.equal(refused?.block, true, `"${path}" is outside the scope`)
   }
   h.restore()
 
@@ -442,7 +482,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   for (const path of ["src/auth", "src/auth/login.ts", "src/auth/a/b/c.ts"]) {
     assert.equal(await slash.call("ls", { path }), undefined, `"${path}" is inside "src/auth/"`)
   }
-  assert.equal((await slash.call("ls", { path: "src/other.ts" }))?.block, true, "trailing-slash scope stays narrow")
+  const narrow = await slash.call("ls", { path: "src/other.ts" })
+  assert.equal(narrow?.block, true, "trailing-slash scope stays narrow")
   slash.restore()
   console.log("  ok   glob：** 覆盖整棵树，dir/** 与 dir/ 覆盖任意深度，* 不跨层")
 }
@@ -466,7 +507,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     assert.equal(denied?.block, true, `"${command}" is denied`)
   }
   // A regex cannot smuggle a second command: metacharacters are still rejected first.
-  assert.equal((await h.call("bash", { command: "tsc --noEmit && cat /etc/passwd" }))?.block, true, "metacharacters win over regex")
+  const metachars = await h.call("bash", { command: "tsc --noEmit && cat /etc/passwd" })
+  assert.equal(metachars?.block, true, "metacharacters win over regex")
   h.restore()
   console.log("  ok   bash 白名单支持字面量前缀与 re: 正则，元字符仍先拒")
 }
@@ -497,11 +539,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const { Probe } = await import(join(repo, "src", "probe.ts"))
   const clock = fakeClock()
-  const warned = []
+  const warned: string[] = []
   const p = new Probe({
     config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 500 },
     readOnly: false,
-    hooks: { warn: (t) => warned.push(t) },
+    hooks: { warn: (t: string) => warned.push(t) },
     host: clock.host,
   })
   clock.advance(1000)
@@ -509,7 +551,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(warn?.stop, false, "first boundary warns")
   assert.match(warn.reason, /criterion: idle/i)
   clock.advance(500)
-  assert.equal(p.status().some((l) => l.includes("stopped")), true, "the probe is stopped after the grace")
+  assert.equal(p.status().some((l: string) => l.includes("stopped")), true, "the probe is stopped after the grace")
   const after = p.atToolBoundary()
   assert.equal(after?.stop, true, "after the stop every boundary refuses the call")
   assert.match(after.reason, /stops here/, "and says the run is over")
@@ -605,13 +647,17 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } },
     }),
   })
-  const commands = []
+  const commands: Outcome[] = []
   for (let i = 0; i < 4; i += 1) commands.push(await h.call("bash", { command: "pnpm run typecheck" }))
   assert.ok(commands.slice(0, 2).every((r) => r === undefined), "the first two repeats run")
-  assert.match(commands[2].reason, /spinning/, "the 3rd identical command is refused with a warning")
-  assert.equal(commands[2].block, true, "the warning refuses that call but keeps the run alive")
-  assert.match(commands[3].reason, /stops here/, "one more repeat stops the run")
-  assert.equal(commands[3].terminate, true, "the repeat stop is hard too")
+  const warned = commands[2]
+  assert.ok(warned, "the 3rd identical command is refused")
+  assert.match(warned.reason, /spinning/, "the 3rd identical command is refused with a warning")
+  assert.equal(warned.block, true, "the warning refuses that call but keeps the run alive")
+  const stopped = commands[3]
+  assert.ok(stopped, "one more repeat is refused")
+  assert.match(stopped.reason, /stops here/, "one more repeat stops the run")
+  assert.equal(stopped.terminate, true, "the repeat stop is hard too")
   h.restore()
   console.log("  ok   打转与撞权限默认开启；时间判据需显式配置")
 }
@@ -701,8 +747,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       },
     }),
   })
-  const notified = []
-  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m) => notified.push(m) } })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
   const text = notified.join("\n")
   assert.match(text, /Sandbox writable paths/, "the command lists the writable paths")
   assert.match(text, /pnpm store/, "the command probes the pnpm store")
@@ -879,8 +925,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const plainStash = await plain.call("bash", { command: "git stash" })
   assert.equal(plainStash?.block, true, "deny still applies")
 
-  const messages = []
-  await plain.commands.permission.handler("", { cwd: proj, ui: { notify: (m) => messages.push(m) } })
+  const messages: string[] = []
+  await plain.commands.permission.handler("", { cwd: proj, ui: { notify: (m: string) => messages.push(m) } })
   assert.match(messages.join("\n"), /bash deny \(cannot be lifted\)/, "/permission shows the non-overridable list")
   plain.restore()
   console.log("  ok   bash.deny 不可被 bindings 放宽（含 /permission 可见）")
@@ -909,7 +955,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 2, bash: { read: ["pnpm run typecheck"] } },
     }),
   })
-  const counted = (reason) => /in a row|denial budget/.test(reason)
+  const counted = (reason: string): boolean => /in a row|denial budget/.test(reason)
 
   // (a) 用法错误：shell 元字符，连撞 4 次也不该推进计数。
   for (let i = 0; i < 4; i += 1) {
@@ -933,12 +979,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   // (d) 真正的撞权限：上面一堆拒绝之后，计数仍从 0 开始。
   const first = await h.call("read", { path: "outside/a.ts" })
-  assert.equal(first?.block, true, "out-of-scope read is refused")
+  assert.ok(first, "out-of-scope read is refused")
   assert.equal(counted(first.reason), false, "the budget is still untouched by the usage errors before it")
   const second = await h.call("read", { path: "outside/b.ts" })
+  assert.ok(second, "the second refusal is refused")
   assert.match(second.reason, /in a row/, "the second counted refusal warns at maxDenies 2")
   const third = await h.call("read", { path: "outside/c.ts" })
-  assert.equal(third?.terminate, true, "the third stops the run")
+  assert.ok(third, "the third refusal is refused")
+  assert.equal(third.terminate, true, "the third stops the run")
   assert.match(third.reason, /denial budget/)
   h.restore()
   console.log("  ok   撞权限只计授权类：用法错误与硬规则不消耗预算")
@@ -959,20 +1007,24 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 //     缺省值本身就是决策（硬停判早一次就丢整轮任务），所以用行为钉住它。
 {
   const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
-  const verdicts = []
+  const verdicts: Outcome[] = []
   for (const name of ["a", "b", "c", "d", "e", "f"]) {
     verdicts.push(await h.call("read", { path: `outside/${name}.ts` }))
   }
-  const notes = verdicts.map((v) => /in a row|denial budget/.test(v.reason))
+  const notes = verdicts.map((v) => v !== undefined && /in a row|denial budget/.test(v.reason))
   assert.deepEqual(
     notes,
     [false, false, false, false, true, true],
     "default budget of five: four silent refusals, a warning at the fifth, a stop at the sixth",
   )
-  assert.equal(verdicts[4].terminate, undefined, "the fifth only warns")
-  assert.match(verdicts[4].reason, /contact_supervisor/, "the warning names the escalation channel")
-  assert.equal(verdicts[5].terminate, true, "the sixth ends the run")
-  assert.match(verdicts[5].reason, /for the parent session/i, "the stop text is addressed to the parent, who can act on it")
+  const fifth = verdicts[4]
+  assert.ok(fifth, "the fifth refusal is refused")
+  assert.equal(fifth.terminate, undefined, "the fifth only warns")
+  assert.match(fifth.reason, /contact_supervisor/, "the warning names the escalation channel")
+  const sixth = verdicts[5]
+  assert.ok(sixth, "the sixth refusal is refused")
+  assert.equal(sixth.terminate, true, "the sixth ends the run")
+  assert.match(sixth.reason, /for the parent session/i, "the stop text is addressed to the parent, who can act on it")
   h.restore()
   console.log("  ok   撞权限缺省 5：第 5 次 warn（点名求援），第 6 次硬停")
 }
@@ -999,7 +1051,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       GIT_COMMITTER_NAME: "t",
       GIT_COMMITTER_EMAIL: "t@example.com",
     }
-    const git = (...args) => {
+    const git = (...args: string[]): string => {
       const r = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv, stdio: ["ignore", "pipe", "pipe"] })
       assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stderr}`)
       return r.stdout.trim()
@@ -1012,7 +1064,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     let commonDir = spawnSync("git", ["rev-parse", "--git-common-dir"], { cwd: wtDir, encoding: "utf8", env: gitEnv }).stdout.trim()
     if (!commonDir.startsWith("/")) commonDir = join(wtDir, commonDir)
 
-    const bindings = (writable) =>
+    const bindings = (writable: boolean): string =>
       JSON.stringify({
         "pi-subagent-extend/1": { scope: ["**"], bash: { [writable ? "write" : "read"]: ["git status"], writable } },
       })
@@ -1083,7 +1135,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const out = await h.result("subagent", [
     { type: "text", text: `Worktree handoff: ${path} (1 children, 1 changed patches, cleanup complete)` },
   ])
-  assert.ok(Array.isArray(out?.content), "the result content is patched")
+  assert.ok(out, "the tool result is returned")
+  assert.ok(Array.isArray(out.content), "the result content is patched")
   assert.equal(out.content.length, 2, "one text part is appended")
   const hint = out.content[1].text
   assert.match(hint, /\[worktree handoff\]/, "the hint is marked so it can be recognised")
@@ -1110,6 +1163,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(unavailableHint.includes("children[].patch"), false, "it does not promise a manifest key")
 
   // 同一条消息再跑一次也不重复追加。
+  assert.ok(unavailable, "the unavailable result is returned")
   assert.equal(
     await h.result("subagent", unavailable.content),
     undefined,
@@ -1134,15 +1188,20 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const path = "/tmp/pi-subagents/async-subagent-runs/run-2/handoff.json"
   const injected = { role: "user", content: [{ type: "text", text: `run finished.\n\nParallel handoff: ${path}` }] }
   const out = await h.context([{ role: "system", content: "sys" }, injected])
-  assert.ok(Array.isArray(out?.messages), "the message list is replaced")
-  assert.match(out.messages[1].content.at(-1).text, /\[worktree handoff\]/, "the injected notification gets the hint")
-  assert.ok(out.messages[1].content.at(-1).text.includes(path), "and carries the manifest path")
-  assert.equal(out.messages[0].content, "sys", "other messages pass through untouched")
+  assert.ok(out, "the message list is replaced")
+  const injectedContent = out.messages[1]?.content
+  assert.ok(Array.isArray(injectedContent), "the injected notification keeps its content parts")
+  const injectedParts = Array.isArray(injectedContent) ? injectedContent : []
+  const injectedText = injectedParts.at(-1)?.text ?? ""
+  assert.match(injectedText, /\[worktree handoff\]/, "the injected notification gets the hint")
+  assert.ok(injectedText.includes(path), "and carries the manifest path")
+  assert.equal(out.messages[0]?.content, "sys", "other messages pass through untouched")
 
   // 字符串形态的 content 也要能补。
   const asString = await h.context([{ role: "custom", customType: "subagent-notify", content: `Parallel handoff: ${path}` }])
-  assert.equal(typeof asString?.messages?.[0]?.content, "string", "a string body stays a string")
-  assert.match(asString.messages[0].content, /children\[\]\.patch/)
+  assert.ok(asString, "a string body is annotated too")
+  assert.equal(typeof asString.messages?.[0]?.content, "string", "a string body stays a string")
+  assert.match(String(asString.messages[0]?.content), /children\[\]\.patch/)
 
   // 没有交接单行的消息、以及 assistant 角色都不动。
   assert.equal(
@@ -1157,7 +1216,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
 
   // 幂等：已经带标记的消息不再追加。
-  assert.equal(await h.context(out.messages), undefined, "an already-annotated message is left alone")
+  assert.equal(await h.context(out.messages as unknown[]), undefined, "an already-annotated message is left alone")
   h.restore()
   console.log("  ok   交接单提示（后台）：context 里补上注入的通知，其它消息不动")
 }
@@ -1200,6 +1259,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     assert.match(note, /"network": true/u, "it names what the parent would have to grant")
 
     // 同一份结果再走一次不重复追加。
+    assert.ok(noted, "the network failure is annotated")
     assert.equal(await offlineHandler.result("bash", noted.content), undefined, "already annotated results are left alone")
   } else {
     console.log("  skip  live network probe: no real sandbox on this kernel")
@@ -1364,9 +1424,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     }),
   })
   const first = await h.call("write", { path: "src/a.ts", content: "x" })
-  assert.equal(first?.block, true, "the first write refusal blocks")
+  assert.ok(first, "the first write refusal blocks")
+  assert.equal(first.block, true, "the first write refusal blocks")
   assert.equal(first.terminate, undefined, "and does not stop the run")
   const second = await h.call("write", { path: "src/b.ts", content: "x" })
+  assert.ok(second, "the second write refusal blocks")
   assert.match(second.reason, /one more refusal ends the run/, "the second write refusal warns")
   assert.match(second.reason, /write scope does not cover/, "the warning is about the write scope, not the grant")
   assert.match(second.reason, /report/, "and repeats the way out: deliver a report")
@@ -1374,7 +1436,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   // 读拒与写拒各算各的：一次范围外读不应把写预算推过阈值。
   const readDenial = await h.call("read", { path: "docs/x.md" })
-  assert.equal(readDenial?.block, true, "an out-of-scope read is refused")
+  assert.ok(readDenial, "an out-of-scope read is refused")
+  assert.equal(readDenial.block, true, "an out-of-scope read is refused")
   assert.doesNotMatch(readDenial.reason, /one more ends the run/, "the read refusal uses the other budget")
   assert.doesNotMatch(readDenial.reason, /write scope does not cover/, "and it is not described as a write problem")
 
@@ -1426,9 +1489,9 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 47. Build/test artefact directories are derived from what the project uses.
 {
-  const bindings = (extra) =>
+  const bindings = (extra: Record<string, unknown>): string =>
     JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"], writable: true, ...extra } } })
-  const grantedIn = (spec, ...parts) => spec.write.some((d) => d.endsWith(`/${join(...parts)}`))
+  const grantedIn = (spec: SandboxSpec, ...parts: string[]): boolean => spec.write.some((d: string) => d.endsWith(`/${join(...parts)}`))
 
   // A Node project: the toolchain is recognised, but its output directory is not
   // created — only granted when the project already has one.
@@ -1507,8 +1570,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm test"], writable: true } },
     }),
   })
-  const notified = []
-  await h.commands["permission"].handler("", { cwd: repo, ui: { notify: (m) => notified.push(m) } })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: repo, ui: { notify: (m: string) => notified.push(m) } })
   const text = notified.join("\n")
   assert.match(text, /target/, "the command lists the artefact directory")
   assert.equal(existsSync(join(repo, "target")), false, "but looking at the policy does not create it")
@@ -1520,7 +1583,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // Guards: a real sandbox on this kernel, and the toolchain installed.
 {
   const liveSandbox = described?.landlock?.supported === true
-  const have = (bin) => spawnSync("sh", ["-c", `command -v ${bin}`], { encoding: "utf8" }).status === 0
+  const have = (bin: string): boolean => spawnSync("sh", ["-c", `command -v ${bin}`], { encoding: "utf8" }).status === 0
   const gitEnv = {
     ...process.env,
     GIT_CONFIG_GLOBAL: "/dev/null",
@@ -1530,7 +1593,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     GIT_COMMITTER_EMAIL: "t@t",
   }
 
-  const runLive = async (dir, bindings, command) => {
+  const runLive = async (dir: string, bindings: string, command: string): Promise<import("node:child_process").SpawnSyncReturns<string> | undefined> => {
     const h = await handler({ cwd: dir, bindings })
     const input = { command }
     assert.equal(await h.call("bash", input), undefined, `${command} is allowlisted`)

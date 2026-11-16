@@ -72,7 +72,6 @@ export default function (pi: ExtensionAPI) {
 		pi.on("session_start", () => {
 			pi.sendMessage(
 				{
-					role: "custom",
 					customType: "subagent-notify",
 					content: [{ type: "text", text: `run finished.\n\nParallel handoff: ${handoffPath()}` }],
 					display: true,

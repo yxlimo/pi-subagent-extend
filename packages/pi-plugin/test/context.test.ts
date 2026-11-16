@@ -8,22 +8,25 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { ContextFile, EventHandler, ExtensionModule, FakeExtensionApi, PromptOptions, SessionContext } from "./types.ts";
 
 const here = new URL(".", import.meta.url);
-const src = (name) => pathToFileURL(join(here.pathname, "..", "src", name)).href;
+const src = (name: string): string => pathToFileURL(join(here.pathname, "..", "src", name)).href;
 
 const { stripMarkedSections, injectMainOnly, MAIN_ONLY_FILE } = await import(src("context-scope.ts"));
-const { default: activateMain } = await import(src("main-context.ts"));
-const { default: activateChild } = await import(src("child-context.ts"));
+const mainContext = await import(src("main-context.ts"));
+const childContext = await import(src("child-context.ts"));
+const activateMain = mainContext.default as ExtensionModule["activate"];
+const activateChild = childContext.default as ExtensionModule["activate"];
 
 let passed = 0;
-function ok(label) {
+function ok(label: string): void {
   passed += 1;
   console.log(`  ok   ${label}`);
 }
 
 /** 一个临时的项目目录，用来放 .pi/main-only.md。 */
-function project(mainOnlyText) {
+function project(mainOnlyText?: string): string {
   const dir = join(tmpdir(), `pi-subagent-extend-ctx-${process.pid}-${(Math.random() * 1e6) | 0}`);
   mkdirSync(join(dir, ".pi"), { recursive: true });
   if (mainOnlyText !== undefined) writeFileSync(join(dir, MAIN_ONLY_FILE), mainOnlyText);
@@ -46,24 +49,29 @@ const AGENTS = [
 ].join("\n");
 
 /** 造一个 pi，只收集 before_agent_start；返回给 handler 用的 ctx。 */
-function harness(activate) {
-  const handlers = {};
-  const notes = [];
-  activate({
+interface HarnessResult {
+  notes: { message: string; level?: string }[];
+  turn(cwd: string, contextFiles?: ContextFile[]): PromptOptions;
+}
+
+function harness(activate: ExtensionModule["activate"]): HarnessResult {
+  const handlers: Record<string, EventHandler> = {};
+  const notes: { message: string; level?: string }[] = [];
+  const api: FakeExtensionApi = {
     on(event, fn) {
       handlers[event] = fn;
     },
-  });
+    registerCommand() {},
+  };
+  activate(api);
   assert.ok(handlers.before_agent_start, "before_agent_start 必须被注册");
   return {
     notes,
     /** 跑一轮，返回它看到的 systemPromptOptions。 */
-    turn(cwd, contextFiles) {
-      const options = contextFiles ? { contextFiles } : {};
-      handlers.before_agent_start(
-        { systemPromptOptions: options },
-        { cwd, ui: { notify: (message, level) => notes.push({ message, level }) } },
-      );
+    turn(cwd: string, contextFiles?: { path: string; content: string }[]) {
+      const options: PromptOptions = contextFiles ? { contextFiles } : {};
+      const ctx: SessionContext = { cwd, ui: { notify: (message: string, level?: string) => notes.push({ message, level }) } };
+      handlers.before_agent_start({ systemPromptOptions: options }, ctx);
       return options;
     },
   };
@@ -73,7 +81,7 @@ function harness(activate) {
 const files = () => [{ path: "/proj/AGENTS.md", content: AGENTS }];
 
 /** 用环境变量模拟后台子代理。 */
-function asBackgroundChild(fn) {
+function asBackgroundChild<T>(fn: () => T): T {
   const previous = process.env.PI_SUBAGENT_CHILD;
   process.env.PI_SUBAGENT_CHILD = "1";
   try {
@@ -131,10 +139,10 @@ console.log("pi-subagent-extend context");
 // 5. 主代理专属文件注入成 section。
 {
   const dir = project("Token only for the main agent: MAINFILE_B\n");
-  const options = {};
+  const options: PromptOptions = {};
   const injected = injectMainOnly(options, dir);
   assert.ok(injected > 0, "有文件就注入");
-  assert.equal(options.sections.main_only_instructions.includes("MAINFILE_B"), true);
+  assert.equal(options.sections?.main_only_instructions?.includes("MAINFILE_B"), true);
   assert.equal("sections" in options, true);
   rmSync(dir, { recursive: true, force: true });
   ok(".pi/main-only.md 注入成 section");
@@ -143,7 +151,7 @@ console.log("pi-subagent-extend context");
 // 6. 没有那个文件就什么都不做（不改 sections）。
 {
   const dir = project(undefined);
-  const options = {};
+  const options: PromptOptions = {};
   assert.equal(injectMainOnly(options, dir), 0);
   assert.equal(options.sections, undefined, "没有文件不该凭空造 sections");
   rmSync(dir, { recursive: true, force: true });
@@ -155,8 +163,8 @@ console.log("pi-subagent-extend context");
   const dir = project("MAINFILE_B\n");
   const h = harness(activateMain);
   const options = h.turn(dir, files());
-  assert.equal(options.sections.main_only_instructions.includes("MAINFILE_B"), true, "主会话拿到注入");
-  assert.equal(options.contextFiles[0].content.includes("MARK_MAIN_ONLY_A"), true, "主会话不剥标记");
+  assert.equal(options.sections?.main_only_instructions?.includes("MAINFILE_B"), true, "主会话拿到注入");
+  assert.equal(options.contextFiles?.[0]?.content.includes("MARK_MAIN_ONLY_A"), true, "主会话不剥标记");
   assert.deepEqual(h.notes, [], "正常情况不打扰用户");
   rmSync(dir, { recursive: true, force: true });
   ok("主会话：注入主代理专属文件，不剥标记");
@@ -167,7 +175,7 @@ console.log("pi-subagent-extend context");
   const dir = project("MAINFILE_B\n");
   const h = harness(activateMain);
   const options = asBackgroundChild(() => h.turn(dir, files()));
-  assert.equal(options.contextFiles[0].content.includes("MARK_MAIN_ONLY_A"), false, "后台子代理剥掉标记");
+  assert.equal(options.contextFiles?.[0]?.content.includes("MARK_MAIN_ONLY_A"), false, "后台子代理剥掉标记");
   assert.equal(options.sections, undefined, "后台子代理不注入主代理专属内容");
   rmSync(dir, { recursive: true, force: true });
   ok("后台子代理（PI_SUBAGENT_CHILD=1）：剥标记且不注入");
@@ -178,7 +186,7 @@ console.log("pi-subagent-extend context");
   const dir = project("MAINFILE_B\n");
   const h = harness(activateChild);
   const options = h.turn(dir, files());
-  assert.equal(options.contextFiles[0].content.includes("MARK_MAIN_ONLY_A"), false, "前台子代理剥掉标记");
+  assert.equal(options.contextFiles?.[0]?.content.includes("MARK_MAIN_ONLY_A"), false, "前台子代理剥掉标记");
   assert.equal(options.sections, undefined, "前台子代理不注入");
   rmSync(dir, { recursive: true, force: true });
   ok("前台子代理（无环境变量、靠入口区分）：剥标记且不注入");

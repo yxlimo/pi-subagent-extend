@@ -26,22 +26,27 @@
     ]
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
     "build:helper": "mkdir -p bin && cargo build --release --manifest-path ../helper/Cargo.toml && cp ../helper/target/release/pi-subagent-extend-helper bin/",
     "pretest": "pnpm run build:helper",
-    "test": "node test/extension.test.mjs && node test/context.test.mjs && node test/mock-session.test.mjs",
-    "test:mock": "node test/mock-session.test.mjs",
-    "test:llm": "node test/e2e.test.mjs",
-    "prepublishOnly": "pnpm run build"
+    "test": "pnpm run lint && node test/extension.test.ts && node test/context.test.ts && node test/mock-session.test.ts",
+    "test:mock": "node test/mock-session.test.ts",
+    "test:llm": "node test/e2e.test.ts",
+    "prepublishOnly": "pnpm run build",
+    "lint": "eslint ."
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
-    "typescript": "^5.9.0"
+    "eslint": "^9.39.4",
+    "eslint-plugin-unicorn": "^79.0.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.72.2"
   },
   "files": [
     "src",

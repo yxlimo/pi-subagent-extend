@@ -101,6 +101,14 @@ jobs:
         working-directory: packages/pi-plugin
         run: pnpm run typecheck
 
+      # Two bug classes a type checker cannot see, both of which shipped here before:
+      # `await f(x)?.y` reading a property off the Promise, and the same expression
+      # written with explicit parentheses. `pnpm test` also runs it, so a local run
+      # catches it too.
+      - name: Lint
+        working-directory: packages/pi-plugin
+        run: pnpm run lint
+
       # The helper's own tests cover the sandbox itself: Landlock rules, the
       # namespace setup and the capability drop.
       - name: Helper tests

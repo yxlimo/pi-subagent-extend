@@ -11,7 +11,7 @@
 // 判据设计：答案只存在于被隔离的内容里，提问里完全不含这些 code。子代理若答出
 // ZULU-77 / YANKEE-42，就一定是泄露；对照组（不装扩展）必须答得出来，证明证据链有效。
 //
-// 与离线测试的分界：test/extension.test.mjs 与 test/context.test.mjs 用假 pi，不联网；
+// 与离线测试的分界：test/extension.test.ts 与 test/context.test.ts 用假 pi，不联网；
 // 本文件要真实模型，所以单独一个 script。
 
 import assert from "node:assert/strict";
@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
+import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 // RpcClient 缺省的 cliPath 是相对 cwd 的 "dist/cli.js"，而这里的 cwd 是临时工程，
@@ -58,7 +59,7 @@ const ASK = [
 
 const ASK_CHILD = `${ASK} Then write exactly those two lines, and nothing else, to ${ANSWER_FILE} relative to your working directory.`;
 
-function agentDefinition(name, tools) {
+function agentDefinition(name: string, tools: string): string {
 	const modelLine = MODEL ? `model: ${MODEL}\n` : "";
 	return `---
 name: ${name}
@@ -76,7 +77,7 @@ You are a probe. Answer only what is asked, in exactly the format asked.
  * 建一个一次性工程。`withExtension` 为 false 时只有上下文文件、没有扩展——对照组，
  * 用来证明那些 code 本来就在文件里读得到。
  */
-function makeProject({ withExtension }) {
+function makeProject({ withExtension }: { withExtension: boolean }): string {
 	mkdirSync(WORK_ROOT, { recursive: true });
 	const dir = mkdtempSync(join(WORK_ROOT, "extend-e2e-"));
 	mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
@@ -92,7 +93,7 @@ function makeProject({ withExtension }) {
 }
 
 /** 从事件流里取最后一次 agent_end 的最终助手文本。 */
-function finalAssistantText(events) {
+function finalAssistantText(events: JsonAgentSessionEvent[]): string {
 	for (let i = events.length - 1; i >= 0; i -= 1) {
 		const event = events[i];
 		if (event.type !== "agent_end") continue;
@@ -113,7 +114,7 @@ function finalAssistantText(events) {
 const [provider, modelId] = MODEL.includes("/") ? MODEL.split("/", 2) : [undefined, MODEL || undefined];
 
 /** 在工程里跑一轮真实会话，返回最终助手文本。 */
-async function runSession(cwd, prompt) {
+async function runSession(cwd: string, prompt: string) {
 	const client = new RpcClient({ cwd, provider, model: modelId, cliPath: PI_CLI });
 	await client.start();
 	try {
@@ -129,12 +130,12 @@ async function runSession(cwd, prompt) {
 	}
 }
 
-const lines = (text) => text.split("\n").map((line) => line.trim().toLowerCase());
-const saysEscalation = (text, value) => lines(text).includes(`escalation: ${value.toLowerCase()}`);
-const saysDelivery = (text, value) => lines(text).includes(`delivery: ${value.toLowerCase()}`);
+const lines = (text: string): string[] => text.split("\n").map((line: string) => line.trim().toLowerCase());
+const saysEscalation = (text: string, value: string): boolean => lines(text).includes(`escalation: ${value.toLowerCase()}`);
+const saysDelivery = (text: string, value: string): boolean => lines(text).includes(`delivery: ${value.toLowerCase()}`);
 
 let passed = 0;
-function ok(label) {
+function ok(label: string): void {
 	passed += 1;
 	console.log(`  ok   ${label}`);
 }

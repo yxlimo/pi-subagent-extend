@@ -1,0 +1,115 @@
+// Types for the offline test harness.
+//
+// The suites drive `activate()` with a hand-written stand-in for pi's ExtensionAPI
+// rather than the real one: the extension only calls `on`, `registerCommand` and
+// reads the context object, so a real API object would drag in most of pi to test
+// a handful of fields. These interfaces describe exactly the surface the suites
+// use, which is also what makes a typo in an event name or a context field a
+// compile error instead of a test that silently asserts nothing.
+
+/** What the extension returns to block a call. `terminate` is the hard stop. */
+export interface Denial {
+	block: true
+	reason: string
+	terminate?: boolean
+}
+
+/** `undefined` means the call was allowed. */
+export type Outcome = Denial | undefined
+
+/** The spec the extension writes for a rewritten bash command. */
+export interface SandboxSpec {
+	cwd: string
+	read: string[]
+	write: string[]
+	offline: boolean
+	env: Record<string, string>
+}
+
+/** `notify` takes an optional level ("warning" and so on); the suites assert on it. */
+export interface SessionNotice {
+	message: string
+	level?: string
+}
+
+export interface SessionContext {
+	cwd: string
+	ui: { notify(message: string, level?: string): void }
+	actions?: { abort(): void }
+}
+
+/** A context file as pi hands it over: mutable content, that is the whole point. */
+export interface ContextFile {
+	path: string
+	content: string
+}
+
+/** The systemPromptOptions fields the extension touches. */
+export interface PromptOptions {
+	contextFiles?: ContextFile[]
+	sections?: Record<string, string[]>
+}
+
+/** The event fields the suites actually read. Anything else stays unknown. */
+export interface EventPayload {
+	type?: string
+	messages?: unknown[]
+	systemPromptOptions?: PromptOptions
+	[key: string]: unknown
+}
+
+/**
+ * One registered event handler. Event payloads differ per event, and the suites read
+ * one or two fields off each; a per-event union would add no safety in a test file.
+ */
+export type EventHandler = (event: EventPayload, ctx: SessionContext) => Promise<unknown> | unknown
+
+export interface CommandSpec {
+	handler(args: string, ctx: SessionContext): Promise<void> | void
+}
+
+/** The subset of pi's ExtensionAPI the extension touches. */
+export interface FakeExtensionApi {
+	on(event: string, handler: EventHandler): void
+	registerCommand(name: string, spec: CommandSpec): void
+}
+
+/** The extension module as the suites see it. */
+export interface ExtensionModule {
+	activate(pi: FakeExtensionApi, options?: { profileName?: string; profileFile?: string }): void
+}
+
+export interface HandlerOptions {
+	bindings?: string
+	cwd?: string
+	profile?: string
+	profileFile?: string
+}
+
+/** What the tool_result handler returns: the content array, possibly patched. */
+export interface PatchedResult {
+	content: Array<{ type: string; text: string }>
+}
+
+/** One message in the table the `context` hook rewrites. */
+export interface MessageLike {
+	role?: string
+	customType?: string
+	content?: string | { type?: string; text?: string }[]
+}
+
+/** The rewritten message table the `context` hook returns. */
+export interface AnnotatedMessages {
+	messages: MessageLike[]
+}
+
+/** What `handler()` returns: the activated extension, callable from a test. */
+export interface Harness {
+	call(toolName: string, input?: Record<string, unknown>): Promise<Outcome>
+	result(toolName: string, content: unknown): Promise<PatchedResult | undefined>
+	context(messages: unknown[]): Promise<AnnotatedMessages | undefined>
+	aborts: string[]
+	ui: string[]
+	commands: Record<string, CommandSpec>
+	restore(): void
+}

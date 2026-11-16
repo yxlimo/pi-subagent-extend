@@ -1,10 +1,10 @@
 // 用 mock LLM 驱动**真 pi 会话**，验证扩展在真运行时的边界行为。
 //
-// 与 extension.test.mjs 的分界：那边用假 pi，只测本扩展自己的判定；
+// 与 extension.test.ts 的分界：那边用假 pi，只测本扩展自己的判定；
 // 这边走真 pi 的 tool_call → 拦截 → 批次结算 → 是否结束本轮，只是「模型说什么」由
-// test/mock-llm.mjs 的脚本决定。判据因此是确定的：脚本队列里下一步有没有被消费。
+// test/mock-llm.ts 的脚本决定。判据因此是确定的：脚本队列里下一步有没有被消费。
 //
-// 与 test/e2e.test.mjs（真实 LLM）的分界：这里不需要任何模型与网络，可进 CI。
+// 与 test/e2e.test.ts（真实 LLM）的分界：这里不需要任何模型与网络，可进 CI。
 //
 //   pnpm run test:mock        单独跑
 //   PI_MOCK_KEEP=1 ...        保留临时工程，便于翻会话记录
@@ -14,7 +14,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { startMockLlm } from "./mock-llm.mjs";
+import { startMockLlm } from "./mock-llm.ts";
+import type { ScriptedStep } from "./mock-llm.ts";
 
 const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const EXT = join(PKG_DIR, "src", "index.ts");
@@ -30,7 +31,7 @@ const MARKER = "DONE";
  * 临时根。放在 ~/tmp 下而不是 os.tmpdir()，是为了和手动实验分开；
  * 但那个目录可能不存在（被清过、或干净机器上），所以先建再 mkdtemp。
  */
-function tempRoot(prefix) {
+function tempRoot(prefix: string): string {
 	const base = join(homedir(), "tmp");
 	mkdirSync(base, { recursive: true });
 	return mkdtempSync(join(base, prefix));
@@ -46,7 +47,7 @@ function makeProject() {
 }
 
 /** 隔离的 agent 目录：models.json 把 provider `mock` 指到 mock 服务，不碰用户配置。 */
-function makeAgentDir(mockUrl) {
+function makeAgentDir(mockUrl: string): string {
 	const dir = tempRoot("pi-mock-agent-");
 	writeFileSync(
 		join(dir, "models.json"),
@@ -69,7 +70,14 @@ function makeAgentDir(mockUrl) {
 }
 
 /** 跑一个用例：mock 脚本 + 范围绑定 → 真 pi 会话 → 事件与 mock 请求。 */
-async function run({ steps, bindings, prompt = "Go.", extraEnv = {} }) {
+interface RunOptions {
+	steps: ScriptedStep[];
+	bindings?: Record<string, unknown>;
+	prompt?: string;
+	extraEnv?: Record<string, string>;
+}
+
+async function run({ steps, bindings, prompt = "Go.", extraEnv = {} }: RunOptions) {
 	const mock = await startMockLlm({ steps });
 	const project = makeProject();
 	const agentDir = makeAgentDir(mock.url);
@@ -114,8 +122,11 @@ async function run({ steps, bindings, prompt = "Go.", extraEnv = {} }) {
 }
 
 /** 工具结果以 message_end + role=toolResult 到达。 */
-function toolResults(events) {
-	const out = [];
+type PiPart = { type?: string; text?: string };
+type PiEvent = { type?: string; message?: { role?: string; toolName?: string; content?: PiPart[] | string } };
+
+function toolResults(events: PiEvent[] | undefined): { tool?: string; text: string }[] {
+	const out: { tool?: string; text: string }[] = [];
 	for (const event of events ?? []) {
 		if (event?.type !== "message_end") continue;
 		const message = event.message;
@@ -128,12 +139,13 @@ function toolResults(events) {
 	return out;
 }
 
-function assistantText(events) {
-	const parts = [];
+function assistantText(events: PiEvent[] | undefined): string {
+	const parts: string[] = [];
 	for (const event of events ?? []) {
 		if (event?.type !== "message_end" || event.message?.role !== "assistant") continue;
-		for (const part of event.message.content ?? []) {
-			if (part?.type === "text" && typeof part.text === "string") parts.push(part.text);
+		const content = event.message.content ?? [];
+		for (const part of Array.isArray(content) ? content : []) {
+			if (part.type === "text" && typeof part.text === "string") parts.push(part.text);
 		}
 	}
 	return parts.join("\n");

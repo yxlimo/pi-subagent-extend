@@ -4,9 +4,9 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.mjs` | 40 | the extension's own judgement, against a fake pi API |
-| `test/context.test.mjs` | 10 | the marker stripping and `.pi/main-only.md` injection |
-| `test/mock-session.test.mjs` | 6 | a real pi process, driven by a scripted mock model |
+| `test/extension.test.ts` | 50 | the extension's own judgement, against a fake pi API |
+| `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
+| `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 
 `cargo test` in `packages/helper` covers the sandbox itself: the ABI check, the ruleset, the
 namespace decisions, the capability drop and process supervision.
@@ -22,9 +22,17 @@ print `skip` — asserting on the stub's silence would test the stub, not the sa
 Verified both ways by swapping a fake ABI 3 helper into `bin/`: three skips and green, and with the
 real helper all of them execute.
 
+The suites are TypeScript and are included in `tsconfig.json`, so `pnpm run typecheck` checks them
+too. That is not cosmetic: `await h.call(...)?.block` reads the property off the promise, which the
+compiler rejects and JavaScript silently accepts as `undefined` — the shape of a test that passes for
+the wrong reason.
+
+`scripts` in `package.json` run them through node's type stripping, so there is no build step
+between editing a test and running it.
+
 ## The mock model
 
-`test/mock-llm.mjs` is a dependency-free OpenAI-compatible server: `/v1/models`, and
+`test/mock-llm.ts` is a dependency-free OpenAI-compatible server: `/v1/models`, and
 `/v1/chat/completions` streaming `chat.completion.chunk` with text steps and tool-call steps. The
 "model" is a script of steps, so a boundary is exact rather than left to chance — whether a run
 continued is simply whether the next step was requested. `mock.requests.length` is the signal: after

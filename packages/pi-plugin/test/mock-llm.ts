@@ -12,6 +12,32 @@
 //   await mock.stop();
 
 import { createServer } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+/** 一次工具调用：名字 + 参数，序列化成 arguments 字段。 */
+export interface ScriptedCall {
+	name: string;
+	args?: Record<string, unknown>;
+}
+
+export type ScriptedStep = { text: string; calls?: undefined } | { calls: ScriptedCall[]; text?: undefined };
+
+export interface MockLlmOptions {
+	steps: ScriptedStep[];
+	model?: string;
+}
+
+export interface MockLlm {
+	url: string;
+	port: number;
+	/** 每次 /chat/completions 的请求体。 */
+	requests: Record<string, unknown>[];
+	readonly consumed: number;
+	readonly remaining: number;
+	stop(): Promise<void>;
+}
+
+type FinishReason = "stop" | "tool_calls" | null;
 
 /**
  * 一步脚本：
@@ -19,8 +45,8 @@ import { createServer } from "node:http";
  *   { calls: [{ name, args }] }              助手发起工具调用（finish_reason: tool_calls）
  * 队列耗尽后服务返回 500，让「pi 多问了一轮」变成显式失败而不是静默通过。
  */
-export async function startMockLlm({ steps, model = "mock-1" }) {
-	const requests = [];
+export async function startMockLlm({ steps, model = "mock-1" }: MockLlmOptions): Promise<MockLlm> {
+	const requests: Record<string, unknown>[] = [];
 	let cursor = 0;
 
 	const server = createServer(async (req, res) => {
@@ -36,7 +62,7 @@ export async function startMockLlm({ steps, model = "mock-1" }) {
 			return;
 		}
 
-		const body = JSON.parse(await readBody(req));
+		const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
 		requests.push(body);
 		const step = steps[cursor];
 		cursor += 1;
@@ -60,8 +86,10 @@ export async function startMockLlm({ steps, model = "mock-1" }) {
 		writeStream(res, step, model);
 	});
 
-	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-	const { port } = server.address();
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+	const address = server.address();
+	if (address === null || typeof address === "string") throw new Error("the mock server did not bind a TCP port");
+	const { port } = address;
 	return {
 		url: `http://127.0.0.1:${port}/v1`,
 		port,
@@ -72,20 +100,20 @@ export async function startMockLlm({ steps, model = "mock-1" }) {
 		get remaining() {
 			return Math.max(0, steps.length - cursor);
 		},
-		stop: () => new Promise((resolve) => server.close(resolve)),
+		stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
 	};
 }
 
-function readBody(req) {
+function readBody(req: IncomingMessage): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const chunks = [];
-		req.on("data", (c) => chunks.push(c));
+		const chunks: Buffer[] = [];
+		req.on("data", (c: Buffer) => chunks.push(c));
 		req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
 		req.on("error", reject);
 	});
 }
 
-function chunk(delta, finishReason = null, model = "mock-1") {
+function chunk(delta: Record<string, unknown>, finishReason: FinishReason = null, model = "mock-1"): Record<string, unknown> {
 	return {
 		id: "chatcmpl-mock",
 		object: "chat.completion.chunk",
@@ -95,14 +123,14 @@ function chunk(delta, finishReason = null, model = "mock-1") {
 	};
 }
 
-function writeStream(res, step, model) {
-	const send = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+function writeStream(res: ServerResponse, step: ScriptedStep, model: string): void {
+	const send = (payload: Record<string, unknown>): boolean => res.write(`data: ${JSON.stringify(payload)}\n\n`);
 
 	if (step.text !== undefined) {
 		send(chunk({ role: "assistant", content: step.text }, null, model));
 		send(chunk({}, "stop", model));
 	} else {
-		const toolCalls = (step.calls ?? []).map((call, index) => ({
+		const toolCalls = (step.calls ?? []).map((call: ScriptedCall, index: number) => ({
 			index,
 			id: `call_mock_${index}`,
 			type: "function",
@@ -115,7 +143,7 @@ function writeStream(res, step, model) {
 	res.end();
 }
 
-function nonStreaming(step, model) {
+function nonStreaming(step: ScriptedStep, model: string): Record<string, unknown> {
 	const base = { id: "chatcmpl-mock", object: "chat.completion", created: 1_700_000_000, model };
 	if (step.text !== undefined) {
 		return {
@@ -131,7 +159,7 @@ function nonStreaming(step, model) {
 				message: {
 					role: "assistant",
 					content: null,
-					tool_calls: (step.calls ?? []).map((call, index) => ({
+					tool_calls: (step.calls ?? []).map((call: ScriptedCall, index: number) => ({
 						id: `call_mock_${index}`,
 						type: "function",
 						function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
