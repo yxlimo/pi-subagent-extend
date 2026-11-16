@@ -2,8 +2,8 @@
 
 use crate::spec::Spec;
 use landlock::{
-    path_beneath_rules, Access, AccessFs, BitFlags, CompatLevel, Compatible, LandlockStatus,
-    Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+    path_beneath_rules, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible,
+    LandlockStatus, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
 use std::path::{Path, PathBuf};
 
@@ -69,7 +69,7 @@ pub fn abi_or_reason() -> Result<i32, String> {
 ///
 /// The restriction applies to the calling process and everything it starts, so
 /// the caller only has to `exec` the command afterwards.
-pub fn apply(spec: &Spec) -> Result<(), String> {
+pub fn apply(spec: &Spec, namespaces: bool) -> Result<(), String> {
     let _abi = abi_or_reason()?;
     for path in spec.read.iter().chain(spec.write.iter()) {
         match path.exists() {
@@ -82,12 +82,25 @@ pub fn apply(spec: &Spec) -> Result<(), String> {
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI_USED))
         .map_err(|e| format!("cannot handle file access rights: {e}"))?;
-    // Offline needs no Landlock network rule: the command runs in its own
-    // network namespace (namespace.rs), which starts empty and gets loopback
-    // brought up and nothing else, so there is no route to anywhere. Landlock's
-    // net rules are port-based, so they cannot express "loopback only" — using
-    // them here would refuse the local connections that make a test suite
-    // work offline.
+    // Offline is enforced by the network namespace (namespace.rs), which starts
+    // empty and gets loopback brought up and nothing else: there is no route to
+    // anywhere, while a local server stays reachable. Landlock's net rules are
+    // port-based, so they cannot express "loopback only" — on a host where the
+    // namespace works, adding them here would refuse the local connections a
+    // test suite needs.
+    //
+    // Where the namespace cannot be created (some CI runners deny it), that
+    // structural cut is missing, so the port rules have to carry the network
+    // restriction instead. They are coarse — every local connection is refused
+    // too — but they are what keeps an "offline" command offline.
+    if needs_landlock_network(spec.offline, namespaces) {
+        // Handling the right without adding any port rule denies every port.
+        ruleset = ruleset
+            .handle_access(AccessNet::BindTcp)
+            .map_err(|e| format!("cannot handle TCP bind: {e}"))?
+            .handle_access(AccessNet::ConnectTcp)
+            .map_err(|e| format!("cannot handle TCP connect: {e}"))?;
+    }
 
     let created = ruleset
         .create()
@@ -103,6 +116,12 @@ pub fn apply(spec: &Spec) -> Result<(), String> {
         LandlockStatus::Available { .. } => Ok(()),
         other => Err(format!("Landlock is not active: {other:?}")),
     }
+}
+
+/// Landlock has to carry the network cut when the network namespace did not
+/// happen: without the namespace there is no structural "no route out".
+pub fn needs_landlock_network(offline: bool, namespaces: bool) -> bool {
+    offline && !namespaces
 }
 
 fn add_rules(
@@ -137,7 +156,7 @@ mod tests {
             offline: true,
             env: Default::default(),
         };
-        let error = apply(&spec).expect_err("a missing path must be refused");
+        let error = apply(&spec, true).expect_err("a missing path must be refused");
         assert!(
             error.contains("does not exist"),
             "unexpected error: {error}"
@@ -147,6 +166,16 @@ mod tests {
     #[test]
     fn unsupported_reason_names_enosys() {
         assert!(unsupported_reason(libc::ENOSYS).contains("CONFIG_SECURITY_LANDLOCK"));
+    }
+
+    /// Without a network namespace the port rules are the only cut left, so they
+    /// must come back; with one, they would break loopback for no gain.
+    #[test]
+    fn landlock_carries_the_network_only_when_the_namespace_is_missing() {
+        assert!(needs_landlock_network(true, false));
+        assert!(!needs_landlock_network(true, true));
+        assert!(!needs_landlock_network(false, false));
+        assert!(!needs_landlock_network(false, true));
     }
 
     #[test]

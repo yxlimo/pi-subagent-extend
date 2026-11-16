@@ -21,19 +21,19 @@ static COMMAND_PID: AtomicI32 = AtomicI32::new(0);
 ///
 /// `child_main` is expected to `exec`; returning from it means the command could
 /// not be started, and the returned value becomes the exit status.
-pub fn run(child_main: impl FnOnce() -> i32) -> Result<i32, String> {
+pub fn run(child_main: impl FnOnce() -> i32, fresh_proc: bool) -> Result<i32, String> {
     match unsafe { libc::fork() } {
         -1 => Err(format!(
             "cannot fork the sandbox init: {}",
             std::io::Error::last_os_error()
         )),
-        0 => supervisor(child_main),
+        0 => supervisor(child_main, fresh_proc),
         pid => Ok(decode(wait_for(pid)?)),
     }
 }
 
 /// The PID 1 of the new namespace: mount a fresh procfs, then supervise.
-fn supervisor(child_main: impl FnOnce() -> i32) -> ! {
+fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool) -> ! {
     // If the caller dies, the whole namespace must die with it, otherwise the
     // command is orphaned inside a namespace nobody can reach.
     unsafe {
@@ -46,9 +46,14 @@ fn supervisor(child_main: impl FnOnce() -> i32) -> ! {
         )
     };
 
-    if let Err(error) = crate::namespace::mount_proc() {
-        eprintln!("pi-subagent-extend-helper: {error}");
-        unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
+    // A fresh procfs is only meaningful inside a PID namespace: it shows that
+    // namespace's processes. Without one the process is still in the host's, so
+    // mounting over /proc would fail and hide nothing.
+    if fresh_proc {
+        if let Err(error) = crate::namespace::mount_proc() {
+            eprintln!("pi-subagent-extend-helper: {error}");
+            unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
+        }
     }
 
     // PID 1 only receives a signal when it has a handler installed, so the

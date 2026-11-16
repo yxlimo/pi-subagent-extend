@@ -1158,7 +1158,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     [
       "#!/bin/sh",
       "node -e 'const s=require(\"net\").connect({host:\"1.1.1.1\",port:80});",
-      "s.on(\"error\",e=>{console.error(e.code);process.exit(1)});",
+      "s.on(\"error\",e=>{console.error(e.code+\": \"+e.message);process.exit(1)});",
       "setTimeout(()=>process.exit(2),3000)'",
       "",
     ].join("\n"),
@@ -1173,7 +1173,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const exec = spawnSync("/bin/sh", ["-c", input.command], { cwd: workdir, encoding: "utf8" })
   const output = `${exec.stdout}${exec.stderr}`
-  assert.match(output, /ENETUNREACH/u, "the command really fails on the network")
+  // 建得出网络命名空间时报 ENETUNREACH；建不出来时由 Landlock 兜底，报连接 EACCES。
+  assert.match(output, /ENETUNREACH|EACCES/u, "the command really fails on the network")
 
   const noted = await offlineHandler.result("bash", output)
   // 字符串 content 会被拼成字符串，parts 数组则多一个 text part；两种形状都取尾部。

@@ -4,6 +4,9 @@
  * 两种失败要分开处理，因为证据强度不同：
  *
  * - **网络**：离线时任何 `ENETUNREACH` / `EAI_AGAIN` 都只可能是断网造成的，判定确定。
+ *   断网有两种实现：能建网络命名空间时是结构上的“没有路由”（`ENETUNREACH`），
+ *   建不出来时（部分 CI runner）由 Landlock 端口规则兜底，报的是连接 `EACCES`。
+ *   两种都要认，否则在回落的机器上这句提示就消失了。
  * - **写越界**：`EACCES` / `Permission denied` 太常见，读到 `/etc/shadow` 被拒也是这句话。
  *   所以这里不按文案猜，而是拿事实比对：从失败行里取路径，与这次命令的**可写清单**
  *   （spec.write，父代理授权出来的那份）比较。路径不在清单里、而宿主侧**读得到**它
@@ -30,6 +33,9 @@ const NETWORK_FAILURES: RegExp[] = [
 	/\bEAI_AGAIN\b/,
 	/\bENOTFOUND\b/,
 	/network is unreachable/i,
+	// Landlock 兜底时连接失败是 EACCES，文案里一定带 connect。
+	/connect[^\n]{0,80}\bEACCES\b/i,
+	/\bEACCES\b[^\n]{0,80}\bconnect\b/i,
 	/could not resolve host/i,
 	/temporary failure in name resolution/i,
 	/getaddrinfo[^\n]*failed/i,

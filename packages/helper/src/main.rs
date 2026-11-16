@@ -129,14 +129,14 @@ fn run_with_spec(args: &[OsString]) -> Result<i32, (i32, String)> {
 
 /// Enter the namespaces, then run the command inside the sandbox.
 fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i32, (i32, String)> {
-    // The mount and PID namespaces always run: they are what give the command a
-    // private /tmp and hide the host's processes. The network namespace is only
-    // entered for an offline command.
+    // The mount and PID namespaces are what give the command a private /tmp and
+    // hide the host's processes; the network namespace is only entered for an
+    // offline command. A host can refuse all of them (some CI runners do), and
+    // then the command runs with Landlock alone — see `sandbox::apply`.
     let cwd = spec.cwd.clone();
-    match namespace::isolate(spec.offline, cwd.as_deref()) {
-        Ok(isolated) => match isolated.shadowed.is_empty() {
-            true => {}
-            false => {
+    let namespaces = match namespace::isolate(spec.offline, cwd.as_deref()) {
+        Ok(isolated) => {
+            if !isolated.shadowed.is_empty() {
                 let shadowed: Vec<String> = isolated
                     .shadowed
                     .iter()
@@ -147,27 +147,31 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
                     shadowed.join(", ")
                 );
             }
-        },
-        // Landlock still denies TCP below, so a host without user namespaces
-        // loses the UDP/DNS cut, the private /tmp and the private /proc, but
-        // not the sandbox as a whole. Staying quiet for an online command:
-        // nothing was promised.
+            true
+        }
         Err(error) => {
             if spec.offline {
+                // Landlock takes over the network cut in this case, so the
+                // command is still offline — it just loses the private /tmp and
+                // the process hiding that the namespaces would have given it.
                 eprintln!(
-                    "pi-subagent-extend-helper: warning: cannot enter a network namespace ({error}); \
-                     the command keeps host networking, only TCP stays blocked"
+                    "pi-subagent-extend-helper: warning: cannot enter the namespaces ({error}); \
+                     the command runs with Landlock only, TCP still blocked"
                 );
             }
+            false
         }
-    }
+    };
 
-    supervise::run(|| run_command(program, program_args, spec))
-        .map_err(|e| (EXIT_SANDBOX_FAILED, e))
+    supervise::run(
+        || run_command(program, program_args, spec, namespaces),
+        namespaces,
+    )
+    .map_err(|e| (EXIT_SANDBOX_FAILED, e))
 }
 
 /// Runs as the command, inside the PID namespace, and never returns on success.
-fn run_command(program: &OsString, program_args: &[OsString], spec: &Spec) -> i32 {
+fn run_command(program: &OsString, program_args: &[OsString], spec: &Spec, namespaces: bool) -> i32 {
     if let Some(cwd) = &spec.cwd {
         if let Err(error) = std::env::set_current_dir(cwd) {
             eprintln!(
@@ -178,7 +182,7 @@ fn run_command(program: &OsString, program_args: &[OsString], spec: &Spec) -> i3
         }
     }
 
-    if let Err(error) = sandbox::apply(spec) {
+    if let Err(error) = sandbox::apply(spec, namespaces) {
         eprintln!("pi-subagent-extend-helper: {error}");
         return EXIT_UNSUPPORTED;
     }
