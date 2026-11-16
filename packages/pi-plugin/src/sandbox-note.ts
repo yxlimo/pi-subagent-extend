@@ -50,7 +50,7 @@ const PATH_IN_LINE = /(?:'|"|`)?(\/[^\s'"`:;,)]*)/g
 export function networkFailureNote(text: string, offline: boolean): string | undefined {
 	if (!offline || !text || text.includes(MARK)) return undefined
 	if (!NETWORK_FAILURES.some((pattern) => pattern.test(text))) return undefined
-	return `${MARK} network is disabled here by the parent's bindings — this is a permission, not a broken machine. Another registry, flag or timeout will fail the same way. If the task needs the network, use contact_supervisor to ask for it ("network": true).`
+	return `${MARK} the network is off per the parent's bindings — a permission, not a broken machine. Retrying will fail the same way; use contact_supervisor to ask for "network": true.`
 }
 
 /**
@@ -66,7 +66,7 @@ export function writeRefusalNote(text: string, granted: string[], cwd: string): 
 	const refused = firstRefusedOutside(text, roots, cwd)
 	if (!refused) return undefined
 	const shown = roots.length > 3 ? `${roots.slice(0, 3).join(", ")} …` : roots.join(", ")
-	return `${MARK} ${refused} is not writable here: the parent's bindings granted writes only under ${shown}. This is a permission, not a filesystem fault, and writing somewhere else will not help — use contact_supervisor to ask for it (writablePaths or a wider scope).`
+	return `${MARK} ${refused} is outside the writes the parent granted (${shown}) — a permission, not a filesystem fault. Writing elsewhere will not help; use contact_supervisor to ask for writablePaths.`
 }
 
 /** 第一条「路径在授权外、而宿主读得到」的拒绝目标；没有就 undefined。 */
