@@ -158,6 +158,7 @@ mod tests {
             cwd: None,
             read: vec!["/".into()],
             write: vec!["/definitely/not/here".into()],
+            tmp: None,
             offline: true,
             env: Default::default(),
         };

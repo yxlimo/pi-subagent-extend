@@ -15,6 +15,8 @@
 //! * **resolver** — the `nscd`/`systemd-resolved` socket directories are
 //!   shadowed in the private mount namespace, because a unix socket crosses a
 //!   network namespace;
+//! * **scratch** — the command's temporary directory and the conventional `/tmp`
+//!   are shadowed with an empty tmpfs, so temp files stay inside the sandbox;
 //! * **processes** — a private PID namespace with a fresh `/proc`, so the host's
 //!   processes and their environments are out of reach;
 //! * **capabilities** — every capability is dropped before the command starts;
@@ -129,12 +131,12 @@ fn run_with_spec(args: &[OsString]) -> Result<i32, (i32, String)> {
 
 /// Enter the namespaces, then run the command inside the sandbox.
 fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i32, (i32, String)> {
-    // The mount and PID namespaces are what give the command a private /tmp and
-    // hide the host's processes; the network namespace is only entered for an
-    // offline command. A host can refuse all of them (some CI runners do), and
-    // then the command runs with Landlock alone — see `sandbox::apply`.
+    // The mount and PID namespaces are what give the command a private scratch
+    // space and hide the host's processes; the network namespace is only entered
+    // for an offline command. A host can refuse all of them (some CI runners do),
+    // and then the command runs with Landlock alone — see `sandbox::apply`.
     let cwd = spec.cwd.clone();
-    let namespaces = match namespace::isolate(spec.offline, cwd.as_deref()) {
+    let namespaces = match namespace::isolate(spec.offline, cwd.as_deref(), spec.tmp.as_deref()) {
         Ok(isolated) => {
             // Say it once, and always for an offline command: whether the
             // namespaces are real is the difference between a structural "no
@@ -161,8 +163,9 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
         Err(error) => {
             if spec.offline {
                 // Landlock takes over the network cut in this case, so the
-                // command is still offline — it just loses the private /tmp and
-                // the process hiding that the namespaces would have given it.
+                // command is still offline — it just loses the private scratch
+                // space and the process hiding that the namespaces would have
+                // given it.
                 eprintln!(
                     "pi-subagent-extend-helper: warning: cannot enter the namespaces ({error}); \
                      the command runs with Landlock only, TCP still blocked"

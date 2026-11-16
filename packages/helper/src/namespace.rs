@@ -7,8 +7,11 @@
 //! namespace. Those socket directories are therefore shadowed with an empty
 //! tmpfs in the private mount namespace.
 //!
-//! The mount namespace also gives the command a private `/tmp`, so scratch
-//! space is not a way to hand files to, or read files from, other processes.
+//! The mount namespace also gives the command a private scratch space, so
+//! temporary files are not a way to hand files to, or read files from, other
+//! processes. That tmpfs goes over the command's own temporary directory (the
+//! spec's `tmp`) as well as the conventional `/tmp`, because the host's
+//! `TMPDIR` is not always `/tmp`.
 //!
 //! A private PID namespace keeps the host's processes out of `/proc`; it only
 //! takes effect for children, which is why [`crate::supervise`] forks.
@@ -27,7 +30,8 @@ use std::path::{Path, PathBuf};
 /// nothing.
 const RESOLVER_DIRS: [&str; 3] = ["/run/nscd", "/var/run/nscd", "/run/systemd/resolve"];
 
-/// Where the private scratch space goes.
+/// The conventional scratch space, which the extension points its runtime and
+/// state directories at. Every sandbox gets a private one.
 const PRIVATE_TMP: &str = "/tmp";
 
 /// The capability version the kernel expects: 3, i.e. two 32-bit words per set.
@@ -45,9 +49,10 @@ pub struct Isolated {
 
 /// Enter fresh user, mount, network and PID namespaces and set them up.
 ///
-/// The PID namespace only applies to children, so the caller must fork
+/// `tmp` is the temporary directory the command itself will use, as named by the
+/// spec. The PID namespace only applies to children, so the caller must fork
 /// afterwards (see [`crate::supervise`]).
-pub fn isolate(offline: bool, cwd: Option<&Path>) -> Result<Isolated, String> {
+pub fn isolate(offline: bool, cwd: Option<&Path>, tmp: Option<&Path>) -> Result<Isolated, String> {
     // The ids have to be read *before* unshare: inside a fresh user namespace
     // without a map, getuid() reports the overflow id (65534), and mapping that
     // is refused with EPERM.
@@ -62,12 +67,16 @@ pub fn isolate(offline: bool, cwd: Option<&Path>) -> Result<Isolated, String> {
     // host namespace on a system that mounts `/` shared.
     mount_none("/", libc::MS_REC | libc::MS_PRIVATE)?;
 
-    // A private /tmp is skipped when the command works inside /tmp: the tmpfs
-    // would hide the working directory. Landlock still limits what it can write.
-    if !cwd.is_some_and(|cwd| cwd.starts_with(PRIVATE_TMP)) {
-        // A failure here is not fatal: the command keeps the host /tmp and
+    for dir in private_tmp_dirs(tmp) {
+        // A private scratch space is skipped when the command works inside it:
+        // the tmpfs would hide the working directory. Landlock still limits what
+        // it can write.
+        if !should_private_tmp(&dir, cwd) {
+            continue;
+        }
+        // A failure here is not fatal: the command keeps the host directory and
         // Landlock still limits what it may write.
-        let _ = mount_tmpfs(Path::new(PRIVATE_TMP));
+        let _ = mount_tmpfs(&dir);
     }
 
     let mut shadowed = Vec::new();
@@ -79,6 +88,36 @@ pub fn isolate(offline: bool, cwd: Option<&Path>) -> Result<Isolated, String> {
         }
     }
     Ok(Isolated { shadowed })
+}
+
+/// The directories that get a private tmpfs: the conventional `/tmp` always,
+/// plus the temporary directory the spec names unless it is that same path.
+///
+/// Both are needed. `/tmp` is where the extension points `XDG_RUNTIME_DIR` and
+/// `MISE_STATE_DIR`, and where it tells a stuck agent to put its debug files;
+/// the spec's directory is the one the command's own temp files land in. A host
+/// whose `TMPDIR` is somewhere else used to get only the first, which left the
+/// second writable through Landlock with no mount over it — the write landed on
+/// the host, outside the sandbox.
+pub fn private_tmp_dirs(tmp: Option<&Path>) -> Vec<PathBuf> {
+    let conventional = PathBuf::from(PRIVATE_TMP);
+    match tmp {
+        Some(tmp) if *tmp != conventional => vec![conventional, tmp.to_path_buf()],
+        _ => vec![conventional],
+    }
+}
+
+/// Whether to put a fresh tmpfs over `dir`.
+///
+/// Skipped when the command works inside `dir`, including `dir` itself: the tmpfs
+/// would hide the working directory and the command would fail before it started.
+/// Skipped as well for a path with nothing sensible to mount on — not absolute,
+/// or `/`, where the mount would hide the filesystem the sandbox reads through.
+pub fn should_private_tmp(dir: &Path, cwd: Option<&Path>) -> bool {
+    if !dir.is_absolute() || dir == Path::new("/") {
+        return false;
+    }
+    !cwd.is_some_and(|cwd| cwd.starts_with(dir))
 }
 
 /// Bring `lo` up inside the fresh network namespace.
@@ -354,6 +393,50 @@ mod tests {
         let mut unique = dirs.clone();
         unique.dedup();
         assert_eq!(dirs, unique, "duplicates should be collapsed");
+    }
+
+    #[test]
+    fn a_tmpdir_outside_tmp_is_privatized_too() {
+        // The extension sends the directory the command's temp files land in. When
+        // the host's TMPDIR is not /tmp, that directory has to be shadowed too:
+        // granting it without a mount let the writes land on the host.
+        let custom = Path::new("/var/tmp/pi-scratch");
+        assert_eq!(
+            private_tmp_dirs(Some(custom)),
+            vec![PathBuf::from("/tmp"), custom.to_path_buf()],
+            "both the conventional /tmp and the spec's directory"
+        );
+        assert_eq!(
+            private_tmp_dirs(None),
+            vec![PathBuf::from("/tmp")],
+            "a spec without a tmp path gets /tmp only"
+        );
+        assert_eq!(
+            private_tmp_dirs(Some(Path::new("/tmp"))),
+            vec![PathBuf::from("/tmp")],
+            "the same directory is not mounted twice"
+        );
+    }
+
+    #[test]
+    fn a_scratch_dir_holding_the_cwd_is_not_mounted_over() {
+        let custom = Path::new("/var/tmp/pi-scratch");
+        let elsewhere = Some(Path::new("/home/user/project"));
+        assert!(should_private_tmp(Path::new("/tmp"), elsewhere));
+        assert!(should_private_tmp(custom, elsewhere));
+        // The cwd itself, and anything below it: the tmpfs would hide it.
+        assert!(!should_private_tmp(custom, Some(custom)));
+        assert!(!should_private_tmp(
+            custom,
+            Some(Path::new("/var/tmp/pi-scratch/work"))
+        ));
+        assert!(!should_private_tmp(
+            Path::new("/tmp"),
+            Some(Path::new("/tmp/work"))
+        ));
+        // Nothing sensible to mount on.
+        assert!(!should_private_tmp(Path::new("/"), None));
+        assert!(!should_private_tmp(Path::new("tmp"), None));
     }
 
     #[test]

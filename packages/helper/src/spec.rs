@@ -23,6 +23,13 @@ pub struct Spec {
     /// read-only, which is the whole point of the sandbox.
     #[serde(default)]
     pub write: Vec<PathBuf>,
+    /// Directory that gets a private tmpfs. The extension names the temporary
+    /// directory the command's own temp files land in — the host's `TMPDIR`,
+    /// which is not always `/tmp` — so the write grant and the mount cannot
+    /// disagree. Absent means nothing beyond the conventional `/tmp`, which is
+    /// also all a spec written by an older extension knows.
+    #[serde(default)]
+    pub tmp: Option<PathBuf>,
     /// Run the command without network access. Named for what the helper does,
     /// so the sandbox only ever has to act on a positive condition.
     #[serde(default)]
@@ -37,7 +44,12 @@ impl Spec {
     pub fn parse(text: &str) -> Result<Self, String> {
         let spec: Spec =
             serde_json::from_str(text).map_err(|e| format!("spec is not valid JSON: {e}"))?;
-        for path in spec.read.iter().chain(spec.write.iter()) {
+        for path in spec
+            .read
+            .iter()
+            .chain(spec.write.iter())
+            .chain(spec.tmp.iter())
+        {
             if path.is_absolute() {
                 if path.as_os_str().to_string_lossy().contains('\0') {
                     return Err(format!("spec path {path:?} contains a NUL byte"));
@@ -86,6 +98,25 @@ mod tests {
     fn rejects_relative_paths() {
         let error =
             Spec::parse(r#"{"write":["src/auth"]}"#).expect_err("relative paths are refused");
+        assert!(
+            error.contains("must be absolute"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_scratch_dir_outside_tmp_is_kept() {
+        let spec = Spec::parse(r#"{"tmp":"/var/tmp/pi-scratch"}"#).expect("a tmp path is valid");
+        assert_eq!(spec.tmp, Some(PathBuf::from("/var/tmp/pi-scratch")));
+        assert!(Spec::parse("{}")
+            .expect("an empty spec is valid")
+            .tmp
+            .is_none());
+    }
+
+    #[test]
+    fn rejects_a_relative_scratch_dir() {
+        let error = Spec::parse(r#"{"tmp":"var/tmp"}"#).expect_err("relative paths are refused");
         assert!(
             error.contains("must be absolute"),
             "unexpected error: {error}"

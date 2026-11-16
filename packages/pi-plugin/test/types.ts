@@ -22,6 +22,8 @@ export interface SandboxSpec {
 	cwd: string
 	read: string[]
 	write: string[]
+	/** The directory the helper shadows with a private tmpfs; absent means /tmp. */
+	tmp?: string
 	offline: boolean
 	env: Record<string, string>
 }

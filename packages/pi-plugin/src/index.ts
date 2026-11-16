@@ -869,18 +869,42 @@ const SANDBOX_DEVICE_PATHS = [
 	"/dev/pts",
 ];
 
+/**
+ * helper 里的 `PRIVATE_TMP`：spec 不写 `tmp` 时它把私有 tmpfs 挂在这里。
+ * 扩展的 XDG_RUNTIME_DIR / MISE_STATE_DIR 也指在它下面，所以这个路径两边必须同一个。
+ */
+const CONVENTIONAL_TMP = "/tmp";
+
+/**
+ * 命令自己用的临时目录：宿主的 TMPDIR（os.tmpdir() 认它），或 bash.env 里钉住的那一个。
+ *
+ * 它必须和 helper 挂私有 tmpfs 的目录是**同一个**：只授权、不挂载的目录，写下来落在宿主上，
+ * 不是落在沙箱里。所以它既写进 spec 的 `tmp`，也被下面的 `write` 引用，两处不再各说各话。
+ */
+function scratchDir(cwd: string, rule: BashRule): string {
+	const pinned = rule.env.TMPDIR?.trim();
+	// expandPath 对空串返回 undefined，这里已经排除了空串，剩下的只是类型上的可能。
+	const wanted = ((pinned ? expandPath(cwd, pinned) : tmpdir()) ?? "").replace(/\/+$/, "") || "/";
+	// 根目录不能当挂载点（会盖掉整棵树），不存在的目录既挂不上、Landlock 也会拒绝整个 spec。
+	// 这两种情况退回 /tmp：它对 helper 是既有默认值，不会因为一个坏掉的 TMPDIR 让 bash 全灭。
+	return wanted !== "/" && existsSync(wanted) ? wanted : CONVENTIONAL_TMP;
+}
+
 /** 这次命令的 spec；`writeRefusalNote` 要拿它的 `write` 判断越界写。 */
 export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
+	const scratch = scratchDir(cwd, rule);
 	return {
 		cwd,
 		read: ["/"],
-		// The helper mounts a private tmpfs on the scratch dir, so writes there stay
-		// inside the sandbox; when the cwd already sits in it, the mount is skipped
-		// and the write allowance below is what makes it usable.
+		// helper 在这个目录上挂一个私有 tmpfs，所以命令写的临时文件留在沙箱里，不落在宿主上。
+		// 只在它不等于 helper 的默认值（/tmp）时才写进 spec：约定值本来就不言自明，而且不带这个
+		// 字段的 spec 仍能被旧版 helper 解开（它 deny_unknown_fields）。
+		...(scratch === CONVENTIONAL_TMP ? {} : { tmp: scratch }),
 		write: [
 			...new Set([
 				...sandboxWritableDirs(policy, cwd, rule),
-				tmpdir(),
+				// 两个会被私有化的临时目录都放行：命令自己的那个，和约定俗成的 /tmp。
+				...[scratch, CONVENTIONAL_TMP].filter((dir) => existsSync(dir)),
 				// The helper refuses a spec path that does not exist, so filter here.
 				...SANDBOX_DEVICE_PATHS.filter((path) => existsSync(path)),
 			]),

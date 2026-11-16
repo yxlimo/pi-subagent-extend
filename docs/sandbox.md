@@ -33,7 +33,11 @@ noted in [architecture](architecture.md#boundaries), and only these are writable
   which holds the index and refs — without it `git add`, `git commit`, `git stash` and
   `git switch -c` fail on `<common>/worktrees/<id>/index.lock` or `<common>/refs`
 - `bash.writablePaths` entries, and the device nodes below
-- the host temporary directory
+- the temporary directories: the one the command itself uses (the host's `TMPDIR`, or a `TMPDIR`
+  pinned through `bash.env`, `/tmp` when neither is set) and the conventional `/tmp`, which the
+  extension's own runtime and state directories point into. Both are shadowed by the private tmpfs
+  described under [Namespaces](#namespaces) — granting a directory that is *not* mounted over would
+  be a host write, not a sandbox one, which is why the former is now named in the spec's `tmp`
 
 A write outside them fails with `EACCES`. Landlock rules attach to the resolved inode, so a
 symlink inside a granted directory that points outside stays read-only: the rule follows the
@@ -54,8 +58,12 @@ Unshared in the helper, before Landlock:
 - **User**, needed for the rest, plus a uid/gid map. The ids are captured **before** the unshare:
   after `unshare(CLONE_NEWUSER)` `getuid()` returns the overflow id 65534, and a map written from
   that fails with `EPERM`.
-- **Mount**, always, which is what gives the command a private `/tmp` — an unmixed tmpfs, skipped
-  when the working directory itself lies under `/tmp`, since that would hide it.
+- **Mount**, always, which is what gives the command a private scratch space — an unmixed tmpfs over
+  the conventional `/tmp` and, when the command's own temporary directory is somewhere else (the
+  host's `TMPDIR` is not always `/tmp`), over that directory too. The extension names it in the
+  spec's `tmp`; the helper defaults to `/tmp` alone when the field is absent, so a spec written by an
+  older extension still reads. A directory that contains the working directory is skipped, since the
+  tmpfs would hide it.
 - **Network**, only for an offline command. See below.
 - **PID**, always, with a freshly mounted `/proc`, so only the sandbox's own processes are visible:
   host processes cannot be seen, another process's `/proc/<pid>/environ` cannot be read, and no
@@ -119,8 +127,8 @@ The helper degrades rather than fails, and says so on stderr:
 - Landlock takes over the network cut, since the namespace that gave it structurally is missing.
   The port rules are coarse — loopback is refused along with everything else, so a local server
   cannot be reached — and a refused connect reads as `EACCES` instead of `ENETUNREACH`.
-- There is no private `/tmp` and no process hiding, because those came from the mount and PID
-  namespaces.
+- There is no private scratch directory and no process hiding, because those came from the mount
+  and PID namespaces.
 - Procfs is not remounted.
 
 Scope enforcement, the file rules and the capability drop are unaffected: they are Landlock and
