@@ -1594,5 +1594,36 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   真实工具链在沙箱里能写出自己的产物（cargo target/、go build cache）")
 }
 
+// 50. scope '.' means the whole repository, not nothing.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], writeScope: [".pi/reports"], maxDenies: 0, maxWriteDenies: 0 },
+    }),
+  })
+  // 仓库根 + 嵌套文件都要能读：`compile` 曾经把 "." 编译成 ^\.$ / ^\./.*$，
+  // 而 matches 比的是相对路径（根是空串、文件是 "src/a.ts"），两条都命中不了。
+  assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "a nested file is readable when the scope is the whole tree")
+  assert.equal(await h.call("read", { path: "README.md" }), undefined, "a root file is readable when the scope is the whole tree")
+  assert.equal(await h.call("grep", { path: "." }), undefined, "a search rooted at the repository root is allowed")
+  assert.equal(await h.call("ls", { path: "./" }), undefined, "and so is the same thing spelled with a trailing slash")
+
+  const write = await h.call("write", { path: "src/auth/login.ts", content: "x" })
+  assert.equal(write?.block, true, "writeScope still confines writes when the read scope is the whole tree")
+  assert.match(write.reason, /readable but not writable/, "the refusal says the read was fine and the write was not")
+  assert.equal(await h.call("write", { path: ".pi/reports/r.md", content: "x" }), undefined, "writing inside writeScope still works")
+  h.restore()
+
+  // 同一个坑的另一种写法：带 "./" 前缀的条目曾经也一条都不命中。
+  const dotted = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["./src/**"], maxDenies: 0, maxWriteDenies: 0 } }),
+  })
+  assert.equal(await dotted.call("read", { path: "src/auth/login.ts" }), undefined, "a scope written './src/**' covers src/**")
+  const outside = await dotted.call("read", { path: "docs/x.md" })
+  assert.equal(outside?.block, true, "and still confines reads outside it")
+  dotted.restore()
+  console.log("  ok   范围写 '.' 等于整棵树，'./x' 等于 'x'；写仍受 writeScope 限制")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

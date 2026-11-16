@@ -166,7 +166,12 @@ function compile(globs: string[]): RegExp[] {
 	const expanded = new Set<string>();
 	for (const glob of globs) {
 		// 尾斜杠只是目录写法，去掉后再展开，否则 "dir/" 会变成 "dir//**"。
-		const g = glob.length > 1 ? glob.replace(/\/+$/, "") || "/" : glob;
+		const raw = glob.length > 1 ? glob.replace(/\/+$/, "") || "/" : glob;
+		// "." 和 "./" 表示整棵树。不归一的话会编译成 ^\.$ / ^\./.*$，而 matches 比的是
+		// 相对路径 —— 仓库根的相对路径是空串、子文件是 "src/a.ts"，两条都命中不了，
+		// 于是 scope: ["."]（文档里的「读全仓」写法）什么也授权不了。
+		// 开头的 "./" 同理要去掉："." 归一成 "**"（整棵树），"./src" 归一成 "src"。
+		const g = raw === "." ? "**" : raw.replace(/^\.\//, "");
 		expanded.add(g);
 		if (g.endsWith("/**")) expanded.add(g.slice(0, -3) || "/");
 		else if (!/[*?]/.test(g)) expanded.add(`${g}/**`);
