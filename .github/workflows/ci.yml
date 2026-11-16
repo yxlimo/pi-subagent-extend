@@ -11,19 +11,32 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Both enforcement shapes have to be covered, because the helper runs in
+    # whichever one the host allows:
+    #   namespaces  the sandbox gets user/mount/net/pid namespaces
+    #   fallback    the host refuses them, and Landlock alone carries the cut
+    # The fallback leg is the one that broke silently before, so testing only
+    # the mode a patched runner gives us would not have caught it.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: namespaces
+            expect: network isolated
+          - mode: fallback
+            expect: cannot enter the namespaces
+    name: check (${{ matrix.mode }})
     steps:
       - uses: actions/checkout@v7
 
       # Ubuntu's default (apparmor_restrict_unprivileged_userns=1) lets
       # unshare(CLONE_NEWUSER) succeed, then refuses setgroups, mount, netns
-      # and pidns. The sandbox would silently fall back to Landlock only and
-      # the namespace code would never be exercised here. Measured on this
-      # image:
+      # and pidns. Measured on this image:
       #   default   setgroups EPERM, unshare(NEWNS|NEWNET|NEWPID) EPERM
       #   sysctl 0  all four succeed
-      # It is a throwaway VM, and without this the tests below would not cover
-      # the isolation they exist to check.
+      # The fallback leg deliberately leaves the default alone.
       - name: Allow unprivileged user namespaces
+        if: matrix.mode == 'namespaces'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - uses: pnpm/action-setup@v6
@@ -55,6 +68,8 @@ jobs:
       # sockets on stderr, and this step fails when that line is missing: a
       # quiet fallback to Landlock-only otherwise looks exactly like success.
       - name: Sandbox self-check
+        env:
+          EXPECT: ${{ matrix.expect }}
         run: |
           cargo build --release \
             --manifest-path packages/helper/Cargo.toml --locked
@@ -74,9 +89,9 @@ jobs:
             exit 1
           fi
           case "$out" in
-            *"network isolated"*) ;;
+            *"$EXPECT"*) ;;
             *)
-              echo "::error::no network namespace was entered"
+              echo "::error::expected '$EXPECT' on this leg"
               exit 1
               ;;
           esac

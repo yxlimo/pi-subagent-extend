@@ -180,7 +180,12 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
 }
 
 /// Runs as the command, inside the PID namespace, and never returns on success.
-fn run_command(program: &OsString, program_args: &[OsString], spec: &Spec, namespaces: bool) -> i32 {
+fn run_command(
+    program: &OsString,
+    program_args: &[OsString],
+    spec: &Spec,
+    namespaces: bool,
+) -> i32 {
     if let Some(cwd) = &spec.cwd {
         if let Err(error) = std::env::set_current_dir(cwd) {
             eprintln!(
