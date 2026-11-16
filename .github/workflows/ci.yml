@@ -59,11 +59,20 @@ jobs:
           cargo build --release \
             --manifest-path packages/helper/Cargo.toml --locked
           spec=$(mktemp)
-          printf '%s' '{"cwd":".","read":["/"],' >"$spec"
-          printf '%s' '"write":["/tmp"],"offline":true,"env":{}}' >>"$spec"
+          printf '%s' '{"read":["/"],"write":["/tmp"],' >"$spec"
+          printf '%s' '"offline":true,"env":{}}' >>"$spec"
           helper=packages/helper/target/release/pi-subagent-extend-helper
+          # Capture the status instead of letting `set -e` abort the step: the
+          # helper's own message is the thing worth printing.
+          set +e
           out=$("$helper" --spec "$spec" -- true 2>&1)
+          code=$?
+          set -e
           printf '%s\n' "$out"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::the helper exited $code"
+            exit 1
+          fi
           case "$out" in
             *"network isolated"*) ;;
             *)
