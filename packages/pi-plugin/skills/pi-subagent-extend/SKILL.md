@@ -1,6 +1,6 @@
 ---
 name: pi-subagent-extend
-description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope: every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping: pi-subagent-extend-probes; stripping the main-agent-only sections of AGENTS.md: pi-subagent-extend-context.
+description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope — every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping are covered by pi-subagent-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagent-extend-context.
 ---
 
 # pi-subagent-extend: confine a subagent to the task scope
