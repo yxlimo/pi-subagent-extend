@@ -199,7 +199,7 @@ scope and network are already fixed:
 - **Files**: a Landlock ruleset. `/` stays readable and executable, and only the paths named
   in the spec are writable: the scope, the working directory, `node_modules`, the
   `bash.writablePaths` entries, the device nodes below and the host temporary directory. A
-  write outside them fails with `EPERM`.
+  write outside them fails with `EACCES`.
 - **Network**: a private network namespace with loopback brought up and nothing else, so
   nothing can leave it: a connection to any host fails with `ENETUNREACH` (there is no
   interface carrying a route out) and a name lookup fails with `EAI_AGAIN`, because the
