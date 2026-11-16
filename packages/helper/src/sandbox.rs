@@ -149,6 +149,11 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_reported() {
+        // Only meaningful where the sandbox would run at all: on an older kernel
+        // the ABI check refuses before the paths are looked at.
+        if abi_or_reason().is_err() {
+            return;
+        }
         let spec = Spec {
             cwd: None,
             read: vec!["/".into()],
@@ -180,12 +185,26 @@ mod tests {
 
     #[test]
     fn an_old_abi_is_refused_with_the_required_version() {
-        let abi = match kernel_abi() {
-            Ok(abi) => abi,
-            Err(_) => return,
-        };
-        if abi >= REQUIRED_ABI {
-            assert!(abi_or_reason().is_ok(), "a modern kernel must be accepted");
+        match kernel_abi() {
+            Ok(abi) if abi >= REQUIRED_ABI => {
+                assert!(abi_or_reason().is_ok(), "a modern kernel must be accepted");
+            }
+            Ok(abi) => {
+                let reason = abi_or_reason().expect_err("an old kernel must be refused");
+                // The wording matters: the caller shows it to the user, and CI
+                // asserts on it on a 5.15 kernel.
+                assert!(reason.contains(&format!("ABI {abi}")), "{reason}");
+                assert!(
+                    reason.contains(&format!("ABI {REQUIRED_ABI} is required")),
+                    "{reason}"
+                );
+            }
+            Err(_) => {
+                assert!(
+                    abi_or_reason().is_err(),
+                    "a kernel without Landlock must be refused"
+                );
+            }
         }
     }
 }
