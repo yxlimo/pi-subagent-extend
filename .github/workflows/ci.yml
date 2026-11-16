@@ -14,18 +14,23 @@ jobs:
     # present, and one image only shows one of them. Every number below was
     # measured on the image it is next to, not assumed:
     #
-    #   ubuntu-26.04 (7.0)   ABI 8, user namespaces refused by AppArmor
-    #   ubuntu-24.04 (6.1x)  ABI 8, user namespaces refused by AppArmor
-    #   ubuntu-22.04 (5.15)  ABI 4, user namespaces allowed
+    #   ubuntu-26.04  7.0.0-1019-azure  ABI 8, namespaces refused by AppArmor
+    #   ubuntu-24.04  7.0.0-1014-aws    ABI 8, namespaces refused by AppArmor
+    #   ubuntu-22.04  6.8.0-1070-azure  ABI 4, namespaces allowed
+    #
+    # 24.04 turned out to run a 7.0 kernel too, so it is not a second kernel
+    # generation: what it adds is a different image, kernel build and flavour
+    # (aws against azure). 6.8 is the only older kernel on offer here, and it is
+    # below ABI 7, so the real sandbox can only run on the 7.0 legs.
     #
     # The images are pinned by version on purpose: `ubuntu-latest` moved from
     # 24.04 to 26.04 under us, and what these legs assert is a property of the
     # kernel. A floating label would change the subject of the test silently.
     #
     #   26.04-namespaces  restriction lifted -> the real sandbox on 7.0
-    #   24.04-namespaces  same, on a different kernel -> compatibility
+    #   24.04-namespaces  another image and kernel build -> compatibility
     #   26.04-fallback    restriction in place -> Landlock alone carries the cut
-    #   22.04-abi4        5.15 -> the sandbox refuses to run at all
+    #   22.04-abi4        6.8 kernel -> the sandbox refuses to run at all
     #
     # The fallback leg is the one that broke silently before, and the ABI leg
     # was only ever simulated with a stub helper, so both are here for real.
