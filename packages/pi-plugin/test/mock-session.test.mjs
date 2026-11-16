@@ -26,9 +26,19 @@ const KEEP = process.env.PI_MOCK_KEEP === "1";
 const TIMEOUT_MS = Number(process.env.PI_MOCK_TIMEOUT_MS ?? 60_000);
 const MARKER = "DONE";
 
+/**
+ * 临时根。放在 ~/tmp 下而不是 os.tmpdir()，是为了和手动实验分开；
+ * 但那个目录可能不存在（被清过、或干净机器上），所以先建再 mkdtemp。
+ */
+function tempRoot(prefix) {
+	const base = join(homedir(), "tmp");
+	mkdirSync(base, { recursive: true });
+	return mkdtempSync(join(base, prefix));
+}
+
 /** 一个最小工程：src/a.ts 在范围内，outside.md 在范围外。 */
 function makeProject() {
-	const root = mkdtempSync(join(homedir(), "tmp", "pi-mock-"));
+	const root = tempRoot("pi-mock-");
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "a.ts"), "export const ok = 1;\n");
 	writeFileSync(join(root, "outside.md"), "outside the task scope\n");
@@ -37,7 +47,7 @@ function makeProject() {
 
 /** 隔离的 agent 目录：models.json 把 provider `mock` 指到 mock 服务，不碰用户配置。 */
 function makeAgentDir(mockUrl) {
-	const dir = mkdtempSync(join(homedir(), "tmp", "pi-mock-agent-"));
+	const dir = tempRoot("pi-mock-agent-");
 	writeFileSync(
 		join(dir, "models.json"),
 		JSON.stringify(
