@@ -79,6 +79,21 @@ With `bash.writable`, the sandbox is therefore given the write scope plus git's 
 `node_modules`, not the working directory wholesale. A subagent that may read `lib/` but not write
 it cannot route around the rule with a shell redirect.
 
+Build and test artefacts are the exception that makes this usable, and the project already answers
+which ones they are: whatever git ignores. `bash.writable` grants every ignored directory that
+exists (found with `git ls-files --others --ignored --exclude-standard --directory`), and creates the
+ones the project declares but has not produced yet — a plain `.gitignore` entry such as `coverage/`
+or `target` is asked back with `git check-ignore` as a directory — so the first `cargo test` in a
+fresh checkout works. Deriving the list rather than hardcoding it matters: the extension has no
+business asserting that `target` means Rust and `dist` means JavaScript, and a project that ignores
+`build/` while tracking a source directory of the same name gets the right answer for free.
+
+Caches that belong outside the repository (`go`'s build cache, mypy's) are moved with a single
+`XDG_CACHE_HOME` pointing at a persistent `~/.cache` directory. The sandbox's `/tmp` is a per-call
+tmpfs, so a cache there is thrown away every command: measured on a fresh module, `go test` takes
+3.5 s cold and 51 ms from the second call with the redirect, while a read-only host cache only lets
+go reuse what is already there.
+
 **A missing path is its own message.** `read` without a `path` assumes the repository root, and
 `write` without one cannot be judged at all. Both say so, instead of pretending the scope rule
 was the problem — an agent that reads "out of scope" tries a different path, while an agent that

@@ -435,8 +435,124 @@ function expandPath(cwd: string, raw: string): string | undefined {
  *   而 package.json、node_modules 这类 worktree 根级文件在范围之外，不绑就只读
  * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等）
  */
-function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): string[] {
+/**
+ * 项目自己声明过的产物目录。判据只有一条：git 说它被忽略。
+ *
+ * 两类都要：
+ * - 已经在树里的，`ls-files --others --ignored --directory` 会折叠成目录列出来；
+ * - 还没落盘的（第一次 `cargo test` 之前的 `target/`、第一次跑覆盖率之前的
+ *   `coverage/`），把 .gitignore 里那些朴素条目按「目录」再问一次 git，命中就说明
+ *   项目把它当输出目录 —— 这类必须能创建，否则命令第一次跑就是 Permission denied。
+ *
+ * 不去猜工具链：`dist`、`target`、`.build` 谁生成的、该不该写，项目已经在 .gitignore
+ * 里回答过了。带通配符的条目交给 ls-files（它按 git 语义展开），这里只处理朴素路径。
+ */
+const scratchDirsCache = new Map<string, string[]>();
+
+function scratchDirNames(cwd: string): string[] {
+	const key = resolve(cwd);
+	const cached = scratchDirsCache.get(key);
+	if (cached) return cached;
+
+	const found = new Set<string>();
+	const run = (args: string[], input?: string) => {
+		try {
+			return execFileSync("git", args, {
+				cwd: key,
+				encoding: "utf8",
+				stdio: input === undefined ? ["ignore", "pipe", "ignore"] : ["pipe", "pipe", "ignore"],
+				timeout: 5000,
+				input,
+			});
+		} catch {
+			return "";
+		}
+	};
+
+	for (const raw of run(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).split("\0")) {
+		const name = raw.replace(/\/+$/, "");
+		if (name) found.add(resolve(key, name));
+	}
+
+	// .gitignore 里的朴素条目（不带通配符、不取反）：按目录再问 git 一次。
+	const ignoreFile = resolve(key, ".gitignore");
+	if (existsSync(ignoreFile)) {
+		const candidates = readFileSync(ignoreFile, "utf8")
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line && !line.startsWith("#") && !line.startsWith("!"))
+			.filter((line) => !/[?*]|\[/.test(line))
+			.map((line) => line.replace(/^\/+/, "").replace(/\/+$/, ""))
+			.filter(Boolean);
+		if (candidates.length > 0) {
+			const ignored = run(["check-ignore", "--stdin"], `${candidates.map((c) => `${c}/`).join("\n")}\n`);
+			for (const line of ignored.split("\n")) {
+				const name = line.trim().replace(/\/+$/, "");
+				if (name) found.add(resolve(key, name));
+			}
+		}
+	}
+
+	const result = [...found];
+	scratchDirsCache.set(key, result);
+	return result;
+}
+
+/** 产物目录：已存在的直接放行；缺的按需创建（工具链本来也会创建，空目录 git 不跟踪）。 */
+function scratchDirs(cwd: string, rule: BashRule, options: { create: boolean }): string[] {
+	if (rule.scratchPaths === false) return [];
 	const dirs = new Set<string>();
+	const add = (abs: string) => {
+		if (existsSync(abs)) {
+			dirs.add(abs);
+			return;
+		}
+		// 还不存在的：/permission 只报告（它是「将要放行什么」），建 spec 时才真的创建。
+		// 创建失败就不放行 —— 把一个不存在的路径写进 spec，helper 会直接拒绝整条命令，
+		// 报错点离真正的原因太远。
+		if (!options.create) {
+			dirs.add(abs);
+			return;
+		}
+		try {
+			mkdirSync(abs, { recursive: true });
+			dirs.add(abs);
+		} catch {
+			// 只读树或权限不足：如实失败，别把它算成已授权。
+		}
+	};
+	for (const abs of scratchDirNames(cwd)) add(abs);
+	for (const extra of rule.scratchPaths) add(resolve(cwd, extra));
+	return [...dirs];
+}
+
+/**
+ * 工具链缓存目录。放 ~/.cache 下持久保存：沙箱里的 /tmp 是每次调用私有的 tmpfs，
+ * 把 GOCACHE 放那里会让 `go test` 每次都全量重编译。
+ * 只设一条 XDG_CACHE_HOME，而不是逐个数 GOCACHE / MYPY_CACHE_DIR / RUFF_CACHE_DIR：
+ * 前者是约定（实测 go 的默认 cache 跟着它走），后者是一份要一直维护的工具名单。
+ */
+let toolchainCacheDirMemo: string | undefined | null = null;
+
+function toolchainCacheDir(): string | undefined {
+	if (toolchainCacheDirMemo !== null) return toolchainCacheDirMemo;
+	let dir: string | undefined;
+	try {
+		dir = resolve(homedir(), ".cache", "pi-subagent-extend", "xdg-cache");
+		mkdirSync(dir, { recursive: true });
+	} catch {
+		dir = undefined;
+	}
+	toolchainCacheDirMemo = dir;
+	return dir;
+}
+
+function sandboxWritableDirs(
+	policy: Policy,
+	cwd: string,
+	rule: BashRule,
+	options: { create: boolean } = { create: true },
+): string[] {	const dirs = new Set<string>();
 	if (rule.writable) {
 		for (const dir of writableDirs(policy, cwd)) dirs.add(dir);
 		// git 的索引与 ref 必须可写，否则 add / commit / stash 全拼在 index.lock 上；但只给
@@ -459,6 +575,10 @@ function sandboxWritableDirs(policy: Policy, cwd: string, rule: BashRule): strin
 				dirs.add(nodeModules);
 			}
 		}
+		// 项目自己声明过的产物目录（git 忽略的）：build/test 往这里写。
+		for (const dir of scratchDirs(cwd, rule, options)) dirs.add(dir);
+		const cache = toolchainCacheDir();
+		if (cache) dirs.add(cache);
 	}
 	for (const raw of rule.writablePaths) {
 		const abs = expandPath(cwd, raw);
@@ -514,6 +634,12 @@ function sandboxEnv(cwd: string, rule: BashRule): Record<string, string> {
 		}
 	}
 	if (!env.XDG_RUNTIME_DIR) env.XDG_RUNTIME_DIR = `${privateDir}/runtime`;
+	// 构建缓存要跨调用持久，所以放 ~/.cache 而不是私有的 /tmp；只在沙箱可写时给，
+	// 只读沙箱里指向一个不可写目录只会让报错更难读。
+	if (rule.writable) {
+		const cache = toolchainCacheDir();
+		if (cache && !env.XDG_CACHE_HOME) env.XDG_CACHE_HOME = cache;
+	}
 	if (!env.MISE_STATE_DIR) {
 		const worktreeRoot = findWorktreeRoot(cwd);
 		const miseConfig = worktreeRoot ? resolve(worktreeRoot, "mise.toml") : undefined;
@@ -1065,7 +1191,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 						: undefined,
 					policy.bash
 						? `Sandbox writable paths: ${
-							sandboxWritableDirs(policy, cwd, policy.bash)
+							sandboxWritableDirs(policy, cwd, policy.bash, { create: false })
 								.map((d) => d.replace(cwd, "."))
 								.join(" | ") || "(none)"
 						}`

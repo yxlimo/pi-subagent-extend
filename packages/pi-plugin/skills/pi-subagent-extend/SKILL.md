@@ -123,19 +123,22 @@ So "read the whole repository, write only `.pi/reviews`" is `scope: ["."]`, `wri
 | `bash.network` | `boolean` | Defaults to `false`, the sandbox has no network; turn it on only for commands that genuinely need the network |
 | `bash.writable` | `boolean` | Defaults to `false`, the sandbox root is read-only; when `true`, the directories matched by the **write scope**, git's own directory and `node_modules` are writable inside the sandbox (test artefacts, snapshots). In a linked worktree the main checkout's common git directory is added too — the worktree's index and refs live there, and without it `git add`/`commit`/`stash`/`switch -c` fail on `index.lock`. The working directory is not granted wholesale, so a subagent allowed to read `lib/` but not write it cannot route around that with a shell redirect; anything else it needs goes in `writablePaths` |
 | `bash.writablePaths` | `string[]` | Additional paths granted write access (absolute paths, starting with `~`, or relative to the cwd). Put the global directories the toolchain has to write here, such as the pnpm store |
+| `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are otherwise derived from what git ignores in the project. `false` disables that list, an array appends explicit directories (created if missing) |
 | `bash.env` | `object` | Environment variables injected into the sandbox (written into the spec's `env`). `XDG_RUNTIME_DIR` (the sandbox's private /tmp, which pnpm's lock directory relies on) and, in the worktree case, `MISE_STATE_DIR` are injected by default |
 | `bash.gitExcludes` | `boolean` | Defaults to `true`. Injects global exclude rules into git inside the sandbox (`node_modules/`, `.pnpm-store/`), so that `git add -A` does not pull the dependency directories into the index |
 | `bash.deny` | `string[]` | Blacklist: a matched command is **always refused, and the caller's allowlist cannot widen it**. Usually written in an agent profile to enforce the project skeleton (`git stash`, `git reset`) |
 
 For a bash command outside the allowlist, the refusal text carries the detected pnpm store path — the model can see it and report it together with "what the parent agent wants to write". The extension only detects it; it does not allow it automatically.
 
-**Scratch files in the working directory are not writable by default.** Because `bash.writable` grants the write scope and not the working directory, a tool that drops artefacts next to the code — a coverage report, `.cache`, updated snapshots, or a plain `echo x > tmp.txt` — fails with `Permission denied`. That is deliberate: otherwise `lib/a > lib/b` would walk straight around a directory the subagent may read but not write. Name the location instead of widening everything:
+**Build and test artefacts are writable where the project says they belong.** `bash.writable` grants the write scope plus whatever the project itself marks as generated: every directory git ignores. That list is derived, not configured — existing ones are found with `git ls-files --others --ignored --directory`, and directories the project declares but has not created yet (`.gitignore` entries like `coverage/` or `target`) are created on demand, so `cargo test` works the first time. Build caches that live outside the repository (`go`'s, `mypy`'s) go to a persistent `~/.cache` directory through `XDG_CACHE_HOME`; the sandbox's private `/tmp` would make every run recompile.
 
-- the artefact directory goes in `writeScope` if the subagent may also write it by hand (a review writing its report);
+Everything else is still refused. A plain `echo x > tmp.txt` in the working directory, or a tool writing into a directory the project does not ignore, fails with `Permission denied` — deliberately, because otherwise `lib/a > lib/b` would walk straight around a directory the subagent may read but not write. Fix it by naming the location:
+
+- the directory goes in `writeScope` if the subagent may also write it by hand (a review writing its report);
 - it goes in `bash.writablePaths` if only the toolchain needs it;
 - or point the tool at the sandbox's private `/tmp`, which is already writable, through `bash.env`: `"env": { "COVERAGE_DIR": "/tmp/coverage" }`.
 
-If a test or build writes into the repository and you did not ask it to, treat the refusal as the correct answer rather than as a reason to grant the working directory.
+`bash.scratchPaths` adjusts the derived list: `false` turns it off entirely (a read-only-root sandbox that creates nothing), an array appends explicit directories. Prefer fixing the project's `.gitignore` over listing directories here — a directory the project does not ignore is one it does not consider generated.
 
 Entries come in two forms:
 

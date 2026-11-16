@@ -9,7 +9,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
-import { tmpdir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -1422,6 +1422,170 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.ok(!spec.write.includes(workdir), `the working directory is not granted wholesale, got: ${spec.write.join(", ")}`)
   h.restore()
   console.log("  ok   bash 可写面跟随 writeScope，读范围不自动变可写")
+}
+
+// 47. Build/test artefact directories come from the project's own declaration.
+{
+  const repo = join(workdir, "scratchrepo")
+  mkdirSync(join(repo, "src"), { recursive: true })
+  const git = (args) => spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } })
+  git(["init", "-q"])
+  writeFileSync(
+    join(repo, ".gitignore"),
+    ["coverage/", "target", "dist/", ".next/", "*.log"].join("\n"),
+  )
+  writeFileSync(join(repo, "src", "a.ts"), "x\n")
+  // dist/ already exists and is ignored; coverage/ and target/ do not exist yet.
+  mkdirSync(join(repo, "dist"), { recursive: true })
+  writeFileSync(join(repo, "dist", "b.js"), "y\n")
+  git(["add", ".gitignore", "src"])
+
+  const bindings = (extra) =>
+    JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"], writable: true, ...extra } } })
+
+  const h = await handler({ cwd: repo, bindings: bindings({}) })
+  const input = { command: "pnpm test" }
+  assert.equal(await h.call("bash", input), undefined, "the listed command passes")
+  const spec = specOf(input.command)
+  const granted = (dir) => spec.write.some((d) => d.endsWith(`/${dir}`))
+
+  assert.ok(granted("dist"), `an existing ignored directory is writable, got: ${spec.write.join(", ")}`)
+  assert.ok(granted("coverage"), `a declared but not-yet-created directory is writable, got: ${spec.write.join(", ")}`)
+  assert.ok(granted("target"), `a declaration without a trailing slash is read as a directory, got: ${spec.write.join(", ")}`)
+  assert.ok(granted(".next"), `.next is granted too, got: ${spec.write.join(", ")}`)
+  assert.ok(existsSync(join(repo, "coverage")), "the missing directory is created, so the first run works")
+  assert.ok(existsSync(join(repo, "target")), "and so is target")
+  assert.match(
+    spec.env.XDG_CACHE_HOME ?? "",
+    /pi-subagent-extend\/xdg-cache$/,
+    "build caches go to a persistent directory instead of the per-call tmpfs",
+  )
+  h.restore()
+
+  // 显式关闭：内置清单不参与，也绝不创建目录。
+  const off = await handler({ cwd: repo, bindings: bindings({ scratchPaths: false }) })
+  const offInput = { command: "pnpm test" }
+  assert.equal(await off.call("bash", offInput), undefined, "the command still passes")
+  const offSpec = specOf(offInput.command)
+  assert.ok(
+    !offSpec.write.some((d) => d.endsWith("/.next")),
+    `scratchPaths: false disables the built-in list, got: ${offSpec.write.join(", ")}`,
+  )
+  off.restore()
+
+  // 追加：显式条目照样创建并放行。
+  const extra = await handler({ cwd: repo, bindings: bindings({ scratchPaths: ["out/generated"] }) })
+  const extraInput = { command: "pnpm test" }
+  assert.equal(await extra.call("bash", extraInput), undefined, "the command passes with extras")
+  const extraSpec = specOf(extraInput.command)
+  assert.ok(
+    extraSpec.write.some((d) => d.endsWith("/out/generated")),
+    `an explicit scratch path is granted, got: ${extraSpec.write.join(", ")}`,
+  )
+  assert.ok(existsSync(join(repo, "out", "generated")), "and created")
+  extra.restore()
+  console.log("  ok   产物目录由项目自己声明（git 忽略），可按需关闭或追加")
+}
+
+// 48. /permission reports the artefact directories without creating them.
+{
+  const repo = join(workdir, "probeonly")
+  mkdirSync(join(repo, "src"), { recursive: true })
+  spawnSync("git", ["init", "-q"], { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } })
+  writeFileSync(join(repo, ".gitignore"), "coverage/\n")
+  writeFileSync(join(repo, "src", "a.ts"), "x\n")
+
+  const h = await handler({
+    cwd: repo,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm test"], writable: true } },
+    }),
+  })
+  const notified = []
+  await h.commands["permission"].handler("", { cwd: repo, ui: { notify: (m) => notified.push(m) } })
+  const text = notified.join("\n")
+  assert.match(text, /coverage/, "the command lists the artefact directory")
+  assert.equal(existsSync(join(repo, "coverage")), false, "but looking at the policy does not create it")
+  h.restore()
+  console.log("  ok   /permission 只报告产物目录，不创建")
+}
+
+// 49. A real toolchain can write its own artefacts through the rewritten command.
+// Guards: a real sandbox on this kernel, and the toolchain installed.
+{
+  const liveSandbox = described?.landlock?.supported === true
+  const have = (bin) => spawnSync("sh", ["-c", `command -v ${bin}`], { encoding: "utf8" }).status === 0
+  const gitEnv = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@t",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@t",
+  }
+
+  const runLive = async (dir, bindings, command) => {
+    const h = await handler({ cwd: dir, bindings })
+    const input = { command }
+    assert.equal(await h.call("bash", input), undefined, `${command} is allowlisted`)
+    const rewritten = input.command
+    h.restore()
+    if (!liveSandbox) return undefined
+    return spawnSync("/bin/sh", ["-c", rewritten], { cwd: dir, encoding: "utf8", env: gitEnv })
+  }
+
+  // Rust: `target/` does not exist yet, so the extension has to create and grant it.
+  if (have("cargo")) {
+    const dir = join(workdir, "live-rust")
+    mkdirSync(join(dir, "src"), { recursive: true })
+    spawnSync("git", ["init", "-q"], { cwd: dir, env: gitEnv })
+    writeFileSync(join(dir, ".gitignore"), "target/\n")
+    writeFileSync(join(dir, "Cargo.toml"), '[package]\nname="x"\nversion="0.1.0"\nedition="2021"\n')
+    writeFileSync(join(dir, "src", "lib.rs"), "pub fn add(a:i32,b:i32)->i32{a+b}\n#[test]\nfn t(){assert_eq!(add(1,2),3);}\n")
+    spawnSync("git", ["add", "-A"], { cwd: dir, env: gitEnv })
+    const out = await runLive(
+      dir,
+      JSON.stringify({
+        "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["cargo test"], writable: true } },
+      }),
+      "cargo test --offline",
+    )
+    if (out) {
+      assert.equal(out.status, 0, `sandboxed cargo test failed: ${out.stderr}`)
+      assert.ok(existsSync(join(dir, "target")), "cargo wrote target/ inside the sandbox")
+    } else {
+      console.log("  skip  live cargo test: no real sandbox on this kernel")
+    }
+  }
+
+  // Go: writes nothing into the project, so this only proves a real toolchain runs
+  // under the sandbox at all. The cache redirect itself is pinned by the spec
+  // assertion above: it is not about go failing (it tolerates a read-only cache and
+  // reads what the host already has) but about being able to write one — measured
+  // 3.5s cold / 51ms warm with the redirect, against 158ms of read-only reuse.
+  if (have("go")) {
+    const dir = join(workdir, "live-go")
+    mkdirSync(dir, { recursive: true })
+    spawnSync("git", ["init", "-q"], { cwd: dir, env: gitEnv })
+    spawnSync("go", ["mod", "init", "example.com/x"], { cwd: dir, env: gitEnv, encoding: "utf8" })
+    writeFileSync(join(dir, "x.go"), "package x\nfunc Add(a, b int) int { return a + b }\n")
+    writeFileSync(join(dir, "x_test.go"), 'package x\nimport "testing"\nfunc TestAdd(t *testing.T){ if Add(1,2)!=3 { t.Fatal("no") } }\n')
+    spawnSync("git", ["add", "-A"], { cwd: dir, env: gitEnv })
+    const out = await runLive(
+      dir,
+      JSON.stringify({
+        "pi-subagent-extend/1": { scope: ["*.go"], bash: { write: ["go test"], writable: true } },
+      }),
+      "go test ./...",
+    )
+    if (out) {
+      assert.equal(out.status, 0, `sandboxed go test failed: ${out.stderr}`)
+      assert.ok(existsSync(join(homedir(), ".cache", "pi-subagent-extend", "xdg-cache")), "the build cache lives in ~/.cache")
+    } else {
+      console.log("  skip  live go test: no real sandbox on this kernel")
+    }
+  }
+  console.log("  ok   真实工具链在沙箱里能写出自己的产物（cargo target/、go build cache）")
 }
 
 rmSync(workdir, { recursive: true, force: true })

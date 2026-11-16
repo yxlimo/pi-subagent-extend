@@ -29,6 +29,11 @@ export interface BashRule {
 	/** 注入到沙箱里的环境变量（写进 spec 的 env 字段）。 */
 	env: Record<string, string>;
 	/**
+	 * 项目内构建/测试产物目录。默认按工具链 marker 判断后放行（并创建），
+	 * `false` 关闭整份内置清单，数组在内置清单之上追加。
+	 */
+	scratchPaths: string[] | false;
+	/**
 	 * 结构性禁掉的命令，**不可被 bindings 放宽**。来自项目 profile 的 bash.deny，
 	 * 与调用方写的 read/write 取并集：即便调用方把同一条命令列进白名单也进不来。
 	 */
@@ -130,6 +135,7 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 		writable: cfg.writable === true,
 		writablePaths: stringList(cfg.writablePaths),
 		env: stringMap(cfg.env),
+		scratchPaths: cfg.scratchPaths === false ? false : stringList(cfg.scratchPaths),
 		gitExcludes: cfg.gitExcludes !== false,
 		deny: stringList(cfg.deny),
 	};
