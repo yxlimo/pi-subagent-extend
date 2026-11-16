@@ -11,6 +11,7 @@
  *   所以这里不按文案猜，而是拿事实比对：从失败行里取路径，与这次命令的**可写清单**
  *   （spec.write，父代理授权出来的那份）比较。路径不在清单里、而宿主侧**读得到**它
  *   （沙箱不限制读，所以读得到的文件只可能是被拒了写），才判定为「授权问题」。
+ *   `*.lock` 例外：那是 git 自己的锁文件习惯，命令往往照样成功，不当授权问题上报。
  *
  * 文本面向模型、英文、一句话：它嵌在失败结果后面。
  */
@@ -48,6 +49,20 @@ const REFUSAL = /\bEACCES\b|\bEPERM\b|permission denied|operation not permitted/
 const PATH_IN_LINE = /(?:'|"|`)?(\/[^\s'"`:;,)]*)/g
 
 /**
+ * git 的锁文件：`index.lock`、`packed-refs.lock` 这类「先写锁、再改名」的临时文件。
+ *
+ * 沙箱里的 git 会去建它用不到的锁：linked worktree 的 common dir 只授权了
+ * objects/refs/logs，于是每次提交都打一行 `error: Unable to create
+ * '<common>/packed-refs.lock': Permission denied`（退出码 0，commit 照旧落地 —— ref 写成
+ * 松散 ref，packed-refs 留旧值，下次 gc 自会收拾）。那行不是子代理写错了地方，把它当成
+ * 「授权不够，去要 writablePaths」上报比漏提示更有害：父代理会去放宽一份本来正确的授权。
+ * 所以锁文件一律不注解。
+ */
+function isLockFile(path: string): boolean {
+	return path.endsWith(".lock")
+}
+
+/**
  * 补在网络失败结果后面的提示；不该补时返回 undefined。
  *
  * @param text bash 工具结果的纯文本
@@ -81,6 +96,7 @@ function firstRefusedOutside(text: string, roots: string[], cwd: string): string
 	for (const line of text.split("\n")) {
 		if (!REFUSAL.test(line)) continue
 		for (const raw of pathsIn(line)) {
+			if (isLockFile(raw)) continue
 			const target = candidate(raw, cwd)
 			if (!target || seen.has(target)) continue
 			seen.add(target)

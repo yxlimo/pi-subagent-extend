@@ -76,7 +76,7 @@ subagent(
 | `maxWriteDenies` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
 | `probe` | `object \| boolean` | Circles-and-collisions detection; see [probes](docs/architecture.md#probes). |
 | `bash.read` / `bash.write` | `string[]` | Commands allowed to only read or to write, matched per token as a prefix, or `re:` regexes. |
-| `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directory and `node_modules` are added, so `git add`/`commit` and an install work. |
+| `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directories and `node_modules` are added, so `git add`/`commit` and an install work. Only scope entries that cover a whole subtree open a directory; file-level entries open just the files they match. In a linked worktree git's grant excludes `.git/hooks` and `.git/config`; in a plain checkout it cannot. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
@@ -129,4 +129,8 @@ cannot be parsed reliably.
 
 The extension is not a sandbox against malicious code. A subagent inherits the parent's
 environment and credentials, so this guards against a subagent overstepping its task, not against
-an adversary. Genuinely untrusted input needs container-level isolation.
+an adversary. Genuinely untrusted input needs container-level isolation. One concrete limit follows
+from Landlock: in a **plain checkout** the sandbox is granted `.git` whole, because the index and
+`HEAD` lock files are created there and a directory cannot be granted without its `hooks/` and
+`config` — so a subagent working directly in a checkout can plant a hook the parent would later run.
+In a linked worktree it cannot, which is why delegated work runs in one.

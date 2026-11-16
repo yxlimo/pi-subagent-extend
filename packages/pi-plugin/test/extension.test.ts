@@ -117,9 +117,9 @@ async function handler({ bindings, cwd = workdir, profile, profileFile }: Handle
 
   const call = async (toolName: string, input?: Record<string, unknown>): Promise<Outcome> =>
     (await handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx)) as Outcome
-  const result = async (toolName: string, content: unknown): Promise<PatchedResult | undefined> =>
+  const result = async (toolName: string, content: unknown, isError = false): Promise<PatchedResult | undefined> =>
     (await handlers.tool_result?.(
-      { type: "tool_result", toolCallId: "t1", toolName, input: {}, content, isError: false },
+      { type: "tool_result", toolCallId: "t1", toolName, input: {}, content, isError },
       ctx,
     )) as PatchedResult | undefined
   const context = async (messages: unknown[]): Promise<AnnotatedMessages | undefined> =>
@@ -1031,10 +1031,12 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   撞权限缺省 5：第 5 次 warn（点名求援），第 6 次硬停")
 }
 
-// 36. linked worktree：git 的索引与 ref 在主仓 .git 里，那里必须可写。
-//     Lab 实测（Lab/git-worktree/probe.sh）：只给 worktree 时 `git add`/`commit`/`stash`/
-//     `switch -c` 全失败在 <common>/worktrees/<id>/index.lock 或 <common>/refs 上，
-//     加上 common dir 才通。
+// 36. linked worktree：索引与 HEAD 在 worktree 自己的 gitdir 里，ref 与对象在主仓 common dir
+//     的 refs / objects / logs 里，两处都得给；hooks 与 config 长在 common dir 根上，所以那里
+//     不整目录授权（整目录授权 = 子代理能植入 hook 或改 core.hooksPath，之后以父代理身份执行）。
+//     Lab 实测：只给 worktree 时 `git add`/`commit`/`stash`/`switch -c` 全失败在
+//     <common>/worktrees/<id>/index.lock 上；再逐个去掉 common 的三个子目录，分别在对象库、
+//     ref 锁、reflog 上失败 —— 四个路径都有具体命令在使用。
 {
   const gitOk = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0
   if (!gitOk) {
@@ -1074,11 +1076,27 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     const h = await handler({ cwd: wtDir, bindings: bindings(true) })
     const input = { command: "git status" }
     assert.equal(await h.call("bash", input), undefined, "a writable sandbox passes the listed command")
+    const gitDir = spawnSync("git", ["rev-parse", "--absolute-git-dir"], { cwd: wtDir, encoding: "utf8", env: gitEnv }).stdout.trim()
+    // .git 是文件时 rev-parse 给的是 worktree 自己的 gitdir，不是主仓 common dir。
+    assert.match(gitDir, /\/worktrees\/[^/]+$/, `the worktree has its own gitdir, got: ${gitDir}`)
     const spec = specOf(input.command)
     assert.ok(
-      spec.write.includes(commonDir),
-      `the linked worktree's common git dir is writable, got: ${spec.write.join(", ")}`,
+      spec.write.includes(gitDir),
+      `the worktree's own gitdir is writable (index.lock / HEAD.lock land there), got: ${spec.write.join(", ")}`,
     )
+    for (const name of ["objects", "refs", "logs"]) {
+      assert.ok(
+        spec.write.includes(join(commonDir, name)),
+        `the common ${name} directory is writable, got: ${spec.write.join(", ")}`,
+      )
+    }
+    assert.equal(
+      spec.write.includes(commonDir),
+      false,
+      `the common git dir is not granted wholesale — that is what opens hooks/ and config, got: ${spec.write.join(", ")}`,
+    )
+    assert.equal(spec.write.includes(join(commonDir, "hooks")), false, "hooks stay out of the grant")
+    assert.equal(spec.write.includes(join(commonDir, "config")), false, "the repository config stays out of the grant")
     assert.ok(!spec.write.some((d) => d === join(repoDir, "a.txt")), "the main working tree is not granted")
     h.restore()
 
@@ -1124,7 +1142,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "a normal repository gets its .git granted",
     )
     plain.restore()
-    console.log("  ok   linked worktree 的 common dir 可写；只读沙箱不给；普通仓只给 .git")
+    console.log("  ok   linked worktree 给 gitdir 与 common 的 objects/refs/logs，hooks/config 不给；只读沙箱全不给；普通仓只给 .git")
   }
 }
 
@@ -1251,7 +1269,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     // 建得出网络命名空间时报 ENETUNREACH；建不出来时由 Landlock 兜底，报连接 EACCES。
     assert.match(output, /ENETUNREACH|EACCES/u, "the command really fails on the network")
 
-    const noted = await offlineHandler.result("bash", output)
+    const noted = await offlineHandler.result("bash", output, true)
     // 字符串 content 会被拼成字符串，parts 数组则多一个 text part；两种形状都取尾部。
     const note = typeof noted?.content === "string" ? noted.content : (noted?.content?.at(-1)?.text ?? "")
     assert.match(note, /\[sandbox\]/u, "the failure is annotated so it can be recognised")
@@ -1327,7 +1345,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     assert.match(`${outExec.stdout}${outExec.stderr}`, /EACCES|Permission denied/u, "the write really is refused")
     assert.equal(existsSync(outsidePath), false, "nothing was written outside the grant")
 
-    const outNote = await h.result("bash", `${outExec.stdout}${outExec.stderr}`)
+    const outNote = await h.result("bash", `${outExec.stdout}${outExec.stderr}`, true)
     const note = typeof outNote?.content === "string" ? outNote.content : (outNote?.content?.at(-1)?.text ?? "")
     assert.match(note, /\[sandbox\]/u, "the refusal is annotated")
     assert.ok(note.includes(outsidePath), "the note names the path that was refused")
@@ -1466,7 +1484,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 46. bash writable dirs follow writeScope, not the read scope.
 {
-  // 两个目录都要真实存在：writableDirs 只收录存在的目录，不存在的话「不给」不算证据。
+  // 两个目录都要真实存在：writablePaths 只收录存在的路径，不存在的话「不给」不算证据。
   mkdirSync(join(workdir, "src"), { recursive: true })
   mkdirSync(join(workdir, "lib"), { recursive: true })
   const h = await handler({
@@ -1831,6 +1849,190 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   打转判据把写活动算作进展；无改动的原地重复照旧拦截")
 }
 
+// 54. git 的 hooks 与 config 不能让沙箱子进程写。植入一个 hook、或把 core.hooksPath 改到别处，
+//     都会在父代理之后于这个 checkout 里跑 git 时以父代理身份执行 —— 这是从「能写 git 目录」
+//     到手「以父代理身份执行」的一步。linked worktree 里 hooks/config 长在 common dir 根上，
+//     而 git 真正要写的只有 worktree 自己的 gitdir 与 common 的 objects/refs/logs，所以那两处
+//     必须留在授权之外，同时 git add 仍然要能成功。
+{
+  const gitOk = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0
+  if (!gitOk) {
+    console.log("  skip  git hooks are out of reach（环境里没有 git）")
+  } else {
+    // 仓库不能放在 tmpdir() 下：spec.write 天然包含 tmpdir()，那里什么都能写，「写不进去」
+    // 就永远测不出来。放在项目目录下的临时目录里，跑完删掉。
+    const outside = mkdtempSync(join(repo, ".test-git-hooks-"))
+    try {
+      const repoDir = join(outside, "repo")
+      const wtDir = join(outside, "wt")
+      mkdirSync(repoDir, { recursive: true })
+      const gitEnv = {
+        ...process.env,
+        HOME: outside,
+        GIT_CONFIG_GLOBAL: join(outside, "gitconfig"),
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.com",
+      }
+      const git = (...args: string[]): string => {
+        const r = spawnSync("git", args, { cwd: repoDir, encoding: "utf8", env: gitEnv })
+        assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stderr}`)
+        return r.stdout.trim()
+      }
+      git("init", "-q", "-b", "main")
+      writeFileSync(join(repoDir, "a.txt"), "one\n")
+      git("add", "-A")
+      git("commit", "-qm", "init")
+      git("worktree", "add", "-q", wtDir, "-b", "wtbranch")
+      let commonDir = spawnSync("git", ["rev-parse", "--git-common-dir"], { cwd: wtDir, encoding: "utf8", env: gitEnv }).stdout.trim()
+      if (!commonDir.startsWith("/")) commonDir = join(wtDir, commonDir)
+      const hookPath = join(commonDir, "hooks", "pre-commit")
+      const configPath = join(commonDir, "config")
+      const configBefore = readFileSync(configPath, "utf8")
+      writeFileSync(join(wtDir, "b.txt"), "two\n")
+
+      // 正控目标单独放在一个只属于它的子目录里：这条用例要钉的是 git 的授权面，
+      // 所以写授权用一份两个版本都认的写法（纯路径 → 目录本身），不靠 `**` 的解析。
+      const plantedDir = join(wtDir, "planted")
+      mkdirSync(plantedDir, { recursive: true })
+      const planted = join(plantedDir, "planted.txt")
+      writeFileSync(join(wtDir, "write.sh"), "#!/bin/sh\nprintf 'x\\n' > \"$1\"\n")
+      const h = await handler({
+        cwd: wtDir,
+        bindings: JSON.stringify({
+          "pi-subagent-extend/1": {
+            scope: ["**"],
+            writeScope: ["planted"],
+            bash: { write: ["git add b.txt", "sh write.sh"], writable: true },
+          },
+        }),
+      })
+      // spec 按 toolCallId 存，所以每条命令都要各自经过一次 tool_call。
+      const sandboxed = async (command: string): Promise<string> => {
+        const input = { command }
+        assert.equal(await h.call("bash", input), undefined, `allowlisted: ${command}`)
+        return input.command
+      }
+      const addCommand = await sandboxed("git add b.txt")
+      const controlCommand = await sandboxed(`sh write.sh ${planted}`)
+      const hookCommand = await sandboxed(`sh write.sh ${hookPath}`)
+      const configCommand = await sandboxed(`sh write.sh ${configPath}`)
+      h.restore()
+
+      // 授权面：hooks 与 config 都不在清单里（否则下面的真实执行只是在验证另一个事实）。
+      const spec = specOf(addCommand)
+      assert.equal(spec.write.includes(join(commonDir, "hooks")), false, `hooks are outside the grant, got: ${spec.write.join(", ")}`)
+      assert.equal(spec.write.includes(configPath), false, `config is outside the grant, got: ${spec.write.join(", ")}`)
+
+      if (liveSandbox) {
+        const add = spawnSync("/bin/sh", ["-c", addCommand], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+        assert.equal(add.status, 0, `sandboxed git add failed: ${add.stderr}`)
+        const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+        assert.match(staged.stdout, /b\.txt/, "the file is really staged inside the sandbox")
+
+        // 正控：同一份脚本在授权目录里写得进去。
+        const control = spawnSync("/bin/sh", ["-c", controlCommand], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+        assert.equal(control.status, 0, `the same script writes inside its granted directory: ${control.stderr}`)
+        assert.ok(existsSync(planted), "the positive control really wrote its file")
+
+        const hook = spawnSync("/bin/sh", ["-c", hookCommand], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+        assert.notEqual(hook.status, 0, "planting a hook is refused by the kernel")
+        assert.match(`${hook.stdout}${hook.stderr}`, /permission denied/i, "the refusal is a permission denial")
+        assert.equal(existsSync(hookPath), false, "no hook file was created")
+
+        const config = spawnSync("/bin/sh", ["-c", configCommand], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+        assert.notEqual(config.status, 0, "rewriting the repository config is refused")
+        assert.equal(readFileSync(configPath, "utf8"), configBefore, "the config is byte-for-byte unchanged")
+      } else {
+        console.log("  skip  live git hooks/config: no real sandbox on this kernel")
+      }
+      console.log("  ok   沙箱写不进 worktree 的 .git/hooks 与 config，git add 仍成功")
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  }
+}
+
+// 55. 文件级 glob 不能把父目录整片打开：旧做法在第一个通配符处截断，于是
+//     writeScope ["src/auth/*.ts"] 让整个 src/auth/ 对 bash 可写，["src/*/index.ts"] 让 src/ 可写。
+//     Landlock 只能正向授权，所以「授权目录」必须恰好等于「这条 glob 覆盖的范围」：文件级写法
+//     展开成实际存在的文件，只有覆盖整棵子树的写法（dir、dir/**）才授权目录本身。
+{
+  const outside = mkdtempSync(join(repo, ".test-glob-scope-"))
+  try {
+    const authDir = join(outside, "src", "auth")
+    const matched = join(authDir, "session.ts")
+    const sibling = join(authDir, "notes.md")
+    const deepIndex = join(authDir, "index.ts")
+    mkdirSync(authDir, { recursive: true })
+    writeFileSync(matched, "export {}\n")
+    writeFileSync(sibling, "notes\n")
+    writeFileSync(deepIndex, "export {}\n")
+    writeFileSync(join(outside, "write.sh"), "#!/bin/sh\nprintf 'w\\n' > \"$1\"\n")
+
+    const bindingsFor = (writeScope: string[]): string =>
+      JSON.stringify({
+        "pi-subagent-extend/1": { scope: ["src/**"], writeScope, bash: { write: ["sh write.sh"], writable: true } },
+      })
+    const sandboxed = async (h: Harness, command: string): Promise<string> => {
+      const input = { command }
+      assert.equal(await h.call("bash", input), undefined, `allowlisted: ${command}`)
+      return input.command
+    }
+
+    // 文件级 glob：只授权匹配到的文件。
+    // spec 文件按 pid 共用，每次 tool_call 覆写一次，所以「取 spec」与「真实执行」都要紧跟在
+    // 自己那次调用后面 —— 否则拿到的是下一个激活的授权，测的就不是这件事了。
+    const fileScoped = await handler({ cwd: outside, bindings: bindingsFor(["src/auth/*.ts"]) })
+    const matchedCommand = await sandboxed(fileScoped, `sh write.sh ${matched}`)
+    const spec = specOf(matchedCommand)
+    const siblingCommand = await sandboxed(fileScoped, `sh write.sh ${sibling}`)
+    if (liveSandbox) {
+      const write = spawnSync("/bin/sh", ["-c", matchedCommand], { cwd: outside, encoding: "utf8" })
+      assert.equal(write.status, 0, `the matched file is writable: ${write.stderr}`)
+      assert.equal(readFileSync(matched, "utf8"), "w\n", "the write really landed on the matched file")
+
+      const blocked = spawnSync("/bin/sh", ["-c", siblingCommand], { cwd: outside, encoding: "utf8" })
+      assert.notEqual(blocked.status, 0, "a sibling the glob does not match is refused")
+      assert.equal(readFileSync(sibling, "utf8"), "notes\n", "and left untouched")
+    } else {
+      console.log("  skip  live file-glob writes: no real sandbox on this kernel")
+    }
+    fileScoped.restore()
+    assert.equal(spec.write.includes(authDir), false, `the whole src/auth directory is not granted, got: ${spec.write.join(", ")}`)
+    assert.equal(spec.write.includes(matched), true, `the file the glob matches is granted, got: ${spec.write.join(", ")}`)
+    assert.equal(spec.write.includes(sibling), false, `a sibling the glob does not match is not granted, got: ${spec.write.join(", ")}`)
+
+    // 通配符在中间层：同样不能把 src/ 打开。
+    const midScoped = await handler({ cwd: outside, bindings: bindingsFor(["src/*/index.ts"]) })
+    const midCommand = await sandboxed(midScoped, `sh write.sh ${deepIndex}`)
+    const midSpec = specOf(midCommand)
+    midScoped.restore()
+    assert.equal(midSpec.write.includes(join(outside, "src")), false, `the whole src directory is not granted, got: ${midSpec.write.join(", ")}`)
+    assert.equal(midSpec.write.includes(deepIndex), true, `the nested file the glob matches is granted, got: ${midSpec.write.join(", ")}`)
+
+    // 整棵子树写法照旧授权目录本身：不然新建文件就没法写。
+    const subtreeScoped = await handler({ cwd: outside, bindings: bindingsFor(["src/**"]) })
+    const fresh = join(authDir, "brand-new.ts")
+    const freshCommand = await sandboxed(subtreeScoped, `sh write.sh ${fresh}`)
+    const subtreeSpec = specOf(freshCommand)
+    if (liveSandbox) {
+      const create = spawnSync("/bin/sh", ["-c", freshCommand], { cwd: outside, encoding: "utf8" })
+      assert.equal(create.status, 0, `a new file under a subtree glob is writable: ${create.stderr}`)
+      assert.ok(existsSync(fresh), "the new file really landed")
+    }
+    subtreeScoped.restore()
+    assert.equal(subtreeSpec.write.includes(join(outside, "src")), true, "a subtree glob grants the directory itself")
+    assert.equal(subtreeSpec.write.includes(sibling), false, "and it is the only thing that grants a directory")
+    console.log("  ok   文件级 glob 只授权匹配到的文件，子树 glob 仍授权目录（新建文件可用）")
+  } finally {
+    rmSync(outside, { recursive: true, force: true })
+  }
+}
+
+
 // 58. A temporary directory outside /tmp has to be privatized, not just granted. The
 // extension used to grant os.tmpdir() while the helper only ever mounted a tmpfs on the
 // hard-coded /tmp, so a host with TMPDIR set elsewhere got a directory that was writable
@@ -1921,6 +2123,87 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(two?.reason ?? "", /Write refusal 2 in a row/, "the second refusal warns on the write budget")
   narrow.restore()
   console.log("  ok   readOnly 的写拒走写预算：第 2 次 warn（指向报告）、第 3 次硬停")
+}
+
+// 60. git 会去建它其实用不到的锁文件。linked worktree 的 common dir 只授权 objects/refs/logs，
+//     于是每次提交都打一行 `error: Unable to create '<common>/packed-refs.lock': Permission denied`
+//     —— 退出码 0，commit 照样落地（ref 写成松散 ref，packed-refs 留旧值，下次 gc 收拾）。
+//     把这行注解成「授权不够，去要 writablePaths」比漏提示更有害：父代理会去放宽一份正确的授权。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git commit"], writable: true } },
+    }),
+  })
+  // 授权外的路径不能用 /tmp 下的：spec.write 天然包含 tmpdir()，那里会被判成「授权内」，
+  // 这样「不注解」就会因为错误的原因通过。
+  const lock = `/var/tmp/pi-extend-${process.pid}/packed-refs.lock`
+  const input = { command: "git commit -m x" }
+  assert.equal(await h.call("bash", input), undefined, "git commit is allowlisted")
+  const outcome = await h.result("bash", `error: Unable to create '${lock}': Permission denied`, true)
+  assert.equal(outcome, undefined, "a git lock-file probe is not annotated as an out-of-scope write")
+  h.restore()
+  console.log("  ok   git 的锁文件探测（.lock）不被当成越界写上报")
+}
+
+// 61. 上一条只放过 `.lock` 这一种：同样形状、同样被拒、路径不以 .lock 结尾时仍然要注解，
+//     否则等于把判据放宽成「git 报错就不注解」。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git commit"], writable: true } },
+    }),
+  })
+  const target = `/var/tmp/pi-extend-${process.pid}/hooks/pre-commit`
+  const input = { command: "git commit -m x" }
+  assert.equal(await h.call("bash", input), undefined, "git commit is allowlisted")
+  const outcome = await h.result("bash", `error: Unable to create '${target}': Permission denied`, true)
+  // content 保持传进来的形状：传字符串回来就是字符串，传 parts 数组就是数组末尾多一个 part。
+  const content: unknown = outcome?.content
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.map((part) => (part as { text?: string }).text ?? "").join("\n")
+        : ""
+  assert.match(text, /outside the writes the parent granted/, "a non-lock refusal is still annotated")
+  assert.match(text, /hooks\/pre-commit/, "and the note names the path that was refused")
+  h.restore()
+  console.log("  ok   .lock 之外的拒绝照旧注解，判据没有被放宽成「git 报错就不注解」")
+}
+
+// 62. 注解以「这条命令真的失败了」为前提，不是以输出文本里出现 EACCES 为前提。
+//     实测到的误判：一个子代理跑 `git diff`，diff 正文里含 EACCES 字样，于是它自己那份
+//     正确的改动被追加了「这在授权之外，去要 writablePaths」——成功命令收到失败建议。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git diff", "cat"], writable: true } },
+    }),
+  })
+  const outside = `/var/tmp/pi-extend-${process.pid}/outside.txt`
+  const input = { command: "git diff" }
+  assert.equal(await h.call("bash", input), undefined, "git diff is allowlisted")
+
+  // 一份 diff：正文里出现 EACCES 与一条树外绝对路径，但它只是被打印出来的内容。
+  const diff = `diff --git a/src/a.ts b/src/a.ts\n+  throw new Error("EACCES: permission denied, open '${outside}'");\n`
+  assert.equal(
+    await h.result("bash", diff),
+    undefined,
+    "a successful command whose text merely mentions EACCES is not annotated",
+  )
+
+  // 同一条命令真的失败时，注解照旧出现。spec 表按 toolCallId 记、且在第一个结果回来后就删，
+  // 所以这里要重新 call 一次，否则第二次 result 拿不到这次命令的可写清单。
+  // 必须用新的 input 对象：tool_call 会就地把它改写成沙箱包装命令，复用同一个对象时
+  // 第二次的 command 已经是包装后的字符串，自然不在白名单里（真实调用每次都是新对象）。
+  assert.equal(await h.call("bash", { command: "git diff" }), undefined, "the same command runs again")
+  const failed = await h.result("bash", `touch: cannot touch '${outside}': Permission denied`, true)
+  const content: unknown = failed?.content
+  const text = typeof content === "string" ? content : ((content as { text: string }[] | undefined)?.at(-1)?.text ?? "")
+  assert.match(text, /outside the writes the parent granted/, "a real refusal is still annotated")
+  h.restore()
+  console.log("  ok   注解只在命令真的失败时出现：输出正文里的 EACCES 不触发")
 }
 
 rmSync(workdir, { recursive: true, force: true })

@@ -108,7 +108,7 @@ export interface AnnotatedMessages {
 /** What `handler()` returns: the activated extension, callable from a test. */
 export interface Harness {
 	call(toolName: string, input?: Record<string, unknown>): Promise<Outcome>
-	result(toolName: string, content: unknown): Promise<PatchedResult | undefined>
+	result(toolName: string, content: unknown, isError?: boolean): Promise<PatchedResult | undefined>
 	context(messages: unknown[]): Promise<AnnotatedMessages | undefined>
 	aborts: string[]
 	ui: string[]

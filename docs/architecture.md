@@ -75,9 +75,29 @@ Keeping the third layer separate is not tidiness. A `git commit` inside a worktr
 main checkout's `.git/objects`, which has to be granted — and `.git` must never appear in the write
 scope, because that is what opens repository metadata to hand editing.
 
-With `bash.writable`, the sandbox is therefore given the write scope plus git's own directory and
-`node_modules`, not the working directory wholesale. A subagent that may read `lib/` but not write
-it cannot route around the rule with a shell redirect.
+With `bash.writable`, the sandbox is therefore given what the write scope covers plus git's own
+directories and `node_modules`, not the working directory wholesale. A subagent that may read `lib/`
+but not write it cannot route around the rule with a shell redirect.
+
+What "covers" means is decided by the glob, because Landlock can only grant and a rule on a
+directory grants everything beneath it. An entry that covers a whole subtree (`dir`, `dir/**`) opens
+that directory; a file-level entry (`src/auth/*.ts`, `src/*/index.ts`) is expanded into the files it
+matches, each granted as a file, so the parent directory stays read-only. Truncating at the first
+wildcard instead — the earlier behaviour — handed the sandbox all of `src/auth/` for
+`src/auth/*.ts`, which is wider than what `edit`/`write` may touch and defeats the point of a narrow
+write scope. The price is stated rather than hidden: under a file-level entry a file that does not
+exist yet cannot be created through bash, because creating it needs a directory grant; `write` still
+creates it, and `dir/**` grants the directory when bash has to produce new files.
+
+Git is the same question with a sharper edge, since `.git/hooks` and `.git/config` are code the
+parent will later run. In a linked worktree the grants are the worktree's own gitdir (whole: the
+index and HEAD locks are created there) plus `objects`, `refs` and `logs` of the common directory —
+measured one at a time, each is what a specific command needs and nothing else, and neither `hooks`
+nor `config` is among them. In a plain checkout the gitdir and the common directory are the same
+directory, `index.lock` has to be created in `.git` itself, and Landlock cannot grant that directory
+without granting `hooks/` and `config` with it: there `.git` is granted whole, and a subagent can
+plant a hook. That is a limit of the mechanism, so it is documented rather than papered over — use a
+worktree when the difference matters, which is the normal arrangement for delegated work here.
 
 Build and test artefacts are the exception that makes this usable, and which ones they are follows
 from what the project is built with. `bash.writable` grants the artefact directories of every
@@ -177,7 +197,10 @@ Refusals are written for the model that reads them: short, and saying what would
 ## What a refusal adds
 
 Two annotations are appended to a `bash` result, both to stop an agent from retrying something
-that cannot start working.
+that cannot start working. Both apply **only when the command actually failed** — the tool result's
+`isError` is the gate, not the text of the output. Without that gate a successful command whose
+*output* mentions `EACCES` is annotated: measured on a subagent running `git diff`, whose own patch
+contained such a string and came back carrying "this is outside the writes the parent granted".
 
 **Network.** When the command ran offline and failed on the network (`ENETUNREACH`, `EAI_AGAIN`,
 `ENOTFOUND`, a resolve failure), a one-line `[sandbox]` note says the network is off per the
@@ -191,7 +214,10 @@ the extension keeps the `write` list of the spec the command ran under, takes th
 refusal line, and annotates only when that path is outside the list **and** the host can read it.
 A readable path that Landlock refused cannot have been refused for reading, since reads are
 unrestricted — that is what keeps `cat /etc/shadow: Permission denied` from being blamed on the
-sandbox. Unresolvable cases stay silent rather than guess.
+sandbox. Unresolvable cases stay silent rather than guess. Paths ending in `.lock` are skipped as
+well: in a worktree the common directory only grants `objects`, `refs` and `logs`, so git prints
+`Unable to create '…/packed-refs.lock': Permission denied` on every commit while exiting 0 and
+committing anyway — annotating it would send the parent to widen a grant that is correct.
 
 Neither note counts toward the denial budget, triggers a stop, or consumes the read budget: they
 explain a result that already happened.

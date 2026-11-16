@@ -27,8 +27,8 @@
  * - bash：默认拒绝。bindings 里写 bash.allow（命令前缀白名单，如 "pnpm run typecheck"）
  *   后，只有命中白名单的命令放行，并且改写成交给沙箱 helper 执行：读写范围由
  *   Landlock 强制（内核 ABI 7 起），网络默认断（bash.network 可开）：断网时连
- *   UDP/DNS 一起断，靠私有网络命名空间 + 盖掉解析器套接字；可写目录只有 scope
- *   （bash.writable 时）与 bash.writablePaths，防止用 shell 绕过范围去改文件
+ *   UDP/DNS 一起断，靠私有网络命名空间 + 盖掉解析器套接字；可写面只有写范围覆盖到的路径
+ *   （bash.writable 时）、git 真正要写的目录与 bash.writablePaths，防止用 shell 绕过范围去改文件
  * - powershell / codemode：一律拒绝（没有路径可判，能绕过范围）
  * - structured_output 与 allowTools 里列出的工具：放行（执行器类不可放行）
  * - 其余未知工具：拒绝
@@ -39,7 +39,7 @@
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -212,19 +212,27 @@ function globToRegExp(glob: string): RegExp {
 }
 
 /**
+ * scope 写法归一，`compile` 与沙箱可写面共用一份，免得两处对同一个 glob 的理解
+ * 慢慢分叉。两件事：
+ * - 尾斜杠只是目录写法，去掉后再展开，否则 "dir/" 会变成 "dir//**"。
+ * - "." 和 "./" 表示整棵树。不归一的话会编译成 ^\.$ / ^\./.*$，而 matches 比的是
+ *   相对路径 —— 仓库根的相对路径是空串、子文件是 "src/a.ts"，两条都命中不了，
+ *   于是 scope: ["."]（文档里的「读全仓」写法）什么也授权不了。开头的 "./" 同理
+ *   要去掉："." 归一成 "**"（整棵树），"./src" 归一成 "src"。
+ */
+function normalizeGlob(glob: string): string {
+	const raw = glob.length > 1 ? glob.replace(/\/+$/, "") || "/" : glob;
+	return raw === "." ? "**" : raw.replace(/^\.\//, "");
+}
+
+/**
  * 展开目录语义后编译。"dir/**" 额外匹配 "dir" 本身；不含通配符的纯路径额外
  * 匹配 "dir/**"，所以范围写 "src" 就覆盖 src 及其下所有内容。
  */
 function compile(globs: string[]): RegExp[] {
 	const expanded = new Set<string>();
 	for (const glob of globs) {
-		// 尾斜杠只是目录写法，去掉后再展开，否则 "dir/" 会变成 "dir//**"。
-		const raw = glob.length > 1 ? glob.replace(/\/+$/, "") || "/" : glob;
-		// "." 和 "./" 表示整棵树。不归一的话会编译成 ^\.$ / ^\./.*$，而 matches 比的是
-		// 相对路径 —— 仓库根的相对路径是空串、子文件是 "src/a.ts"，两条都命中不了，
-		// 于是 scope: ["."]（文档里的「读全仓」写法）什么也授权不了。
-		// 开头的 "./" 同理要去掉："." 归一成 "**"（整棵树），"./src" 归一成 "src"。
-		const g = raw === "." ? "**" : raw.replace(/^\.\//, "");
+		const g = normalizeGlob(glob);
 		expanded.add(g);
 		if (g.endsWith("/**")) expanded.add(g.slice(0, -3) || "/");
 		else if (!/[*?]/.test(g)) expanded.add(`${g}/**`);
@@ -421,9 +429,37 @@ function isRootish(raw: string, cwd: string): boolean {
  */
 const gitDirsCache = new Map<string, { gitDir: string; common: string } | undefined>();
 /**
+ * git 需要可写的路径。
+ *
+ * 索引、HEAD 与它们的锁文件（`index.lock`、`HEAD.lock`）建在本次 checkout 的 gitdir 根上，
+ * 所以那个目录必须整个授权 —— Landlock 只能正向授权，没有「授权目录但排除 hooks/」的写法。
+ *
+ * 区别在 gitdir 是谁：linked worktree 里它是 `<common>/worktrees/<id>`，里面只有 HEAD /
+ * index / logs / refs，没有 hooks 也没有 config；于是 hooks/config 留在 common dir 里，
+ * 那里只给 git 真正要写的三个子目录，不再整目录授权（否则子代理能植入 hook 或改
+ * core.hooksPath，之后以父代理身份执行）。四个路径全部实测过：少给哪一个都有具体命令
+ * 先失败（per-worktree gitdir → index.lock / HEAD.lock；objects → 对象库；refs → ref 锁；
+ * logs → reflog 追加）。
+ *
+ * 普通 checkout 里 gitdir 与 common 就是同一个目录，hooks、config 和索引挤在一起：只能整
+ * 目录授权。这是 Landlock 的能力边界，不是实现取舍 —— 只给 objects/refs/logs 加根级文件时，
+ * `git add` 第一个死在 `.git/index.lock` 上（实测）。
+ */
+function gitWritablePaths(git: { gitDir: string; common: string }): string[] {
+	if (canonical(git.gitDir) === canonical(git.common)) return [git.gitDir];
+	const paths = [git.gitDir];
+	for (const name of ["objects", "refs", "logs"]) {
+		const abs = resolve(git.common, name);
+		// helper 会拒掉不存在的 spec 路径，所以这里先滤一遍。
+		if (existsSync(abs)) paths.push(abs);
+	}
+	return paths;
+}
+
+/**
  * git 需要可写的两个目录：本次 checkout 的 gitdir，以及（linked worktree 时）主仓的
- * 公共目录。索引与 ref 分别住在两处，只给一个时 git add / commit / stash 会拼在
- * index.lock 上。普通仓两者相同，只需 .git 本身。
+ * 公共目录。索引与 ref 分别住在两处，所以两个都要问出来；具体授权哪几层见
+ * gitWritablePaths。
  */
 function gitDirs(cwd: string): { gitDir: string; common: string } | undefined {
 	const key = resolve(cwd);
@@ -464,17 +500,111 @@ function helperPath(): string | undefined {
 	return undefined;
 }
 
-/** scope 里可写的那几个目录：取每条 glob 的静态前缀，存在才 bind。 */
-function writableDirs(policy: Policy, cwd: string): string[] {
-	const dirs = new Set<string>();
-	// 按写范围派生，不用读范围：bash 的可写面不该比 edit / write 更宽。
-	for (const glob of policy.writeGlobs) {
-		const literal = glob.split(/[*?]/)[0].replace(/\/+$/, "");
-		if (!literal) continue;
-		const abs = resolve(cwd, literal);
-		if (abs !== "/" && existsSync(abs)) dirs.add(abs);
+/**
+ * 整棵子树写法 → 该子树根（相对路径，"" 表示 cwd）。`dir/**`、`**`，以及在 `dir/**`
+ * 后面再跟一层单层通配的写法都算；`dir/*.ts` 不算 —— 它只覆盖一部分，须按文件展开。
+ *
+ * 判据是「第一个通配符段起，剩下的段是否都是 `**`（可带一个收尾的单层 `*`）」：`**`
+ * 能吃任意层，所以 `**` 后面再跟一层单层通配仍然覆盖全部；而以单层通配开头只覆盖一层，
+ * 例如 `dir` 下一层的 `*` 摸不到子目录里的文件，两层倒过来的写法也摸不到 dir 的直接子文件。
+ */
+function subtreeRoot(glob: string): string | undefined {
+	const segments = glob.split("/");
+	const first = segments.findIndex((segment) => /[*?]/.test(segment));
+	if (first === -1) return undefined;
+	const rest = segments.slice(first);
+	if (rest[0] !== "**" || rest.some((segment) => segment !== "**" && segment !== "*")) return undefined;
+	return segments.slice(0, first).join("/");
+}
+
+/** 展开文件级 glob 时的遍历上限：一条 glob 不该把大仓整个走一遍。 */
+const GLOB_WALK_MAX_ENTRIES = 20000;
+
+/**
+ * 文件级 glob 展开成实际存在的文件。
+ *
+ * spec.write 可以列文件，Landlock 对文件路径只授权那个 inode，所以 `src/auth/*.ts`
+ * 只打开它真正匹配到的文件，而不是整个 src/auth/。代价是「还没创建的新文件」不在
+ * 这里 —— 那需要一个目录级的 MAKE_REG，也就等于把整个目录打开。
+ *
+ * 走过的目录用 DETECT_SKIP 同一张跳过表：那是「依赖/产物不往里走」的判据，展开 glob
+ * 与探测清单是同一件事。软链指到树外的不收：Landlock 按目标 inode 授权，收了就等于
+ * 授权树外那个文件。
+ */
+function expandFileGlob(cwd: string, glob: string): string[] {
+	const re = globToRegExp(glob);
+	const base = canonical(cwd);
+	const segments = glob.split("/");
+	const firstWild = segments.findIndex((segment) => /[*?]/.test(segment));
+	// 静态前缀：第一个通配符段之前的那些段。调用方只传带通配符的 glob，prefix 不会等于整条。
+	const prefix = firstWild === -1 ? "" : segments.slice(0, firstWild).join("/");
+	const found: string[] = [];
+	const stack = [resolve(cwd, prefix || ".")];
+	let seen = 0;
+	while (stack.length > 0) {
+		const dir = stack.pop() as string;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			seen += 1;
+			if (seen > GLOB_WALK_MAX_ENTRIES) return found.sort();
+			const abs = resolve(dir, entry.name);
+			const rel = insideTree(base, abs);
+			if (rel === undefined) continue;
+			if (entry.isDirectory()) {
+				if (!DETECT_SKIP.has(entry.name)) stack.push(abs);
+			} else if (entry.isFile() && (re.test(rel) || re.test(abs))) {
+				found.push(abs);
+			}
+		}
 	}
-	return [...dirs];
+	return found.sort();
+}
+
+/**
+ * 目标落在 base 树内就返回它的相对路径，否则 undefined。软链按真实路径判：Landlock
+ * 只授权目标 inode，收了指到树外的软链等于把树外那个文件也开了。
+ */
+function insideTree(base: string, abs: string): string | undefined {
+	const rel = relative(base, canonical(abs));
+	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return undefined;
+	return rel;
+}
+
+/**
+ * 写范围 → 沙箱可写路径。
+ *
+ * 只有覆盖整棵子树的写法（`dir`、`dir/**`）才授权目录本身：授权目录就是授权它下面
+ * 所有东西，而 Landlock 只能正向授权、无法从已授权的目录里再排除子目录，所以「目录
+ * 授权」必须恰好等于「这条 glob 覆盖到的范围」。文件级写法（`src/auth/*.ts`，以及通配符
+ * 在中间层的写法）因此展开成实际存在的文件 —— 旧做法是截到第一个通配符，于是
+ * `src/auth/*.ts` 把整个 src/auth/ 打开，中间层通配则把 src/ 整个打开。
+ */
+function writablePaths(policy: Policy, cwd: string): string[] {
+	const paths = new Set<string>();
+	// 按写范围派生，不用读范围：bash 的可写面不该比 edit / write 更宽。
+	for (const raw of policy.writeGlobs) {
+		const glob = normalizeGlob(raw);
+		if (!glob) continue;
+		const root = subtreeRoot(glob);
+		if (root !== undefined) {
+			const abs = resolve(cwd, root || ".");
+			if (abs !== "/" && existsSync(abs)) paths.add(abs);
+			continue;
+		}
+		if (!/[*?]/.test(glob)) {
+			// 纯路径：是目录就授权整棵子树，是文件就授权该文件。
+			const abs = resolve(cwd, glob);
+			if (abs !== "/" && existsSync(abs)) paths.add(abs);
+			continue;
+		}
+		for (const file of expandFileGlob(cwd, glob)) paths.add(file);
+	}
+	return [...paths];
 }
 
 /**
@@ -513,13 +643,6 @@ function expandPath(cwd: string, raw: string): string | undefined {
 	return resolve(cwd, value);
 }
 
-/**
- * 沙箱里要绑成可写的路径集合：
- * - scope 命中的目录（bash.writable 时）
- * - worktree 根本身（bash.writable 时）：scope 通常只写到 worktree 里的相对路径，
- *   而 package.json、node_modules 这类 worktree 根级文件在范围之外，不绑就只读
- * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等）
- */
 /**
  * 工具链 → 项目里会出现的产物目录。判据是仓库根（及其一层子目录，覆盖 monorepo 的
  * packages/*）里的清单文件：有 Cargo.toml 就是 Rust 项目，有 package.json 就是 Node 项目。
@@ -668,22 +791,32 @@ function toolchainCacheDir(): string | undefined {
 	return dir;
 }
 
+/**
+ * 沙箱里要绑成可写的路径集合：
+ * - 写范围覆盖到的路径（bash.writable 时）：整棵子树的 glob 给目录，文件级 glob 给文件
+ * - git 真正要写的目录（见 gitWritablePaths）：不给的话 add / commit / stash 全拼在 index.lock 上
+ * - `<cwd>/node_modules`：pnpm install 要写 .bin 里的 shim；worktree 里它是软链，给真实路径
+ * - 项目声明的产物目录 + 工具链缓存目录（XDG_CACHE_HOME）
+ * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等）
+ *
+ * cwd 本身不在其中：整棵授权等于把整个 checkout 打开，读范围的宽窄不该自动变成写权限。
+ */
 function sandboxWritableDirs(
 	policy: Policy,
 	cwd: string,
 	rule: BashRule,
 	options: { create: boolean } = { create: true },
-): string[] {	const dirs = new Set<string>();
+): string[] {
+	const dirs = new Set<string>();
 	if (rule.writable) {
-		for (const dir of writableDirs(policy, cwd)) dirs.add(dir);
+		for (const dir of writablePaths(policy, cwd)) dirs.add(dir);
 		// git 的索引与 ref 必须可写，否则 add / commit / stash 全拼在 index.lock 上；但只给
-		// git 目录本身，不因此把整个 checkout 打开。linked worktree 的索引与 ref 在**主仓**的
-		// gitdir 里（<common>/worktrees/<id>/index、<common>/refs），普通仓就是 <repo>/.git。
-		// Lab 实测见 Lab/git-worktree/probe.sh。
+		// git 真正要写的部分，不因此把整个 checkout 打开。linked worktree 的索引在
+		// <common>/worktrees/<id> 里，ref 与对象在 common dir 的 refs / logs / objects 里，
+		// hooks 和 config 不在授权范围内。
 		const git = gitDirs(cwd);
 		if (git) {
-			dirs.add(git.gitDir);
-			dirs.add(git.common);
+			for (const path of gitWritablePaths(git)) dirs.add(path);
 		}
 		// node_modules 也要可写：pnpm install 要写 .bin 里的 shim。它通常不在
 		// scope 里，但装依赖是任务的必要步骤。worktree 里它是符号链接，要给
@@ -1185,8 +1318,12 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (ran) sandboxSpecs.delete(event.toolCallId);
 		const hints = [
 			handoffHintFor(text),
-			isBash ? networkFailureNote(text, offline) : undefined,
-			isBash && ran ? writeRefusalNote(text, ran.write, ran.cwd) : undefined,
+			// 两道注解都以「这条命令真的失败了」为前提。不看 isError 时，成功命令的**输出内容**里
+			// 出现 EACCES / ENETUNREACH 字样也会命中：实测一个子代理跑 `git diff`，diff 正文里
+			// 含这些字符串，于是它自己的一份正确改动被追加了「这在授权之外，去要 writablePaths」。
+			// 判断事实而不猜文案：工具结果自带 isError。
+			isBash && event.isError ? networkFailureNote(text, offline) : undefined,
+			isBash && ran && event.isError ? writeRefusalNote(text, ran.write, ran.cwd) : undefined,
 		].filter((hint): hint is string => Boolean(hint));
 		if (!hints.length) return undefined;
 		return { content: withHint(event.content, hints.join("\n\n")) };

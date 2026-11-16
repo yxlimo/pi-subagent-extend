@@ -24,14 +24,27 @@ The command runs under a supervising PID 1 (see below), never as PID 1 itself.
 A Landlock ruleset. `/` stays readable and executable, so `cat` can read outside the scope as
 noted in [architecture](architecture.md#boundaries), and only these are writable:
 
-- the scope, when `bash.writable` is set
-- the working directory, without which git cannot even write its index
+- the paths the write scope **covers**, when `bash.writable` is set. Landlock can only grant, never
+exclude, and a rule on a directory grants everything beneath it — so a scope entry opens a directory
+only when it covers a whole subtree (`dir`, `dir/**`). A file-level entry such as `src/auth/*.ts` is
+expanded into the files it actually matches, each granted as a file: the parent directory stays
+read-only, which is what keeps `src/auth/*.ts` from opening all of `src/auth/`. The cost is that a
+file that does not exist yet cannot be created through bash under a file-level entry; use `write`
+for those, or grant the directory with `dir/**`
+- git's index and refs. The lock files (`index.lock`, `HEAD.lock`) are created in the gitdir root, so
+that directory has to be granted whole:
+  - in a linked worktree it is `<common>/worktrees/<id>`, which holds `HEAD`, `index`, `logs` and
+    `refs` and **no** hooks or config. The common directory is then granted only `objects`, `refs` and
+    `logs` — the three git writes through, measured: dropping any one fails a specific command on the
+    object database, a ref lock or the reflog
+  - in a plain checkout the gitdir *is* the common directory, with `hooks/` and `config` in it, so
+    there `.git` is granted whole and both stay writable. That is a Landlock limit, not a choice: the
+    index lock cannot be created without also allowing files next to it. A subagent in a plain
+    checkout can therefore plant a hook or point `core.hooksPath` elsewhere, and the parent will run
+    it; in a worktree it cannot
 - `<cwd>/node_modules`, resolved through symlinks, because pnpm writes the shims in `.bin`
-- the worktree root, since a scope usually names paths relative to it while root-level
-  `package.json` and `node_modules` lie outside
-- the repository's common git directory in a linked worktree (`git rev-parse --git-common-dir`),
-  which holds the index and refs — without it `git add`, `git commit`, `git stash` and
-  `git switch -c` fail on `<common>/worktrees/<id>/index.lock` or `<common>/refs`
+- the artefact directories of the toolchains the project uses (see
+  [architecture](architecture.md#the-three-write-layers))
 - `bash.writablePaths` entries, and the device nodes below
 - the temporary directories: the one the command itself uses (the host's `TMPDIR`, or a `TMPDIR`
   pinned through `bash.env`, `/tmp` when neither is set) and the conventional `/tmp`, which the
@@ -43,7 +56,7 @@ A write outside them fails with `EACCES`. Landlock rules attach to the resolved 
 symlink inside a granted directory that points outside stays read-only: the rule follows the
 target. `node_modules` is the one deliberate exception, realpath'd before being granted.
 
-A read-only sandbox gets none of the worktree or git-directory grants — silently widening the main
+A read-only sandbox gets none of the git or `node_modules` grants — silently widening the main
 repository's `.git` is worse than a failing git command.
 
 The kernel requirement is **Landlock ABI 7 (Linux 6.15 or later)**. Below that the extension does
