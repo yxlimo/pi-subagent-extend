@@ -28,6 +28,15 @@ if ! mkdir -p "$cache"; then
 	exit 1
 fi
 
+# pi-subagents links the main checkout's node_modules into the worktree so that a worktree
+# which does not install dependencies can still run. A declaration that does install would
+# follow that link and write into the main checkout, leaving this worktree without its own
+# copy, so the declaration starts from a clean slate: the link is removed, a real directory
+# is left alone. A project that wants the link back can recreate it in its own script.
+if [ -L node_modules ]; then
+	rm -f node_modules
+fi
+
 sh "$declaration" >"$log" 2>&1
 status=$?
 

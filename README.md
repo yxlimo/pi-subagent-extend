@@ -38,9 +38,19 @@ the markers in subagents (declared by the agent definition).
 pi-subagents can run a setup hook once a worktree exists and before the subagent starts. This
 repository ships one: a POSIX shell script that runs whatever the project declares. It exists
 because pi-subagents links the main checkout's `node_modules` into a new worktree through
-`linkNodeModulesIfPresent`, and pnpm installs through that link, which leaves the virtual store
-at the wrong depth. Replacing the link with a real install is the fix, and it is the project's
-business, not the tool's.
+`linkNodeModulesIfPresent` — which makes a worktree that installs nothing usable, but the link
+points at whatever the main checkout happens to have installed, and both directions are wrong:
+
+- **No install.** The worktree declares a dependency that the main checkout's tree does not have
+  (someone added it to the manifest earlier and nobody reinstalled), so the subagent gets
+  `Cannot find module` for a package that is right there in its own `package.json`. Measured: the
+  worktree resolves `is-number` from `<main>/node_modules/.pnpm/...` and fails on `left-pad`.
+- **Install runs.** It follows the link into the main checkout: same inode, but the main checkout
+  gains the packages the worktree asked for — measured 4 → 5 top-level entries with nothing added
+  to the main checkout's own manifest.
+
+So the hook removes that link before running the declaration (a real directory is left alone) and
+the project decides what to install.
 
 Only a symlink is installed globally; the script itself is versioned here:
 

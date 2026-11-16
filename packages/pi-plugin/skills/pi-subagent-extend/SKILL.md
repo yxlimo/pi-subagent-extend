@@ -183,13 +183,9 @@ pnpm install --prefer-offline
 ```
 
 - **退出码就是契约**：hook 不二次判断「装好没」，项目在自己的脚本里决定。pnpm 12 装完还会因 `ERR_PNPM_IGNORED_BUILDS` 退 1，那就自己写 `|| true` 或加一条自检。
-- **`node_modules` 软链要项目自己删**。上游建 worktree 时会把**主仓根部**的 `node_modules` 软链进工作树（`linkNodeModulesIfPresent`），这是为了让不装依赖的工作树也能直接跑。它不会替你判断该不该装：如果脚本要 `pnpm install`，就必须先把这条软链换成真目录，否则 pnpm 顺着软链**写进主仓**那份（实测：主仓目录 inode 不变、mtime 变），工作树自己仍然缺新依赖。
-
-  ```sh
-  if [ -L node_modules ]; then rm -f node_modules; fi
-  ```
-
-  根目录没有 `node_modules` 的项目（manifest 在子目录、根目录没装过）不受影响，软链根本不会建立。
+- **`node_modules` 软链由 hook 先删**。上游建 worktree 时会把**主仓根部**的 `node_modules` 软链进工作树（`linkNodeModulesIfPresent`），这是为了让不装依赖的工作树也能直接跑；软链指向的是**主仓当下装成了什么样**，两边都会出错：
+- **不装**：工作树 manifest 声明的包，主仓那棵树里没有（早先有人加了 manifest 但没重装），子代理就得到 `Cannot find module` —— 而那个包明明写在工作树自己的 `package.json` 里（实测：`is-number` 解析到 `<主仓>/node_modules/.pnpm/...`，`left-pad` 直接失败）。这和工作期间 `package.json` 有没有动无关。
+- **装**：pnpm 顺着软链写进主仓那份 —— 主仓目录 inode 不变，但多出工作树要的包（实测 4 条顶层条目 → 5 条，主仓自己的 `package.json` 根本没声明它）。所以 hook 在跑声明之前先删掉这条软链，真目录不动，声明拿到的是干净起点。想要回软链的项目在自己脚本里重建即可。根目录没有 `node_modules` 的项目不会建立软链，因此没有影响。
 - 输出记在 `~/.cache/pi-worktree-setup/<worktree 目录名>.log`；失败时 hook 把最后 20 行和日志路径打到 stderr，输出含 `not trusted` 时额外提示 mise 的 `trusted_config_paths`。
 - **hook 不经过沙箱**：它在子代理之前跑，用的是宿主权限。子代理自己再跑 `pnpm install` 仍然要沙箱内的写权限与 `network`。
 - hook 是 POSIX sh，需要内核认 shebang；Windows 得上原生可执行文件（上游用 `spawn(hookPath, [], { shell: false })`，Node 不会代跑 `.cmd`）。
