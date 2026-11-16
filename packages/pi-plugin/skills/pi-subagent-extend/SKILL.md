@@ -183,7 +183,13 @@ pnpm install --prefer-offline
 ```
 
 - **退出码就是契约**：hook 不二次判断「装好没」，项目在自己的脚本里决定。pnpm 12 装完还会因 `ERR_PNPM_IGNORED_BUILDS` 退 1，那就自己写 `|| true` 或加一条自检。
-- **符号链接由 hook 先删**（`node_modules` 指向主仓时先 unlink 再装），项目脚本不用管。
+- **`node_modules` 软链要项目自己删**。上游建 worktree 时会把**主仓根部**的 `node_modules` 软链进工作树（`linkNodeModulesIfPresent`），这是为了让不装依赖的工作树也能直接跑。它不会替你判断该不该装：如果脚本要 `pnpm install`，就必须先把这条软链换成真目录，否则 pnpm 顺着软链**写进主仓**那份（实测：主仓目录 inode 不变、mtime 变），工作树自己仍然缺新依赖。
+
+  ```sh
+  if [ -L node_modules ]; then rm -f node_modules; fi
+  ```
+
+  根目录没有 `node_modules` 的项目（manifest 在子目录、根目录没装过）不受影响，软链根本不会建立。
 - 输出记在 `~/.cache/pi-worktree-setup/<worktree 目录名>.log`；失败时 hook 把最后 20 行和日志路径打到 stderr，输出含 `not trusted` 时额外提示 mise 的 `trusted_config_paths`。
 - **hook 不经过沙箱**：它在子代理之前跑，用的是宿主权限。子代理自己再跑 `pnpm install` 仍然要沙箱内的写权限与 `network`。
 - hook 是 POSIX sh，需要内核认 shebang；Windows 得上原生可执行文件（上游用 `spawn(hookPath, [], { shell: false })`，Node 不会代跑 `.cmd`）。
