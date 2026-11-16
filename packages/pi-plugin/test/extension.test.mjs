@@ -1424,75 +1424,81 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   bash 可写面跟随 writeScope，读范围不自动变可写")
 }
 
-// 47. Build/test artefact directories come from the project's own declaration.
+// 47. Build/test artefact directories are derived from what the project uses.
 {
-  const repo = join(workdir, "scratchrepo")
-  mkdirSync(join(repo, "src"), { recursive: true })
-  const git = (args) => spawnSync("git", args, { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } })
-  git(["init", "-q"])
-  writeFileSync(
-    join(repo, ".gitignore"),
-    ["coverage/", "target", "dist/", ".next/", "*.log"].join("\n"),
-  )
-  writeFileSync(join(repo, "src", "a.ts"), "x\n")
-  // dist/ already exists and is ignored; coverage/ and target/ do not exist yet.
-  mkdirSync(join(repo, "dist"), { recursive: true })
-  writeFileSync(join(repo, "dist", "b.js"), "y\n")
-  git(["add", ".gitignore", "src"])
-
   const bindings = (extra) =>
     JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"], writable: true, ...extra } } })
+  const grantedIn = (spec, ...parts) => spec.write.some((d) => d.endsWith(`/${join(...parts)}`))
 
-  const h = await handler({ cwd: repo, bindings: bindings({}) })
+  // A Node project: the toolchain is recognised, but its output directory is not
+  // created — only granted when the project already has one.
+  const nodeRepo = join(workdir, "detect-node")
+  mkdirSync(join(nodeRepo, "src"), { recursive: true })
+  writeFileSync(join(nodeRepo, "package.json"), '{"name":"x"}\n')
+  mkdirSync(join(nodeRepo, "coverage"), { recursive: true })
+  writeFileSync(join(nodeRepo, "coverage", "l.txt"), "x\n")
+
+  const h = await handler({ cwd: nodeRepo, bindings: bindings({}) })
   const input = { command: "pnpm test" }
   assert.equal(await h.call("bash", input), undefined, "the listed command passes")
   const spec = specOf(input.command)
-  const granted = (dir) => spec.write.some((d) => d.endsWith(`/${dir}`))
-
-  assert.ok(granted("dist"), `an existing ignored directory is writable, got: ${spec.write.join(", ")}`)
-  assert.ok(granted("coverage"), `a declared but not-yet-created directory is writable, got: ${spec.write.join(", ")}`)
-  assert.ok(granted("target"), `a declaration without a trailing slash is read as a directory, got: ${spec.write.join(", ")}`)
-  assert.ok(granted(".next"), `.next is granted too, got: ${spec.write.join(", ")}`)
-  assert.ok(existsSync(join(repo, "coverage")), "the missing directory is created, so the first run works")
-  assert.ok(existsSync(join(repo, "target")), "and so is target")
-  assert.match(
-    spec.env.XDG_CACHE_HOME ?? "",
-    /pi-subagent-extend\/xdg-cache$/,
-    "build caches go to a persistent directory instead of the per-call tmpfs",
-  )
+  assert.ok(grantedIn(spec, "coverage"), `an existing artefact directory is writable, got: ${spec.write.join(", ")}`)
+  assert.ok(!grantedIn(spec, "dist"), "a directory the project does not have is not invented")
+  assert.equal(existsSync(join(nodeRepo, "dist")), false, "and nothing is created")
   h.restore()
 
-  // 显式关闭：内置清单不参与，也绝不创建目录。
-  const off = await handler({ cwd: repo, bindings: bindings({ scratchPaths: false }) })
+  // A Rust project: target/ is that toolchain's main output, so it is created —
+  // otherwise the first cargo test fails.
+  const rustRepo = join(workdir, "detect-rust")
+  mkdirSync(join(rustRepo, "src"), { recursive: true })
+  writeFileSync(join(rustRepo, "Cargo.toml"), '[package]\nname="x"\n')
+  const rust = await handler({ cwd: rustRepo, bindings: bindings({}) })
+  const rustInput = { command: "pnpm test" }
+  assert.equal(await rust.call("bash", rustInput), undefined, "the command passes in the rust repo")
+  assert.ok(grantedIn(specOf(rustInput.command), "target"), "target/ is granted from Cargo.toml")
+  assert.ok(existsSync(join(rustRepo, "target")), "and created, so the first run works")
+  rust.restore()
+
+  // A monorepo: a manifest one level down is found, and its directories resolve
+  // next to that manifest rather than at the repository root.
+  const mono = join(workdir, "detect-mono")
+  mkdirSync(join(mono, "packages", "web", "coverage"), { recursive: true })
+  writeFileSync(join(mono, "packages", "web", "package.json"), '{"name":"web"}\n')
+  const mh = await handler({ cwd: mono, bindings: bindings({}) })
+  const mInput = { command: "pnpm test" }
+  assert.equal(await mh.call("bash", mInput), undefined, "the command passes in the monorepo")
+  assert.ok(
+    grantedIn(specOf(mInput.command), "packages", "web", "coverage"),
+    `a nested project's artefacts are granted next to its manifest, got: ${specOf(mInput.command).write.join(", ")}`,
+  )
+  mh.restore()
+
+  // Explicit override: false turns detection off, an array appends and creates.
+  const off = await handler({ cwd: nodeRepo, bindings: bindings({ scratchPaths: false }) })
   const offInput = { command: "pnpm test" }
   assert.equal(await off.call("bash", offInput), undefined, "the command still passes")
-  const offSpec = specOf(offInput.command)
   assert.ok(
-    !offSpec.write.some((d) => d.endsWith("/.next")),
-    `scratchPaths: false disables the built-in list, got: ${offSpec.write.join(", ")}`,
+    !specOf(offInput.command).write.some((d) => d.endsWith("/coverage")),
+    `scratchPaths: false disables detection, got: ${specOf(offInput.command).write.join(", ")}`,
   )
   off.restore()
 
-  // 追加：显式条目照样创建并放行。
-  const extra = await handler({ cwd: repo, bindings: bindings({ scratchPaths: ["out/generated"] }) })
+  const extra = await handler({ cwd: nodeRepo, bindings: bindings({ scratchPaths: ["out/generated"] }) })
   const extraInput = { command: "pnpm test" }
   assert.equal(await extra.call("bash", extraInput), undefined, "the command passes with extras")
   const extraSpec = specOf(extraInput.command)
-  assert.ok(
-    extraSpec.write.some((d) => d.endsWith("/out/generated")),
-    `an explicit scratch path is granted, got: ${extraSpec.write.join(", ")}`,
-  )
-  assert.ok(existsSync(join(repo, "out", "generated")), "and created")
+  assert.ok(grantedIn(extraSpec, "out", "generated"), "an explicit scratch path is granted on top of detection")
+  assert.ok(grantedIn(extraSpec, "coverage"), "detection still applies alongside it")
+  assert.ok(existsSync(join(nodeRepo, "out", "generated")), "and is created")
   extra.restore()
-  console.log("  ok   产物目录由项目自己声明（git 忽略），可按需关闭或追加")
+  console.log("  ok   产物目录按项目清单探测；可显式关闭或追加")
 }
 
 // 48. /permission reports the artefact directories without creating them.
 {
   const repo = join(workdir, "probeonly")
   mkdirSync(join(repo, "src"), { recursive: true })
-  spawnSync("git", ["init", "-q"], { cwd: repo, encoding: "utf8", env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } })
-  writeFileSync(join(repo, ".gitignore"), "coverage/\n")
+  writeFileSync(join(repo, "Cargo.toml"), '[package]\nname="x"\n')
   writeFileSync(join(repo, "src", "a.ts"), "x\n")
 
   const h = await handler({
@@ -1504,8 +1510,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const notified = []
   await h.commands["permission"].handler("", { cwd: repo, ui: { notify: (m) => notified.push(m) } })
   const text = notified.join("\n")
-  assert.match(text, /coverage/, "the command lists the artefact directory")
-  assert.equal(existsSync(join(repo, "coverage")), false, "but looking at the policy does not create it")
+  assert.match(text, /target/, "the command lists the artefact directory")
+  assert.equal(existsSync(join(repo, "target")), false, "but looking at the policy does not create it")
   h.restore()
   console.log("  ok   /permission 只报告产物目录，不创建")
 }

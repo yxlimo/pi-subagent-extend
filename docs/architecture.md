@@ -79,14 +79,20 @@ With `bash.writable`, the sandbox is therefore given the write scope plus git's 
 `node_modules`, not the working directory wholesale. A subagent that may read `lib/` but not write
 it cannot route around the rule with a shell redirect.
 
-Build and test artefacts are the exception that makes this usable, and the project already answers
-which ones they are: whatever git ignores. `bash.writable` grants every ignored directory that
-exists (found with `git ls-files --others --ignored --exclude-standard --directory`), and creates the
-ones the project declares but has not produced yet — a plain `.gitignore` entry such as `coverage/`
-or `target` is asked back with `git check-ignore` as a directory — so the first `cargo test` in a
-fresh checkout works. Deriving the list rather than hardcoding it matters: the extension has no
-business asserting that `target` means Rust and `dist` means JavaScript, and a project that ignores
-`build/` while tracking a source directory of the same name gets the right answer for free.
+Build and test artefacts are the exception that makes this usable, and which ones they are follows
+from what the project is built with. `bash.writable` grants the artefact directories of every
+toolchain whose manifest appears in the repository root or up to two levels below it — `package.json`
+for Node, `Cargo.toml` for Rust, `go.mod` for Go, `pyproject.toml` for Python, `pom.xml` and
+`build.gradle` for Java, and the rest of that table in `TOOLCHAINS` — with each directory resolved
+next to its manifest, so a monorepo's `packages/web/coverage` lands in the right place.
+
+Two tiers keep this quiet. A directory that exists is granted; a directory the toolchain always
+creates (`target`, `__pycache__`, `_build`) is also created when missing, because the first
+`cargo test` in a fresh checkout would otherwise fail; anything merely conventional (`dist`, `.next`,
+`coverage`) is granted only when the project already has it. The extension does not invent
+directories it has no evidence for, and it never consults git for this: `git ls-files --ignored`
+answers what is generated, which is not the same question as what the project builds with, and it
+costs two subprocesses per sandboxed command.
 
 Caches that belong outside the repository (`go`'s build cache, mypy's) are moved with a single
 `XDG_CACHE_HOME` pointing at a persistent `~/.cache` directory. The sandbox's `/tmp` is a per-call

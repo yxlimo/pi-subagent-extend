@@ -39,7 +39,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -436,84 +436,120 @@ function expandPath(cwd: string, raw: string): string | undefined {
  * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等）
  */
 /**
- * 项目自己声明过的产物目录。判据只有一条：git 说它被忽略。
+ * 工具链 → 项目里会出现的产物目录。判据是仓库根（及其一层子目录，覆盖 monorepo 的
+ * packages/*）里的清单文件：有 Cargo.toml 就是 Rust 项目，有 package.json 就是 Node 项目。
+ * 只读文件，不 spawn 进程，也不猜「这个目录现在存不存在」。
  *
- * 两类都要：
- * - 已经在树里的，`ls-files --others --ignored --directory` 会折叠成目录列出来；
- * - 还没落盘的（第一次 `cargo test` 之前的 `target/`、第一次跑覆盖率之前的
- *   `coverage/`），把 .gitignore 里那些朴素条目按「目录」再问一次 git，命中就说明
- *   项目把它当输出目录 —— 这类必须能创建，否则命令第一次跑就是 Permission denied。
- *
- * 不去猜工具链：`dist`、`target`、`.build` 谁生成的、该不该写，项目已经在 .gitignore
- * 里回答过了。带通配符的条目交给 ls-files（它按 git 语义展开），这里只处理朴素路径。
+ * dirs 里的目录：存在就放行，不存在就不管（空目录没有意义，凭空造一堆更吵）。
+ * primary 里的目录：属于该工具链的主产物，缺了就创建 —— `cargo test` 一定会写 target/，
+ * 不放行也不创建的话，命令第一次跑就是 Permission denied。
  */
-const scratchDirsCache = new Map<string, string[]>();
+const TOOLCHAINS: { markers: string[]; dirs: string[]; primary: string[] }[] = [
+	{
+		markers: ["package.json"],
+		dirs: ["coverage", "dist", "build", ".next", ".nuxt", ".output", ".svelte-kit", ".turbo", ".vite", ".parcel-cache", ".cache", ".angular"],
+		primary: [],
+	},
+	{ markers: ["Cargo.toml"], dirs: ["target"], primary: ["target"] },
+	{
+		markers: ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile"],
+		dirs: ["__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv"],
+		primary: ["__pycache__"],
+	},
+	{ markers: ["go.mod"], dirs: ["bin"], primary: [] },
+	{ markers: ["pom.xml"], dirs: ["target"], primary: ["target"] },
+	{ markers: ["build.gradle", "build.gradle.kts"], dirs: ["build", ".gradle"], primary: ["build"] },
+	{ markers: ["mix.exs"], dirs: ["_build", "deps"], primary: ["_build"] },
+	{ markers: ["pubspec.yaml"], dirs: [".dart_tool", "build"], primary: [".dart_tool"] },
+	{ markers: ["Gemfile"], dirs: ["tmp", "log", ".bundle"], primary: [] },
+	{ markers: ["Package.swift"], dirs: [".build"], primary: [".build"] },
+	{ markers: ["build.zig"], dirs: ["zig-out", "zig-cache", ".zig-cache"], primary: ["zig-out", "zig-cache"] },
+	{ markers: ["stack.yaml", "cabal.project"], dirs: ["dist-newstyle", ".stack-work"], primary: ["dist-newstyle"] },
+	{ markers: ["CMakeLists.txt"], dirs: ["build"], primary: ["build"] },
+	{ markers: ["*.csproj", "*.sln"], dirs: ["obj", "bin"], primary: [] },
+];
 
-function scratchDirNames(cwd: string): string[] {
+/**
+ * 清单也往子目录里找两层（`packages/web/package.json` 这种 monorepo 布局），
+ * 但不开销太大：跳过明显的产物/依赖目录，并给总量封顶。
+ */
+const DETECT_SKIP = new Set(["node_modules", ".git", "dist", "build", "target", ".venv", "vendor", "__pycache__", "bin", "obj"]);
+const DETECT_MAX_ROOTS = 200;
+
+const scratchDirsCache = new Map<string, { dir: string; primary: boolean }[]>();
+
+/** 探测结果按 cwd 缓存：bash 白名单命令会反复拼 spec。 */
+function detectScratchDirs(cwd: string): { dir: string; primary: boolean }[] {
 	const key = resolve(cwd);
 	const cached = scratchDirsCache.get(key);
 	if (cached) return cached;
 
-	const found = new Set<string>();
-	const run = (args: string[], input?: string) => {
-		try {
-			return execFileSync("git", args, {
-				cwd: key,
-				encoding: "utf8",
-				stdio: input === undefined ? ["ignore", "pipe", "ignore"] : ["pipe", "pipe", "ignore"],
-				timeout: 5000,
-				input,
-			});
-		} catch {
-			return "";
+	const found: { dir: string; primary: boolean }[] = [];
+	const roots = [key];
+	// 广度优先往下两层，遇到产物/依赖目录不再深入。
+	let frontier = [key];
+	for (let depth = 0; depth < 2 && roots.length < DETECT_MAX_ROOTS; depth += 1) {
+		const next: string[] = [];
+		for (const dir of frontier) {
+			try {
+				for (const entry of readdirSync(dir, { withFileTypes: true })) {
+					if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
+					const child = resolve(dir, entry.name);
+					roots.push(child);
+					next.push(child);
+					if (roots.length >= DETECT_MAX_ROOTS) break;
+				}
+			} catch {
+				// 读不了就跳过这一支。
+			}
 		}
-	};
-
-	for (const raw of run(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]).split("\0")) {
-		const name = raw.replace(/\/+$/, "");
-		if (name) found.add(resolve(key, name));
+		frontier = next;
 	}
 
-	// .gitignore 里的朴素条目（不带通配符、不取反）：按目录再问 git 一次。
-	const ignoreFile = resolve(key, ".gitignore");
-	if (existsSync(ignoreFile)) {
-		const candidates = readFileSync(ignoreFile, "utf8")
-			.split("\n")
-			.map((line) => line.trim())
-			.filter((line) => line && !line.startsWith("#") && !line.startsWith("!"))
-			.filter((line) => !/[?*]|\[/.test(line))
-			.map((line) => line.replace(/^\/+/, "").replace(/\/+$/, ""))
-			.filter(Boolean);
-		if (candidates.length > 0) {
-			const ignored = run(["check-ignore", "--stdin"], `${candidates.map((c) => `${c}/`).join("\n")}\n`);
-			for (const line of ignored.split("\n")) {
-				const name = line.trim().replace(/\/+$/, "");
-				if (name) found.add(resolve(key, name));
+	for (const root of roots) {
+		let entries: string[] = [];
+		try {
+			entries = readdirSync(root);
+		} catch {
+			continue;
+		}
+		for (const toolchain of TOOLCHAINS) {
+			const matched = toolchain.markers.some((marker) =>
+				marker.startsWith("*.")
+					? entries.some((name) => name.endsWith(marker.slice(1)))
+					: entries.includes(marker),
+			);
+			if (!matched) continue;
+			for (const name of toolchain.dirs) {
+				found.push({ dir: resolve(root, name), primary: toolchain.primary.includes(name) });
 			}
 		}
 	}
 
-	const result = [...found];
-	scratchDirsCache.set(key, result);
-	return result;
+	scratchDirsCache.set(key, found);
+	return found;
 }
 
-/** 产物目录：已存在的直接放行；缺的按需创建（工具链本来也会创建，空目录 git 不跟踪）。 */
+/**
+ * 产物目录：探测结果 + 显式追加。已存在的直接放行；探测到的主产物缺了就创建，
+ * 其余缺了不管（空目录本身没有意义）；显式追加的缺了也创建 —— 那是父代理点名的。
+ */
 function scratchDirs(cwd: string, rule: BashRule, options: { create: boolean }): string[] {
 	if (rule.scratchPaths === false) return [];
 	const dirs = new Set<string>();
-	const add = (abs: string) => {
+	const add = (abs: string, create: boolean) => {
 		if (existsSync(abs)) {
 			dirs.add(abs);
 			return;
 		}
-		// 还不存在的：/permission 只报告（它是「将要放行什么」），建 spec 时才真的创建。
-		// 创建失败就不放行 —— 把一个不存在的路径写进 spec，helper 会直接拒绝整条命令，
-		// 报错点离真正的原因太远。
+		// /permission 只报告「将要放行什么」：缺的也列出来，但不落盘。
 		if (!options.create) {
 			dirs.add(abs);
 			return;
 		}
+		// 建 spec 时：只有主产物和显式追加的才创建。创建失败就不放行 —— 把不存在的路径
+		// 写进 spec，helper 会拒绝整条命令，报错点离真正的原因太远。
+		if (!create) return;
 		try {
 			mkdirSync(abs, { recursive: true });
 			dirs.add(abs);
@@ -521,8 +557,8 @@ function scratchDirs(cwd: string, rule: BashRule, options: { create: boolean }):
 			// 只读树或权限不足：如实失败，别把它算成已授权。
 		}
 	};
-	for (const abs of scratchDirNames(cwd)) add(abs);
-	for (const extra of rule.scratchPaths) add(resolve(cwd, extra));
+	for (const { dir, primary } of detectScratchDirs(cwd)) add(dir, primary);
+	for (const extra of rule.scratchPaths) add(resolve(cwd, extra), true);
 	return [...dirs];
 }
 

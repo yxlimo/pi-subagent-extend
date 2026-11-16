@@ -79,7 +79,7 @@ subagent(
 | `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directory and `node_modules` are added, so `git add`/`commit` and an install work. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
-| `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from what git ignores; `false` disables them, an array appends explicit directories. |
+| `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
 | `bash.deny` | `string[]` | Commands no caller can allow; only a project profile can set this. |
 
