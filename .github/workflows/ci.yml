@@ -10,20 +10,22 @@ permissions:
 
 jobs:
   check:
-    # Three legs, because the helper behaves differently on each shape a host
-    # can present, and one image only shows one of them. The ABI and namespace
-    # numbers below were measured on these images:
+    # Four legs: the helper behaves differently on each shape a host can
+    # present, and one image only shows one of them. Every number below was
+    # measured on the image it is next to, not assumed:
     #
     #   ubuntu-26.04 (7.0)   ABI 8, user namespaces refused by AppArmor
+    #   ubuntu-24.04 (6.1x)  ABI 8, user namespaces refused by AppArmor
     #   ubuntu-22.04 (5.15)  ABI 4, user namespaces allowed
     #
     # The images are pinned by version on purpose: `ubuntu-latest` moved from
     # 24.04 to 26.04 under us, and what these legs assert is a property of the
     # kernel. A floating label would change the subject of the test silently.
     #
-    #   namespaces   modern kernel, restriction lifted -> the real sandbox
-    #   fallback     modern kernel, restriction in place -> Landlock alone
-    #   abi-below-7  5.15 kernel -> the sandbox refuses to run at all
+    #   26.04-namespaces  restriction lifted -> the real sandbox on 7.0
+    #   24.04-namespaces  same, on a different kernel -> compatibility
+    #   26.04-fallback    restriction in place -> Landlock alone carries the cut
+    #   22.04-abi4        5.15 -> the sandbox refuses to run at all
     #
     # The fallback leg is the one that broke silently before, and the ABI leg
     # was only ever simulated with a stub helper, so both are here for real.
@@ -32,17 +34,22 @@ jobs:
       matrix:
         include:
           - os: ubuntu-26.04
-            mode: namespaces
+            mode: 26.04-namespaces
+            lift: "yes"
+            expect: network isolated
+            expect_exit: 0
+          - os: ubuntu-24.04
+            mode: 24.04-namespaces
             lift: "yes"
             expect: network isolated
             expect_exit: 0
           - os: ubuntu-26.04
-            mode: fallback
+            mode: 26.04-fallback
             lift: "no"
             expect: cannot enter the namespaces
             expect_exit: 0
           - os: ubuntu-22.04
-            mode: abi-below-7
+            mode: 22.04-abi4
             lift: "no"
             expect: ABI 7 is required
             expect_exit: 76
@@ -54,6 +61,13 @@ jobs:
           # Nothing here pushes, and a persisted token would sit in .git/config
           # where the sandboxed commands these tests run can read it.
           persist-credentials: false
+
+      # Record what this leg actually ran on: a pinned label still gets a new
+      # kernel over time, and the assertions below are about the kernel.
+      - name: Report the kernel
+        run: |
+          . /etc/os-release && echo "${PRETTY_NAME}"
+          uname -r
 
       # Ubuntu's default (apparmor_restrict_unprivileged_userns=1) lets
       # unshare(CLONE_NEWUSER) succeed, then refuses setgroups, mount, netns
