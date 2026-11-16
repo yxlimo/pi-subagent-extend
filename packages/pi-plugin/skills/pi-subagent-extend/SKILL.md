@@ -215,7 +215,7 @@ fi
 - `bash`：没配白名单时一律拒绝；配了则只有命中 `read`/`write` 两列的命令执行，并且自动改写为
   helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录为 scope 命中目录、cwd 与 `node_modules`（`writable` 时）再加上 `writablePaths`。命令里出现
   `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
-- **沙箱内的网络失败会被标注**：离线 bash 的结果里出现 `ENETUNREACH` / `EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo failed` 这类特征时，结果末尾会补一段 `[sandbox]` 说明——这是**主代理没给网络授权**，不是机器网络坏了。换 registry、换 flag、加 timeout 都只会以同样方式失败；确实需要网络就用 `contact_supervisor` 说清要什么、为什么，主代理可以给 `"network": true`。本地 `ECONNREFUSED` 不在此列（loopback 是通的，那是正常的测试结果）。
+- **沙箱内的网络失败会被标注**：离线 bash 出现 `ENETUNREACH` / `EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo failed` 时，结果末尾补一句 `[sandbox]`：网络是主代理禁的，不是机器坏了，换 registry / flag / timeout 也一样失败，要网络就找 `contact_supervisor`（`"network": true`）。`ECONNREFUSED` 不标注——loopback 通着，那是正常测试结果。
 - 越界拒绝的文案是英文，会说清「哪个路径不在范围、不要重试、需要就上报」，并列出当前 scope。缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理（文案写 `no path was given`），`write`/`edit` 必须给 path（文案写 `needs a path`）。这类拒绝不计入撞权限计数。
 - 范围内会话可用 `/permission` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态（键名为英文：`Source`、`Mode`、`bash read`、`bash write`、`bash deny`、`Sandbox`、`Sandbox writable paths`、`Reads`、`Denials`）。
 

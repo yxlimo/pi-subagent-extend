@@ -1179,7 +1179,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   // 字符串 content 会被拼成字符串，parts 数组则多一个 text part；两种形状都取尾部。
   const note = typeof noted?.content === "string" ? noted.content : (noted?.content?.at(-1)?.text ?? "")
   assert.match(note, /\[sandbox\]/u, "the failure is annotated so it can be recognised")
-  assert.match(note, /disabled by the parent/u, "it names the cause")
+  assert.match(note, /disabled here by the parent/u, "it names the cause")
   assert.match(note, /not a broken machine/u, "it says this is not an environment fault")
   assert.match(note, /contact_supervisor/u, "it says which channel can widen the grant")
   assert.match(note, /"network": true/u, "it names what the parent would have to grant")

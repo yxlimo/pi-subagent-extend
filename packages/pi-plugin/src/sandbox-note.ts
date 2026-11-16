@@ -41,9 +41,5 @@ const NETWORK_FAILURES: RegExp[] = [
 export function networkFailureNote(text: string, offline: boolean): string | undefined {
 	if (!offline || !text || text.includes(MARK)) return undefined
 	if (!NETWORK_FAILURES.some((pattern) => pattern.test(text))) return undefined
-	return [
-		`${MARK} this command ran with the network disabled by the parent's bindings.`,
-		"A network error here is a permission, not a broken machine: retrying with another registry, flag or timeout will keep failing the same way.",
-		'If the task really needs the network, use contact_supervisor to say what you need and why — the parent can grant it with "network": true.',
-	].join("\n")
+	return `${MARK} network is disabled here by the parent's bindings — this is a permission, not a broken machine. Another registry, flag or timeout will fail the same way. If the task needs the network, use contact_supervisor to ask for it ("network": true).`
 }
