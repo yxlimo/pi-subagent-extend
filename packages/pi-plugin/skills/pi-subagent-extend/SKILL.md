@@ -129,6 +129,14 @@ So "read the whole repository, write only `.pi/reviews`" is `scope: ["."]`, `wri
 
 For a bash command outside the allowlist, the refusal text carries the detected pnpm store path — the model can see it and report it together with "what the parent agent wants to write". The extension only detects it; it does not allow it automatically.
 
+**Scratch files in the working directory are not writable by default.** Because `bash.writable` grants the write scope and not the working directory, a tool that drops artefacts next to the code — a coverage report, `.cache`, updated snapshots, or a plain `echo x > tmp.txt` — fails with `Permission denied`. That is deliberate: otherwise `lib/a > lib/b` would walk straight around a directory the subagent may read but not write. Name the location instead of widening everything:
+
+- the artefact directory goes in `writeScope` if the subagent may also write it by hand (a review writing its report);
+- it goes in `bash.writablePaths` if only the toolchain needs it;
+- or point the tool at the sandbox's private `/tmp`, which is already writable, through `bash.env`: `"env": { "COVERAGE_DIR": "/tmp/coverage" }`.
+
+If a test or build writes into the repository and you did not ask it to, treat the refusal as the correct answer rather than as a reason to grant the working directory.
+
 Entries come in two forms:
 
 - Literal: split on whitespace and match token by token as a prefix. `"pnpm test"` allows `pnpm test -t foo`, but not `pnpm publish`.
