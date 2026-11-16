@@ -14,6 +14,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Ubuntu's default (apparmor_restrict_unprivileged_userns=1) lets
+      # unshare(CLONE_NEWUSER) succeed, then refuses setgroups, mount, netns
+      # and pidns. The sandbox would silently fall back to Landlock only and
+      # the namespace code would never be exercised here. Measured on this
+      # image:
+      #   default   setgroups EPERM, unshare(NEWNS|NEWNET|NEWPID) EPERM
+      #   sysctl 0  all four succeed
+      # It is a throwaway VM, and without this the tests below would not cover
+      # the isolation they exist to check.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - uses: pnpm/action-setup@v6
         with:
           version: 12
@@ -35,7 +47,30 @@ jobs:
       # The helper's own tests cover the sandbox itself: Landlock rules, the
       # namespace setup and the capability drop.
       - name: Helper tests
-        run: cargo test --manifest-path packages/helper/Cargo.toml --locked
+        run: |
+          cargo test --manifest-path packages/helper/Cargo.toml --locked
+
+      # Say out loud whether the sandbox really got its namespaces. The helper
+      # reports entering the network namespace and shadowing the resolver
+      # sockets on stderr, and this step fails when that line is missing: a
+      # quiet fallback to Landlock-only otherwise looks exactly like success.
+      - name: Sandbox self-check
+        run: |
+          cargo build --release \
+            --manifest-path packages/helper/Cargo.toml --locked
+          spec=$(mktemp)
+          printf '%s' '{"cwd":".","read":["/"],' >"$spec"
+          printf '%s' '"write":["/tmp"],"offline":true,"env":{}}' >>"$spec"
+          helper=packages/helper/target/release/pi-subagent-extend-helper
+          out=$("$helper" --spec "$spec" -- true 2>&1)
+          printf '%s\n' "$out"
+          case "$out" in
+            *"network isolated"*) ;;
+            *)
+              echo "::error::no network namespace was entered"
+              exit 1
+              ;;
+          esac
 
       # Builds the helper first (the package's pretest hook), then runs three
       # suites: the scope and context ones against a fake pi API, and the mock
