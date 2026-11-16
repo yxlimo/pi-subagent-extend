@@ -193,7 +193,7 @@ mod tests {
                 let reason = abi_or_reason().expect_err("an old kernel must be refused");
                 // The wording matters: the caller shows it to the user, and CI
                 // asserts on it on a 5.15 kernel.
-                assert!(reason.contains(&format!("ABI {abi}")), "{reason}");
+                assert!(reason.contains(&format!("ABI is {abi}")), "{reason}");
                 assert!(
                     reason.contains(&format!("ABI {REQUIRED_ABI} is required")),
                     "{reason}"
