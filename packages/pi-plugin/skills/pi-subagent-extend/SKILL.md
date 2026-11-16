@@ -1,77 +1,77 @@
 ---
 name: pi-subagent-extend
-description: 委派 pi-subagents 子代理时，用 extensionBindings 把它的文件读写和可跑命令限定在本任务范围内：范围外的 tool_call 一律被拒绝，bash 白名单里的命令在 Landlock 沙箱里执行（默认断网、写目录受限）。适用场景：不让子代理扫整个仓库、给子代理放行 typecheck/test、在 worktree 里装依赖或跑验证、按角色配默认范围（profile）。判据与停机见 pi-subagent-extend-probes；裁掉 AGENTS.md 里的主代理专属段落见 pi-subagent-extend-context。
+description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope: every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping: pi-subagent-extend-probes; stripping the main-agent-only sections of AGENTS.md: pi-subagent-extend-context.
 ---
 
-# pi-subagent-extend：给子代理限定任务范围
+# pi-subagent-extend: confine a subagent to the task scope
 
-委派子代理时通过 `extensionBindings` 传入本次任务的范围。子代理会话里，范围之外的所有 tool_call 一律被拒绝（fail closed）：防止子代理漫无目的地扫仓库。
+When delegating a subagent, pass the scope of this task through `extensionBindings`. In the subagent's session, every tool_call outside that scope is refused (fail closed): this keeps the subagent from wandering through the repository aimlessly.
 
-## 用在什么场景
+## When to use it
 
-| 场景 | 用哪个字段 | 看哪一节 |
+| Situation | Which field | See |
 | --- | --- | --- |
-| 子代理只该读/写本任务的那几个文件 | `scope`，只读任务加 `readOnly` | [scope 字段](#scope-字段) |
-| 子代理要自己跑 typecheck、测试、构建 | `bash.read` / `bash.write`，产物落盘加 `writable` | [bash 字段](#bash-字段) |
-| 子代理在 `worktree: true` 里跑，需要装依赖 | 项目提交 `.pi/worktree-setup.sh`，配合 `writablePaths` / `network` | [worktree 里的 bash](#worktree-里的-bash) |
-| 不想每次派单都手写范围（忙起来会忘） | agent profile | 下文「profile（角色默认值）」 |
-| 子代理开始空转或原地打转 | 本包的另一半：探针 | skill `pi-subagent-extend-probes` |
-| AGENTS.md 里混着只该主代理看的规则 | 本包的另一半：上下文隔离 | skill `pi-subagent-extend-context` |
+| The subagent should only read/write the few files of this task | `scope`, plus `readOnly` for a read-only task | [The scope field](#the-scope-field) |
+| The subagent has to run typecheck, tests or a build itself | `bash.read` / `bash.write`, plus `writable` when the artefacts land on disk | [The bash field](#the-bash-field) |
+| The subagent runs in `worktree: true` and has to install dependencies | The project commits `.pi/worktree-setup.sh`, together with `writablePaths` / `network` | [bash in a worktree](#bash-in-a-worktree) |
+| You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | agent profile | "Profiles (per-role defaults)" below |
+| The subagent starts idling or going in circles | The other half of this package: probes | skill `pi-subagent-extend-probes` |
+| AGENTS.md mixes in rules only the main agent should see | The other half of this package: context isolation | skill `pi-subagent-extend-context` |
 
-判据与停机（只读空转、原地打转、早可收工、造杂物、撞权限）见另一个 skill `pi-subagent-extend-probes`。
+The criteria and the stop (read-only idling, going in circles, finishing early, writing litter, colliding with permissions) are in the other skill, `pi-subagent-extend-probes`.
 
-上下文隔离（`AGENTS.md` 里 `<!-- main-agent-only:start -->` 圈出的段落、`.pi/main-only.md`）是同一个包的另一半，见 skill `pi-subagent-extend-context`。它由 agent 定义里声明的入口决定，跟 bindings 无关——委派时不需要为它传任何字段。
+Context isolation (the sections fenced by `<!-- main-agent-only:start -->` in `AGENTS.md`, and `.pi/main-only.md`) is the other half of the same package: see skill `pi-subagent-extend-context`. It is decided by the entry point declared in the agent definition and has nothing to do with bindings — no field needs to be passed for it when delegating.
 
-委派规则本身（brief 怎么写、等待方式、一个 cwd 一个写者）以 **pi-subagents 自带的 skill** 为准，本 skill 只补「怎么把范围和命令授权绑到一次委派上」这一层。
+The delegation rules themselves (how to write the brief, how to wait, one cwd, one writer) follow the **skill shipped with pi-subagents**; this skill only adds the layer of "how to bind the scope and the command grants to a single delegation".
 
-## 前置条件
+## Prerequisites
 
-被委派的 agent 必须能加载本扩展，二选一：
+The delegated agent must be able to load this extension. Choose one:
 
-- agent 定义 frontmatter 里声明 `subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts`（前台、后台子代理都生效，推荐）；
-- 扩展已全局安装（`~/.pi/agent/extensions/pi-subagent-extend`）且本次委派 `async: true`（后台子代理才走 ambient discovery）。
+- declare `subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts` in the agent definition's frontmatter (works for foreground and background subagents; recommended);
+- the extension is installed globally (`~/.pi/agent/extensions/pi-subagent-extend`) and this delegation sets `async: true` (only background subagents use ambient discovery).
 
-扩展没加载时 bindings 传了也没用，拦截不会发生。
+Without the extension loaded, passing bindings does nothing: no interception happens.
 
-项目若用 `<!-- main-agent-only:start -->` 标记，同一行还要加 `, …/src/child-context.ts`，否则子代理会读到主代理专属段落（见 skill `pi-subagent-extend-context`）。
+If the project uses the `<!-- main-agent-only:start -->` marker, add `, …/src/child-context.ts` to the same line, otherwise the subagent reads the main-agent-only sections (see skill `pi-subagent-extend-context`).
 
-`bash.read` / `bash.write` 里的命令靠沙箱 helper（`packages/helper` 的 Rust 二进制）跑：文件范围由 Landlock 强制，默认断网（出网 TCP/UDP 全断、DNS 解析失败，但沙箱内 loopback 可用，本地 server 起得来也连得上），进程与 capability 也一并隔离（看不到宿主进程、命令无任何 capability）。宿主需要 Landlock ABI 7（Linux 6.15+）；helper 缺失或内核不够时 bash 保持关闭（其余功能不受影响）。
+The commands in `bash.read` / `bash.write` run under the sandbox helper (the Rust binary in `packages/helper`): the file scope is enforced by Landlock, the network is off by default (all outbound TCP/UDP is cut and DNS resolution fails, but loopback works inside the sandbox, so a local server can be started and reached), and processes and capabilities are isolated as well (the host processes are invisible, the command has no capability at all). The host needs Landlock ABI 7 (Linux 6.15+); when the helper is missing or the kernel is too old, bash stays disabled (the remaining features are unaffected).
 
-## 调用模板
+## Call template
 
-只读/读写文件、不需要跑命令：
+Reading or writing files, no commands needed:
 
 ```text
 subagent(
   agent: "<agent-name>",
-  task: "<任务描述>",
-  extensionBindings: { "pi-subagent-extend/1": { "scope": ["<文件/目录 glob>", "..."] } }
+  task: "<task description>",
+  extensionBindings: { "pi-subagent-extend/1": { "scope": ["<file/directory glob>", "..."] } }
 )
 ```
 
-需要子代理自己跑测试或 typecheck：
+The subagent has to run tests or typecheck itself:
 
 ```text
 subagent(
   agent: "<agent-name>",
-  task: "<任务描述>，完成后跑 typecheck 并报告结果",
+  task: "<task description>; run typecheck afterwards and report the result",
   extensionBindings: {
     "pi-subagent-extend/1": {
-      "scope": ["<文件/目录 glob>"],
+      "scope": ["<file/directory glob>"],
       "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] }
     }
   }
 )
 ```
 
-namespace 固定为 `pi-subagent-extend/1`。每次委派都要传，scope 按本任务实际涉及的文件/目录收窄，不要默认给整个仓库。
+The namespace is fixed at `pi-subagent-extend/1`. Pass it on every delegation, and narrow the scope to the files and directories this task actually touches; do not default to the whole repository.
 
-子代理在 worktree 里跑（`worktree: true`）且需要装依赖或跑验证时：
+The subagent runs in a worktree (`worktree: true`) and has to install dependencies or run verification:
 
 ```text
 subagent(
   agent: "<agent-name>",
-  task: "<任务描述>",
+  task: "<task description>",
   options: { worktree: true },
   extensionBindings: {
     "pi-subagent-extend/1": {
@@ -87,47 +87,47 @@ subagent(
 )
 ```
 
-## scope 字段
+## The `scope` field
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Meaning |
 | --- | --- | --- |
-| `scope` | `string[]` | 必填。任务范围的 glob 列表；空数组 = 拒绝一切文件访问 |
-| `readOnly` | `boolean` | 默认 `false`；`true` 时范围内也禁止 `edit`/`write`，适合只读的调研、评审代理 |
-| `maxReads` | `number` | 可选。成功 `read` 次数上限，超限后所有 read 被拒绝 |
-| `allowTools` | `string[]` | 可选。额外放行的工具名；`bash` 等执行器类不能用它放行 |
+| `scope` | `string[]` | Required. Globs describing the task scope; an empty array refuses all file access |
+| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused even inside the scope, which suits read-only research and review agents |
+| `maxReads` | `number` | Optional. Upper bound on successful `read` calls; once it is exceeded, every read is refused |
+| `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way |
 
-glob 规则：`**` 匹配任意层（含零层），`*` 只匹配单层内的字符，`?` 匹配单字符。
+Glob rules: `**` matches any number of levels (including zero), `*` matches characters within a single level, `?` matches a single character.
 
-写目录时 `dir`、`dir/`、`dir/**` 三种写法等价，都覆盖该目录本身及其下任意深度的内容；`dir/*` 只覆盖直接子项。所以范围按目录写，不要逐文件列——列文件既容易漏，目录里新增的文件也会被拒。
+For a directory, `dir`, `dir/` and `dir/**` are equivalent: all three cover the directory itself and its contents at any depth; `dir/*` covers only the direct children. So write the scope as directories, not as a list of files — listing files is easy to get wrong, and files added to the directory later are refused too.
 
-## bash 字段
+## The `bash` field
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Meaning |
 | --- | --- | --- |
-| `bash` | `object` | 可选。不给就完全禁止 bash；两列都空也等于禁止 |
-| `bash.read` | `string[]` | 只读命令（typecheck、grep 等）。字面量按空白切词前缀匹配；`re:` 开头按正则整串匹配 |
-| `bash.write` | `string[]` | 会写文件的命令（测试、构建等）。匹配规则同上；算作「写入活动」 |
-| `bash.network` | `boolean` | 默认 `false`，沙箱断网；确实要联网的命令才开 |
-| `bash.writable` | `boolean` | 默认 `false`，沙箱根只读；`true` 时 scope 命中的目录、cwd、worktree 根与 `node_modules` 在沙箱内可写（测试产物、快照）。cwd 是 linked worktree 时，主仓的 common git 目录也一并可写——worktree 的索引与 ref 在那里，不给的话 `git add`/`commit`/`stash`/`switch -c` 会失败在 `index.lock` |
-| `bash.writablePaths` | `string[]` | 额外放开写权限的路径（绝对路径、`~` 开头或相对 cwd）。工具链要写的全局目录放这里，如 pnpm store |
-| `bash.env` | `object` | 注入沙箱的环境变量（写进 spec 的 `env`）。默认已注入 `XDG_RUNTIME_DIR`（沙箱私有 /tmp，pnpm 的锁目录靠它）与 worktree 场景的 `MISE_STATE_DIR` |
-| `bash.gitExcludes` | `boolean` | 默认 `true`。给沙箱里的 git 注入全局排除规则（`node_modules/`、`.pnpm-store/`），防止 `git add -A` 把依赖目录吸进索引 |
-| `bash.deny` | `string[]` | 黑名单：命中的命令**一律拒绝，调用方的白名单无法放宽**。通常写在 agent profile 里做项目骨架（`git stash`、`git reset`） |
+| `bash` | `object` | Optional. Without it bash is forbidden entirely; both columns empty also means forbidden |
+| `bash.read` | `string[]` | Read-only commands (typecheck, grep and the like). A literal is matched token by token as a prefix after splitting on whitespace; an entry starting with `re:` is matched as a regex against the whole string |
+| `bash.write` | `string[]` | Commands that write files (tests, builds and the like). The matching rules are the same; they count as "write activity" |
+| `bash.network` | `boolean` | Defaults to `false`, the sandbox has no network; turn it on only for commands that genuinely need the network |
+| `bash.writable` | `boolean` | Defaults to `false`, the sandbox root is read-only; when `true`, the directories matched by the scope, the cwd, the worktree root and `node_modules` are writable inside the sandbox (test artefacts, snapshots). When the cwd is a linked worktree, the main checkout's common git directory is writable as well — the worktree's index and refs live there, and without it `git add`/`commit`/`stash`/`switch -c` fail on `index.lock` |
+| `bash.writablePaths` | `string[]` | Additional paths granted write access (absolute paths, starting with `~`, or relative to the cwd). Put the global directories the toolchain has to write here, such as the pnpm store |
+| `bash.env` | `object` | Environment variables injected into the sandbox (written into the spec's `env`). `XDG_RUNTIME_DIR` (the sandbox's private /tmp, which pnpm's lock directory relies on) and, in the worktree case, `MISE_STATE_DIR` are injected by default |
+| `bash.gitExcludes` | `boolean` | Defaults to `true`. Injects global exclude rules into git inside the sandbox (`node_modules/`, `.pnpm-store/`), so that `git add -A` does not pull the dependency directories into the index |
+| `bash.deny` | `string[]` | Blacklist: a matched command is **always refused, and the caller's allowlist cannot widen it**. Usually written in an agent profile to enforce the project skeleton (`git stash`, `git reset`) |
 
-白名单外的 bash 命令，拒绝文案里会带上探测到的 pnpm store 路径——模型看得见，能把它和「父代理要写什么」一起汇报上来。扩展只探测不自动放行。
+For a bash command outside the allowlist, the refusal text carries the detected pnpm store path — the model can see it and report it together with "what the parent agent wants to write". The extension only detects it; it does not allow it automatically.
 
-条目两种写法：
+Entries come in two forms:
 
-- 字面量：按空白切词逐 token 前缀匹配。`"pnpm test"` 放行 `pnpm test -t foo`，不放行 `pnpm publish`。
-- `re:` 前缀：正则，整串锚定。`"re: ^pnpm -r (test|build)$"`。不自动猜正则——命令参数常含 `*`、`.`，猜错方向是误授权。
+- Literal: split on whitespace and match token by token as a prefix. `"pnpm test"` allows `pnpm test -t foo`, but not `pnpm publish`.
+- `re:` prefix: a regex, anchored against the whole string. `"re: ^pnpm -r (test|build)$"`. Regexes are not guessed automatically — command arguments often contain `*` and `.`, and guessing wrong in that direction grants more than was intended.
 
-## profile（角色默认值，不用每次传）
+## Profiles (per-role defaults, no need to pass them each time)
 
-`extensionBindings` 只能每次派单时手写，agent 定义里没有声明默认值的位置；忘了传就等于**完全不设限**。profile 让默认值跟 agent 定义走：
+`extensionBindings` can only be hand-written on each dispatch; an agent definition has nowhere to declare defaults, and forgetting to pass them means **no restriction at all**. A profile keeps the defaults with the agent definition:
 
 ```ts
-// .pi/agent-profiles/writer.ts（两行）
-// 路径必须写绝对路径：Node 不展开 import 里的 `~`
+// .pi/agent-profiles/writer.ts (two lines)
+// the path must be absolute: Node does not expand `~` in an import
 import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
 export default profile("writer");
 ```
@@ -135,12 +135,12 @@ export default profile("writer");
 ```markdown
 ---
 name: be-core
-subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, <项目根>/.pi/agent-profiles/writer.ts
+subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, <project root>/.pi/agent-profiles/writer.ts
 ---
 ```
 
 ```json
-// .pi/subagent-bindings.json（项目根）
+// .pi/subagent-bindings.json (project root)
 {
   "default": { "maxDenies": 5 },
   "writer": { "bash": { "read": ["mise run typecheck"], "write": ["mise run test"], "writable": true } },
@@ -148,86 +148,84 @@ subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index
 }
 ```
 
-规则：
+Rules:
 
-- 本次调用的 bindings 按 key 覆盖 profile；`bash` 整个对象覆盖（不合并数组）。
-- `bash.deny` 取并集且**不可被调用方放宽**——「结构性禁掉」靠它，不靠默认值。
-- profile 可以不写 `scope`：此时文件全拒、命令白名单照常生效（漏传 bindings 是响的失败）。
-- profile 读不到时全拒，不退回不设限。
-- 主会话不加载这些 loader，所以不会误锁主代理。
+- The bindings of this call override the profile per key; `bash` overrides as a whole object (arrays are not merged).
+- `bash.deny` is a union and **cannot be relaxed by the caller** — "structurally forbidden" relies on it, not on the defaults.
+- A profile may omit `scope`: file access is then refused entirely while the command allowlist still applies (a forgotten binding is a loud failure).
+- When the profile cannot be read, everything is refused; it does not fall back to no restriction.
+- The main session does not load these loaders, so the main agent is not locked down by accident.
 
-## worktree 里的 bash
+## bash in a worktree
 
-子代理跑在 pi-subagents 的 managed worktree 时（`worktree: true`），两件事要额外安排：
+Two things need extra handling when the subagent runs in a pi-subagents managed worktree (`worktree: true`):
 
-- **装依赖不归扩展管**：worktree 的 `node_modules` 是指向主仓的符号链接，`pnpm install` 会顺着链接装进主仓、链接本身不被替换，层级因此是错的。这件事交给 pi-subagents 的 `worktreeSetupHook`（本仓 `packages/worktree-setup`）在子代理启动前处理，见下一节。扩展只管沙箱内的写权限。
-- **pnpm 与 mise 都要写沙箱外的地方**：pnpm 的锁目录在 `XDG_RUNTIME_DIR`（`/run/user/<uid>`），mise 要把 worktree 的 `mise.toml` 登记进 `~/.local/state/mise/trusted-configs`。扩展默认把这两处指到沙箱私有 /tmp，所以这两个失败已经不用管；pnpm store 这类真正需要持久可写的地方，用 `bash.writablePaths` 显式给出。
-- **沙箱里 pnpm 用哪个 store 取决于写权限**：全局 store（`~/.local/share/pnpm/store`）在只读根下不可写时，pnpm 探测到就退回 `<项目>/node_modules/.pnpm-store`；把 store 目录写进 `bash.writablePaths`，`pnpm store path` 就仍指向全局 store（实测）。两种都能跑测试——项目内 store 落在本来就可写的 `node_modules/` 下。扩展用 git 全局排除规则保证它进不了索引，但项目自己的 `.gitignore` 也应忽略 `node_modules/`。
-- **沙箱里装依赖需要开网络**（`"network": true`）：无论用哪个 store，装新包都得访问 registry。默认断网时 `pnpm install` 必然失败。
+- **Installing dependencies is not the extension's job**: the worktree's `node_modules` is a symlink to the main checkout, so `pnpm install` follows the link and installs into the main checkout, and the link itself is not replaced, which leaves the hierarchy wrong. Leave this to pi-subagents' `worktreeSetupHook` (this repository's `packages/worktree-setup`), which handles it before the subagent starts; see the next section. The extension only manages write access inside the sandbox.
+- **Both pnpm and mise write outside the sandbox**: pnpm's lock directory lives in `XDG_RUNTIME_DIR` (`/run/user/<uid>`), and mise has to register the worktree's `mise.toml` in `~/.local/state/mise/trusted-configs`. The extension points both at the sandbox's private /tmp by default, so those two failures no longer need handling; places that genuinely have to be writable and persistent, such as the pnpm store, are given explicitly with `bash.writablePaths`.
+- **Which store pnpm uses inside the sandbox depends on write access**: when the global store (`~/.local/share/pnpm/store`) is not writable under the read-only root, pnpm detects that and falls back to `<project>/node_modules/.pnpm-store`; list the store directory in `bash.writablePaths` and `pnpm store path` still points at the global store (measured). Both of them run tests — the in-project store lands under `node_modules/`, which is writable anyway. The extension's git global exclude rules keep it out of the index, but the project's own `.gitignore` should ignore `node_modules/` as well.
+- **Installing dependencies inside the sandbox needs the network** (`"network": true`): whichever store is used, installing a new package has to reach the registry. With the network off by default, `pnpm install` is bound to fail.
 
-## worktree 依赖安装（worktree hook）
+## Worktree dependency installation (worktree hook)
 
-pi-subagents 每个 worktree 创建后、子代理启动前会跑一次 `worktreeSetupHook`，cwd 就是新工作树根。本仓提供的 hook 是 `packages/worktree-setup/worktree-setup.sh`，全局只装一个软链：
+pi-subagents runs the `worktreeSetupHook` once after each worktree is created and before the subagent starts, with the cwd set to the new worktree root. The hook provided by this repository is `packages/worktree-setup/worktree-setup.sh`; only one symlink is installed globally:
 
 ```text
-~/.pi/agent/extensions/subagent/worktree-setup.sh -> <本仓>/packages/worktree-setup/worktree-setup.sh
+~/.pi/agent/extensions/subagent/worktree-setup.sh -> <this repository>/packages/worktree-setup/worktree-setup.sh
 ```
 
-项目侧只要提交一个 shell 脚本 `<repo>/.pi/worktree-setup.sh`，没这个文件就什么都不做（所以同一个全局 hook 服务所有项目）：
+A project only has to commit a shell script at `<repo>/.pi/worktree-setup.sh`; without that file nothing happens (which is why one global hook serves every project):
 
 ```sh
 #!/bin/sh
 set -eu
-cd packages/pi-plugin      # manifest 不在根目录时自己 cd
+cd packages/pi-plugin      # cd yourself when the manifest is not in the root directory
 pnpm install --prefer-offline
 ```
 
-- **退出码就是契约**：hook 不二次判断「装好没」，项目在自己的脚本里决定。pnpm 12 装完还会因 `ERR_PNPM_IGNORED_BUILDS` 退 1，那就自己写 `|| true` 或加一条自检。自检的意思是把「怎样才算能用」写成项目自己的判据：
+- **The exit code is the contract**: the hook does not judge a second time whether the install worked; the project decides in its own script. pnpm 12 still exits 1 after installing because of `ERR_PNPM_IGNORED_BUILDS`, so write `|| true` yourself or add a self-check. A self-check means writing "what counts as usable" as the project's own criterion:
 
 ```sh
 #!/bin/sh
 set -u
-cd packages/pi-plugin                  # manifest 不在根目录时自己 cd
-pnpm install --prefer-offline || true  # 忽略 pnpm 12 的 ignored-builds 退出码
+cd packages/pi-plugin                  # cd yourself when the manifest is not in the root directory
+pnpm install --prefer-offline || true  # ignore pnpm 12's ignored-builds exit code
 
-# 判据归项目：确认 shim 真的能在**这个工作树里**解析到，而不是继承来的那份
+# the criterion belongs to the project: make sure the shim really resolves **in this worktree**, not in the inherited copy
 if ! node -e 'require.resolve("typescript")' >/dev/null 2>&1; then
 	printf 'worktree setup: dependencies are unusable in %s\n' "$PWD" >&2
 	exit 1
 fi
 ```
 
-静默跳过是这里最贵的失败模式：声明退 0、钩子以为成功、子代理起来才发现 `Cannot find module`。
-- **`node_modules` 软链由 hook 先删**。上游建 worktree 时会把**主仓根部**的 `node_modules` 软链进工作树（`linkNodeModulesIfPresent`），这是为了让不装依赖的工作树也能直接跑；软链指向的是**主仓当下装成了什么样**，两边都会出错：
-- **不装**：工作树 manifest 声明的包，主仓那棵树里没有（早先有人加了 manifest 但没重装），子代理就得到 `Cannot find module` —— 而那个包明明写在工作树自己的 `package.json` 里（实测：`is-number` 解析到 `<主仓>/node_modules/.pnpm/...`，`left-pad` 直接失败）。这和工作期间 `package.json` 有没有动无关。
-- **装**：pnpm 顺着软链写进主仓那份 —— 主仓目录 inode 不变，但多出工作树要的包（实测 4 条顶层条目 → 5 条，主仓自己的 `package.json` 根本没声明它）。
-- **记账被写到别人的目录里**：用 `virtualStoreType: global`（pnpm 官方推荐的 worktree 用法）时，每个项目把虚拟 store 记成**相对路径**写在 `node_modules/.modules.yaml`。透过软链打开的是主仓那份，而 pnpm 按工作树的深度算层级，于是安装把主仓那份改掉了：实测 `../../../../.local/share/pnpm/store/v11/links` → `../../../../../../.local/share/pnpm/store/v11/links`，manifest 全程没动。这个值只对最后写它的那个项目成立，从工作树解析会指到不存在的目录。所以 hook 在跑声明之前先删掉这条软链，真目录不动，声明拿到的是干净起点。想要回软链的项目在自己脚本里重建即可。根目录没有 `node_modules` 的项目不会建立软链，因此没有影响。
-- 输出记在 `~/.cache/pi-worktree-setup/<worktree 目录名>.log`；失败时 hook 把最后 20 行和日志路径打到 stderr，输出含 `not trusted` 时额外提示 mise 的 `trusted_config_paths`。
-- **hook 不经过沙箱**：它在子代理之前跑，用的是宿主权限。子代理自己再跑 `pnpm install` 仍然要沙箱内的写权限与 `network`。
-- hook 是 POSIX sh，需要内核认 shebang；Windows 得上原生可执行文件（上游用 `spawn(hookPath, [], { shell: false })`，Node 不会代跑 `.cmd`）。
+Skipping silently is the most expensive failure mode here: the declaration exits 0, the hook believes it succeeded, and the subagent only discovers `Cannot find module` once it starts.
+- **The hook deletes the `node_modules` symlink first**. When upstream creates a worktree it symlinks the **main checkout's root** `node_modules` into the worktree (`linkNodeModulesIfPresent`), so that a worktree which installs nothing can still run; the symlink points at **whatever the main checkout happens to have installed**, and both sides go wrong:
+- **Nothing installed**: a package the worktree's manifest declares but the main checkout's tree does not have (someone added the manifest earlier and never reinstalled) makes the subagent get `Cannot find module` — even though the package is right there in the worktree's own `package.json` (measured: `is-number` resolves to `<main checkout>/node_modules/.pnpm/...`, `left-pad` fails outright). This has nothing to do with whether `package.json` changed during the work.
+- **Installed**: pnpm writes through the symlink into the main checkout's copy — the main checkout's directory inode is unchanged, but it gains the package the worktree needed (measured: 4 top-level entries → 5, and the main checkout's own `package.json` never declared it).
+- **The bookkeeping is written into someone else's directory**: with `virtualStoreType: global` (the worktree usage pnpm officially recommends), each project records the virtual store as a **relative path** in `node_modules/.modules.yaml`. Opened through the symlink, that file is the main checkout's, while pnpm computes the depth from the worktree, so the install rewrites the main checkout's copy: measured `../../../../.local/share/pnpm/store/v11/links` → `../../../../../../.local/share/pnpm/store/v11/links`, with the manifest untouched throughout. That value only holds for the project that wrote it last; resolved from the worktree it points at a directory that does not exist. So the hook deletes this symlink before running the declaration, leaves a real directory alone, and the declaration gets a clean starting point. A project that wants the symlink back can recreate it in its own script. Projects without a `node_modules` in the root do not get a symlink, so there is no impact.
+- Output goes to `~/.cache/pi-worktree-setup/<worktree directory name>.log`; on failure the hook prints the last 20 lines and the log path to stderr, and when the output contains `not trusted` it additionally points at mise's `trusted_config_paths`.
+- **The hook does not go through the sandbox**: it runs before the subagent, with host permissions. If the subagent runs `pnpm install` itself, it still needs write access inside the sandbox and `network`.
+- The hook is POSIX sh, so the kernel has to honour the shebang; on Windows it has to be a native executable (upstream uses `spawn(hookPath, [], { shell: false })`, and Node will not run `.cmd` for you).
 
-## 生效后的规则
+## Rules in effect
 
-- 范围内：`read`/`edit`/`write`/`grep`/`find`/`ls` 放行（`readOnly` 时 `edit`/`write` 拒绝）。
-- 一律拒绝：`powershell`/`codemode`；`scope`/`allowTools` 之外的未知工具。
-- `contact_supervisor` / `intercom` / `structured_output` 始终放行，**停机之后也放行**：子代理中途向监督者转告是正当通道，不能被范畴或探针关掉。
-- 停机是硬停（`terminate`）：整批结果都 terminating 时本轮直接结束，不再有收尾回合。所以求援要在停机前用，不要指望被停之后还能报。
-- `bash`：没配白名单时一律拒绝；配了则只有命中 `read`/`write` 两列的命令执行，并且自动改写为
-  helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录为 scope 命中目录、cwd 与 `node_modules`（`writable` 时）再加上 `writablePaths`。命令里出现
-  `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
-- **沙箱内的网络失败会被标注**：离线 bash 出现 `ENETUNREACH` / `EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo failed` 时，结果末尾补一句 `[sandbox]`：网络是主代理禁的，不是机器坏了，换 registry / flag / timeout 也一样失败，要网络就找 `contact_supervisor`（`"network": true`）。`ECONNREFUSED` 不标注——loopback 通着，那是正常测试结果。
-- **写越界也会被标注**：bash 里写到授权范围外，内核回 `EACCES` / `Permission denied`——和普通文件权限问题同文案。判定不靠文案猜：扩展拿失败行里的路径与这条命令的 `spec.write` 比对，路径在授权外、而宿主读得到它，就在结果末尾补一句 `[sandbox]`，说明这是授权而不是文件系统故障，要写就找 `contact_supervisor`。授权内的失败、以及宿主权限本身不够（如读 `/etc/shadow`）都不标注。
-- 越界拒绝的文案是英文，会说清「哪个路径不在范围、不要重试、需要就上报」，并列出当前 scope。缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理（文案写 `no path was given`），`write`/`edit` 必须给 path（文案写 `needs a path`）。这类拒绝不计入撞权限计数。
-- 范围内会话可用 `/permission` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态（键名为英文：`Source`、`Mode`、`bash read`、`bash write`、`bash deny`、`Sandbox`、`Sandbox writable paths`、`Reads`、`Denials`）。
+- Inside the scope: `read`/`edit`/`write`/`grep`/`find`/`ls` are allowed (with `readOnly`, `edit`/`write` are refused).
+- Always refused: `powershell`/`codemode`; unknown tools outside `scope`/`allowTools`.
+- `contact_supervisor` / `intercom` / `structured_output` are always allowed, **allowed after the stop as well**: reporting to the supervisor mid-run is a legitimate channel and must not be shut off by a criterion or a probe.
+- The stop is hard (`terminate`): when the whole batch of results is terminating, the turn ends right there, with no closing round. So ask for help before the stop; do not expect to be able to report anything after being stopped.
+- **bash**: without an allowlist it is refused outright; with one, only commands matching the `read`/`write` columns run, and each is rewritten to run in the helper sandbox — the file scope is enforced by Landlock, the network is off by default, the writable directories are the ones matched by the scope, the cwd and `node_modules` (when `writable`), plus `writablePaths`. A command containing shell metacharacters such as `; & | < > \` $` is refused outright, so a construction like "run `pnpm test` and then `cat another file`" does not get through.
+- **Network failures inside the sandbox are annotated**: when an offline bash hits `ENETUNREACH` / `EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo failed`, a `[sandbox]` note is appended at the end of the result: the network was turned off by the parent agent, the machine is not broken, changing the registry / flag / timeout fails the same way, and if the network is needed, ask `contact_supervisor` (`"network": true`). `ECONNREFUSED` is not annotated — loopback works, that is a normal test result.
+- **Out-of-scope writes are annotated as well**: when bash writes outside the granted scope, the kernel returns `EACCES` / `Permission denied` — the same wording as an ordinary file permission problem. The decision is not made by guessing at the wording: the extension takes the path out of the failure line and compares it with this command's `spec.write`; if the path is outside the grant and the host can read it, a `[sandbox]` note is appended at the end of the result, saying that this is an authorisation rather than a filesystem fault, and that writing requires `contact_supervisor`. Failures inside the grant, and failures caused by insufficient host permissions themselves (such as reading `/etc/shadow`), are not annotated.
+- The text of an out-of-scope refusal is in English, and it spells out "which path is out of scope, do not retry, report it if you need it", and lists the current scope. A refusal for a missing path does not count as a permission problem: `grep`/`find` without a path are handled as the cwd (the text says `no path was given`), and `write`/`edit` must be given a path (the text says `needs a path`). Such refusals do not count towards the collision count.
+- Inside the scope a session can use `/permission` to see the current scope, the two bash columns, the sandbox's writable paths, the pnpm store, the read count, the collision count and the probe state (the key names are in English: `Source`, `Mode`, `bash read`, `bash write`, `bash deny`, `Sandbox`, `Sandbox writable paths`, `Reads`, `Denials`).
 
-## 作为父代理的注意事项
+## Notes for the parent agent
 
-- 子代理报 `no path was given` 或 `needs a path` 时：那是工具参数缺失，不是它走错了目录。给子代理的 task 里写清文件路径。
-- 子代理报 `is outside this task's scope` 时，判断该路径是否真的属于本任务：属于就扩大 `scope` 重派；不属于说明任务描述有歧义，先修任务描述。先核对 scope 写法本身（目录要写成 `dir` / `dir/` / `dir/**`），再怀疑子代理走错目录。
-- 同一批里有放行结果时（整批不全是 terminating），本轮会继续，之后的调用一律拿到「停机理由」那段文字（里面是历史路径）。判断时只认最后一行的 criterion，不要把里面的路径当成本轮任务的路径。
-- 不要为绕开拒绝而反复重试范围外的路径。
-- 需要子代理自己跑测试/typecheck 时，把只读命令写进 `bash.read`、会写文件的写进 `bash.write`（查得细就用 `re:` 正则，别写 `re: .*`）。测试产物要落盘就加 `"writable": true`；沙箱默认断网，安装依赖之类会被拒。
-- 沙箱挡越界写与联网，不挡读：跑测试要读整棵树，所以白名单命令在沙箱里仍可 `cat` 范围外文件。不要把 bash 白名单当成「连读也锁住」的手段。
-- 子代理报 `command not in the allowlist` 时，先判断这条命令是否本任务必需：必需就把它加进对应列重派；不必要就改任务描述，别让它反复试。拒绝文案里会带 pnpm store 的路径和 `bash.writablePaths` 的提示——子代理要装依赖时把它抄进去即可，不要让它自己去装。
-- 嵌套子代理不继承 bindings：给可能嵌套委派的代理上锁时，不要同时开 `allowNestedSubagents`。
-- bindings 总量上限 16 KiB，scope 用简洁 glob 即可；本扩展所有字段共用 namespace `pi-subagent-extend/1`，上限按整个 bindings 计。
+- When the subagent reports `no path was given` or `needs a path`: the tool argument was missing, it did not go to the wrong directory. Put the file paths into the task you give the subagent.
+- When the subagent reports `is outside this task's scope`, decide whether that path really belongs to this task: if it does, widen `scope` and dispatch again; if it does not, the task description is ambiguous, so fix the task description first. Check the scope syntax itself first (a directory has to be written as `dir` / `dir/` / `dir/**`), and only then suspect that the subagent went to the wrong directory.
+- When a batch contains an allowed result (the batch is not all terminating), the turn continues, and every later call gets the text of the "stop reason" (it holds historical paths). When judging, trust only the criterion on the last line; do not treat the paths inside it as this task's paths.
+- Do not retry out-of-scope paths over and over to get around a refusal.
+- When the subagent has to run tests/typecheck itself, put the read-only commands into `bash.read` and the file-writing ones into `bash.write` (use a `re:` regex when you need to be precise, but never `re: .*`). If the test artefacts have to land on disk, add `"writable": true`; the sandbox has no network by default, so installing dependencies and the like is refused.
+- The sandbox blocks out-of-scope writes and networking, but not reads: running tests has to read the whole tree, so an allowlisted command can still `cat` files outside the scope inside the sandbox. Do not treat the bash allowlist as a means of locking reads down as well.
+- When the subagent reports `command not in the allowlist`, first decide whether that command is really needed for this task: if it is, add it to the matching column and dispatch again; if it is not, change the task description instead of letting it keep trying. The refusal text carries the pnpm store path and the `bash.writablePaths` hint — copy it in when the subagent has to install dependencies, instead of letting it install them itself.
+- Nested subagents do not inherit bindings: when you lock down an agent that may delegate in turn, do not also enable `allowNestedSubagents`.
+- The bindings are capped at 16 KiB in total, so keep the scope globs terse; all fields of this extension share the namespace `pi-subagent-extend/1`, and the cap applies to the whole bindings object.
