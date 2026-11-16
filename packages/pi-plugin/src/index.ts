@@ -46,7 +46,7 @@ import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
-import { networkFailureNote } from "./sandbox-note.ts";
+import { networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
 import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
@@ -578,8 +578,9 @@ const SANDBOX_DEVICE_PATHS = [
 	"/dev/pts",
 ];
 
-export function writeSpec(cwd: string, rule: BashRule, policy: Policy): string | undefined {
-	const spec = {
+/** 这次命令的 spec；`writeRefusalNote` 要拿它的 `write` 判断越界写。 */
+export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
+	return {
 		cwd,
 		read: ["/"],
 		// The helper mounts a private tmpfs on the scratch dir, so writes there stay
@@ -596,6 +597,10 @@ export function writeSpec(cwd: string, rule: BashRule, policy: Policy): string |
 		offline: rule.network !== true,
 		env: sandboxEnv(cwd, rule),
 	};
+}
+
+/** 把 spec 写到 helper 读的位置，返回文件路径。 */
+function writeSpecFile(spec: ReturnType<typeof buildSpec>): string | undefined {
 	try {
 		const dir = resolve(homedir(), ".cache", "pi-subagent-extend");
 		mkdirSync(dir, { recursive: true });
@@ -682,6 +687,8 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// 所以在 session_start 里解析。
 	const call = extractCallConfig(process.env[BINDINGS_ENV]);
 	let policy: Policy = INACTIVE;
+	/** toolCallId → 这次 bash 的 spec 摘要（写清单、cwd、是否离线）。 */
+	const sandboxSpecs = new Map<string, { write: string[]; cwd: string; offline: boolean }>();
 	if (call.error) {
 		policy = denyAll(call.error);
 	} else if (call.config) {
@@ -768,9 +775,12 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (probe && isBash) probe.noteBashResult(text);
 		// bash 没开时命令根本没跑，别去解释它的结果。
 		const offline = policy.bash !== undefined && policy.bash.network !== true;
+		const ran = sandboxSpecs.get(event.toolCallId);
+		if (ran) sandboxSpecs.delete(event.toolCallId);
 		const hints = [
 			handoffHintFor(text),
 			isBash ? networkFailureNote(text, offline) : undefined,
+			isBash && ran ? writeRefusalNote(text, ran.write, ran.cwd) : undefined,
 		].filter((hint): hint is string => Boolean(hint));
 		if (!hints.length) return undefined;
 		return { content: withHint(event.content, hints.join("\n\n")) };
@@ -874,10 +884,18 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				const reason = caps?.landlock.reason ?? "helper --describe returned no usable information";
 				return deny(`pi-subagent-extend: this kernel cannot enforce the task scope: ${reason}`);
 			}
-			const specFile = writeSpec(cwd, rule, policy);
+			const spec = buildSpec(cwd, rule, policy);
+			const specFile = writeSpecFile(spec);
 			if (!specFile) {
 				return deny("pi-subagent-extend: cannot write the sandbox spec (check that ~/.cache/pi-subagent-extend is writable)");
 			}
+			// 记下这条命令的写权限清单：tool_result 判「写越界」时要用它当事实依据，
+			// 不靠文案猜。挡住条数上限，避免结果永远不回来的调用把表撑大。
+			if (sandboxSpecs.size >= 64) {
+				const oldest = sandboxSpecs.keys().next().value as string | undefined;
+				if (oldest !== undefined) sandboxSpecs.delete(oldest);
+			}
+			sandboxSpecs.set(event.toolCallId, { write: spec.write, cwd, offline: spec.offline });
 			(event.input as { command?: string }).command = wrapInSandbox(command, specFile, helper);
 			return undefined;
 		}

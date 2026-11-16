@@ -269,6 +269,12 @@ after it has been rewritten. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary pa
 - A missing helper fails closed: allowlisted commands do not run either, and the refusal
   states the reason and the build command. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary
   path.
+- A `bash` write outside the granted directories gets the same treatment, but it is decided
+  by evidence rather than by wording: the extension keeps the `write` list of the spec the
+  command ran under, takes the path out of the refusal line, and annotates only when that path
+  lies outside the list **and** the host can read it (a readable file cannot have been refused
+  for reading, since reads are unrestricted). Inside the grant, or a host permission the
+  sandbox did not cause, stays silent.
 - An offline `bash` result that fails on the network (`ENETUNREACH`, `EAI_AGAIN`,
   `ENOTFOUND`, resolve-host failures) gets a one-line `[sandbox]` note: the network is
   disabled by the bindings, this is a permission rather than a broken machine, retrying will

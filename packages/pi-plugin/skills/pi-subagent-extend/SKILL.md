@@ -216,6 +216,7 @@ fi
   helper 沙箱里运行——文件范围由 Landlock 强制、默认断网、可写目录为 scope 命中目录、cwd 与 `node_modules`（`writable` 时）再加上 `writablePaths`。命令里出现
   `; & | < > \` $` 等 shell 元字符直接拒绝，所以「先 `pnpm test` 再 `cat 别的文件`」这种拼法走不通。
 - **沙箱内的网络失败会被标注**：离线 bash 出现 `ENETUNREACH` / `EAI_AGAIN` / `ENOTFOUND` / `getaddrinfo failed` 时，结果末尾补一句 `[sandbox]`：网络是主代理禁的，不是机器坏了，换 registry / flag / timeout 也一样失败，要网络就找 `contact_supervisor`（`"network": true`）。`ECONNREFUSED` 不标注——loopback 通着，那是正常测试结果。
+- **写越界也会被标注**：bash 里写到授权范围外，内核回 `EACCES` / `Permission denied`——和普通文件权限问题同文案。判定不靠文案猜：扩展拿失败行里的路径与这条命令的 `spec.write` 比对，路径在授权外、而宿主读得到它，就在结果末尾补一句 `[sandbox]`，说明这是授权而不是文件系统故障，要写就找 `contact_supervisor`。授权内的失败、以及宿主权限本身不够（如读 `/etc/shadow`）都不标注。
 - 越界拒绝的文案是英文，会说清「哪个路径不在范围、不要重试、需要就上报」，并列出当前 scope。缺 path 的拒绝不算权限问题：`grep`/`find` 不带 path 会按 cwd 处理（文案写 `no path was given`），`write`/`edit` 必须给 path（文案写 `needs a path`）。这类拒绝不计入撞权限计数。
 - 范围内会话可用 `/permission` 查看当前范围、bash 两列、沙箱可写路径、pnpm store、read 计数、撞权限计数与探针状态（键名为英文：`Source`、`Mode`、`bash read`、`bash write`、`bash deny`、`Sandbox`、`Sandbox writable paths`、`Reads`、`Denials`）。
 

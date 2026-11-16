@@ -1212,5 +1212,73 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   离线沙箱的网络失败被标注为「主代理未授权」，且不误报本地拒绝与在线会话")
 }
 
+// 38. 写越界：结果要说明「这个路径不在主代理给的写授权里」，而不是让子代理
+//     以为文件系统坏了、去换目录或加 sudo。判据是路径 vs spec.write，不是文案猜。
+{
+  // 注意：spec.write 天然包含 tmpdir() 与 cwd，所以「授权外」的路径不能用 /tmp 下的。
+  const outsidePath = `/var/tmp/pi-extend-write-${process.pid}.txt`
+  const insidePath = join(workdir, "inside.txt")
+  const script = join(workdir, "write.sh")
+  writeFileSync(
+    script,
+    [
+      "#!/bin/sh",
+      "node -e '",
+      'const fs=require("fs");',
+      'try { fs.writeFileSync(process.argv[1],"x"); console.log("wrote"); }',
+      'catch (e) { console.error(e.code+": permission denied, open "+process.argv[1]); process.exit(1); }',
+      "' \"$1\"",
+      "",
+    ].join("\n"),
+  )
+
+  const bindings = JSON.stringify({
+    "pi-subagent-extend/1": { scope: ["**"], bash: { write: ["sh write.sh"], writable: true } },
+  })
+
+  // 授权外：命令真的被内核拒掉。
+  const h = await handler({ bindings })
+  const outInput = { command: `sh write.sh ${outsidePath}` }
+  assert.equal(await h.call("bash", outInput), undefined, "the writer script is allowlisted")
+  const outSpec = specOf(outInput.command)
+  assert.equal(outSpec.write.includes(outsidePath), false, "the outside path is not granted")
+  const outExec = spawnSync("/bin/sh", ["-c", outInput.command], { cwd: workdir, encoding: "utf8" })
+  assert.match(`${outExec.stdout}${outExec.stderr}`, /EACCES|Permission denied/u, "the write really is refused")
+  assert.equal(existsSync(outsidePath), false, "nothing was written outside the grant")
+
+  const outNote = await h.result("bash", `${outExec.stdout}${outExec.stderr}`)
+  const note = typeof outNote?.content === "string" ? outNote.content : (outNote?.content?.at(-1)?.text ?? "")
+  assert.match(note, /\[sandbox\]/u, "the refusal is annotated")
+  assert.ok(note.includes(outsidePath), "the note names the path that was refused")
+  assert.match(note, /writablePaths/u, "the note says what the parent would have to grant")
+  assert.match(note, /contact_supervisor/u, "the note names the channel")
+  assert.equal(await h.result("bash", note), undefined, "already annotated results are left alone")
+
+  // 授权内：同样的脚本写得进去，且不该有任何提示。
+  const inInput = { command: `sh write.sh ${insidePath}` }
+  assert.equal(await h.call("bash", inInput), undefined, "the writer script is allowlisted")
+  const inExec = spawnSync("/bin/sh", ["-c", inInput.command], { cwd: workdir, encoding: "utf8" })
+  assert.equal(inExec.status, 0, `writing inside the grant works: ${inExec.stderr}`)
+  assert.ok(existsSync(insidePath), "the file really landed")
+  assert.equal(await h.result("bash", `${inExec.stdout}${inExec.stderr}`), undefined, "a granted write is not annotated")
+
+  // 宿主权限被拒不能归因到沙箱：我们自己也读不到那个文件时，保持沉默。
+  await h.call("bash", { command: `sh write.sh ${outsidePath}` })
+  assert.equal(
+    await h.result("bash", "cat: /etc/shadow: Permission denied"),
+    undefined,
+    "a host-permission refusal is not blamed on the sandbox",
+  )
+  // 文案里有权限拒绝但路径就在授权内 → 也不是越界写。
+  await h.call("bash", { command: `sh write.sh ${outsidePath}` })
+  assert.equal(
+    await h.result("bash", `EACCES: permission denied, open '${insidePath}'`),
+    undefined,
+    "a refusal on a granted path is not reported as out of scope",
+  )
+  h.restore()
+  console.log("  ok   写越界被标注为授权问题；授权内与宿主权限被拒都不误报")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")
