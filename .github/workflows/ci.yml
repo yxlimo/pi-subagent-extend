@@ -10,33 +10,55 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
-    # Both enforcement shapes have to be covered, because the helper runs in
-    # whichever one the host allows:
-    #   namespaces  the sandbox gets user/mount/net/pid namespaces
-    #   fallback    the host refuses them, and Landlock alone carries the cut
-    # The fallback leg is the one that broke silently before, so testing only
-    # the mode a patched runner gives us would not have caught it.
+    # Three legs, because the helper behaves differently on each shape a host
+    # can present, and the default runner only shows one of them. The ABI and
+    # namespace numbers below were measured on these images:
+    #
+    #   ubuntu-latest (7.x)  ABI 8, user namespaces refused by AppArmor
+    #   ubuntu-24.04  (6.x)  ABI 8, user namespaces refused by AppArmor
+    #   ubuntu-22.04  (5.15) ABI 4, user namespaces allowed
+    #
+    #   namespaces   modern kernel, restriction lifted -> the real sandbox
+    #   fallback     modern kernel, restriction in place -> Landlock alone
+    #   abi-below-7  5.15 kernel -> the sandbox refuses to run at all
+    #
+    # The fallback leg is the one that broke silently before, and the ABI leg
+    # was only ever simulated with a stub helper, so both are here for real.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - mode: namespaces
+          - os: ubuntu-latest
+            mode: namespaces
+            lift: "yes"
             expect: network isolated
-          - mode: fallback
+            expect_exit: 0
+          - os: ubuntu-latest
+            mode: fallback
+            lift: "no"
             expect: cannot enter the namespaces
+            expect_exit: 0
+          - os: ubuntu-22.04
+            mode: abi-below-7
+            lift: "no"
+            expect: ABI 7 is required
+            expect_exit: 76
+    runs-on: ${{ matrix.os }}
     name: check (${{ matrix.mode }})
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Nothing here pushes, and a persisted token would sit in .git/config
+          # where the sandboxed commands these tests run can read it.
+          persist-credentials: false
 
       # Ubuntu's default (apparmor_restrict_unprivileged_userns=1) lets
       # unshare(CLONE_NEWUSER) succeed, then refuses setgroups, mount, netns
-      # and pidns. Measured on this image:
-      #   default   setgroups EPERM, unshare(NEWNS|NEWNET|NEWPID) EPERM
-      #   sysctl 0  all four succeed
-      # The fallback leg deliberately leaves the default alone.
+      # and pidns. Measured: default -> setgroups EPERM and
+      # unshare(NEWNS|NEWNET|NEWPID) EPERM; after this -> all four succeed.
+      # The other legs deliberately leave the default alone.
       - name: Allow unprivileged user namespaces
-        if: matrix.mode == 'namespaces'
+        if: matrix.lift == 'yes'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - uses: pnpm/action-setup@v6
@@ -63,13 +85,13 @@ jobs:
         run: |
           cargo test --manifest-path packages/helper/Cargo.toml --locked
 
-      # Say out loud whether the sandbox really got its namespaces. The helper
-      # reports entering the network namespace and shadowing the resolver
-      # sockets on stderr, and this step fails when that line is missing: a
-      # quiet fallback to Landlock-only otherwise looks exactly like success.
+      # Say out loud which shape this leg got. Each leg asserts the shape it is
+      # supposed to see, so a run that quietly took the wrong path fails here
+      # instead of passing.
       - name: Sandbox self-check
         env:
           EXPECT: ${{ matrix.expect }}
+          EXPECT_EXIT: ${{ matrix.expect_exit }}
         run: |
           cargo build --release \
             --manifest-path packages/helper/Cargo.toml --locked
@@ -84,8 +106,8 @@ jobs:
           code=$?
           set -e
           printf '%s\n' "$out"
-          if [ "$code" -ne 0 ]; then
-            echo "::error::the helper exited $code"
+          if [ "$code" -ne "$EXPECT_EXIT" ]; then
+            echo "::error::expected exit $EXPECT_EXIT, got $code"
             exit 1
           fi
           case "$out" in
