@@ -182,7 +182,22 @@ cd packages/pi-plugin      # manifest 不在根目录时自己 cd
 pnpm install --prefer-offline
 ```
 
-- **退出码就是契约**：hook 不二次判断「装好没」，项目在自己的脚本里决定。pnpm 12 装完还会因 `ERR_PNPM_IGNORED_BUILDS` 退 1，那就自己写 `|| true` 或加一条自检。
+- **退出码就是契约**：hook 不二次判断「装好没」，项目在自己的脚本里决定。pnpm 12 装完还会因 `ERR_PNPM_IGNORED_BUILDS` 退 1，那就自己写 `|| true` 或加一条自检。自检的意思是把「怎样才算能用」写成项目自己的判据：
+
+```sh
+#!/bin/sh
+set -u
+cd packages/pi-plugin                  # manifest 不在根目录时自己 cd
+pnpm install --prefer-offline || true  # 忽略 pnpm 12 的 ignored-builds 退出码
+
+# 判据归项目：确认 shim 真的能在**这个工作树里**解析到，而不是继承来的那份
+if ! node -e 'require.resolve("typescript")' >/dev/null 2>&1; then
+	printf 'worktree setup: dependencies are unusable in %s\n' "$PWD" >&2
+	exit 1
+fi
+```
+
+静默跳过是这里最贵的失败模式：声明退 0、钩子以为成功、子代理起来才发现 `Cannot find module`。
 - **`node_modules` 软链由 hook 先删**。上游建 worktree 时会把**主仓根部**的 `node_modules` 软链进工作树（`linkNodeModulesIfPresent`），这是为了让不装依赖的工作树也能直接跑；软链指向的是**主仓当下装成了什么样**，两边都会出错：
 - **不装**：工作树 manifest 声明的包，主仓那棵树里没有（早先有人加了 manifest 但没重装），子代理就得到 `Cannot find module` —— 而那个包明明写在工作树自己的 `package.json` 里（实测：`is-number` 解析到 `<主仓>/node_modules/.pnpm/...`，`left-pad` 直接失败）。这和工作期间 `package.json` 有没有动无关。
 - **装**：pnpm 顺着软链写进主仓那份 —— 主仓目录 inode 不变，但多出工作树要的包（实测 4 条顶层条目 → 5 条，主仓自己的 `package.json` 根本没声明它）。
