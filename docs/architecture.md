@@ -135,13 +135,16 @@ were stopped mid-task by the criterion before the reset existed.
 
 `maxDenies` defaults to five; an explicit `0` disables it. Only refusals that **widening the
 parent's authorisation could resolve** count: an out-of-scope path, a command not in the
-allowlist, the read budget, a `readOnly` write, a tool missing from `allowTools`, bash disabled.
+allowlist, the read budget, a tool missing from `allowTools`, bash disabled.
 
 Write refusals have their own budget, `maxWriteDenies`, defaulting to two. It is separate on
 purpose: a reviewer that keeps trying to write its report is making a usage mistake, and the answer
 is to deliver the report another way, not to conclude that the parent granted the wrong scope. A
-single out-of-scope read therefore does not push a write refusal towards a stop, and the refusal
-says so — it names the write scope and points at the report.
+`readOnly: true` write belongs on this budget rather than the one above, because it is the same
+refusal as an empty `writeScope`: writing will not become possible however much is granted, so the
+way out is a report, not an escalation. A single out-of-scope read therefore does not push a write
+refusal towards a stop, and the refusal says so — it names the write scope (or the read-only mode)
+and points at the report.
 
 Usage errors and hard rules never count: a missing path, shell metacharacters, an empty command,
 `powershell`/`codemode`, or a command matched by a profile's `bash.deny`. Those cannot be fixed by
@@ -158,10 +161,12 @@ refusals instead of retrying until the deadline.
 
 ### The stop is hard
 
-At the budget the subagent is warned that the parent most likely authorised the wrong paths, and
-is told to escalate; one more counted refusal ends the run. Every blocked result carries
-`terminate`, so pi ends the turn as soon as the whole batch is terminating. There is no closing
-report after a stop: the parent reads what the subagent produced before it, plus the refusal text.
+At the grant budget the subagent is warned that the parent most likely authorised the wrong paths,
+and is told to escalate; at the write budget it is told that a report is the deliverable and that
+the write scope is the limit. One more counted refusal ends the run either way. Every blocked
+result carries `terminate`, so pi ends the turn as soon as the whole batch is terminating. There is
+no closing report after a stop: the parent reads what the subagent produced before it, plus the
+refusal text.
 
 That is why `contact_supervisor` and `intercom` are checked **before** every stop mechanism. Once
 a run is stopping, the model cannot act on advice — the refusal text addresses the parent instead,

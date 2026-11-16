@@ -1876,5 +1876,52 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   TMPDIR 不在 /tmp 下时，那个目录也写进 spec 并被私有化；默认值时不写")
 }
 
+// 59. readOnly 的写拒属于写预算，不是授权预算。
+//     readOnly 与 writeScope: [] 是同一种处境：写不了、放宽读范围也解决不了，出路是改成交报告，
+//     而不是去求援。旧实现把它交给 bail（授权预算）：第 5 次才 warn、第 6 次才停，
+//     文案还让子代理 contact_supervisor —— 与 writeScope: [] 的行为和文档里的「等价」不符。
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }) })
+  const first = await h.call("write", { path: "src/a.ts", content: "x" })
+  assert.equal(first?.block, true, "a readOnly write is refused")
+  assert.match(first.reason, /read-only/, "the refusal says the session is read-only")
+  assert.equal(first.terminate, undefined, "the first refusal neither warns nor stops")
+
+  // 计数归属直接看 /permission：写拒 1 次，读拒仍是 0 次。
+  const permission = h.commands.permission
+  assert.ok(permission, "/permission is registered")
+  await permission.handler("", { cwd: workdir, ui: { notify: (m: string) => h.ui.push(m) } })
+  const status = h.ui.at(-1) ?? ""
+  assert.match(status, /read denials: 0\/5/i, "a readOnly write leaves the grant budget untouched")
+  assert.match(status, /write denials: 1\/2/i, "and is charged to the write budget")
+
+  const second = await h.call("write", { path: "src/b.ts", content: "x" })
+  assert.equal(second?.block, true, "the second readOnly write is refused")
+  assert.equal(second.terminate, undefined, "at two refusals it only warns: the write budget, not the grant budget of five")
+  assert.match(second.reason, /Write refusal 2 in a row/, "the warning names the write budget")
+  assert.match(second.reason, /report/i, "and gives the way out: deliver the finding as a report")
+  assert.match(second.reason, /one more refusal ends the run/, "and says the next refusal stops the run")
+
+  const third = await h.call("write", { path: "src/c.ts", content: "x" })
+  assert.equal(third?.block, true, "the third readOnly write is refused")
+  assert.equal(third.terminate, true, "the third ends the run")
+  assert.match(third.reason, /write budget/, "the stop text names the criterion that fired")
+  assert.match(third.reason, /report/, "and tells the parent a report was the intended deliverable")
+  h.restore()
+
+  // 判别式：授权预算压到 1。若 readOnly 写拒记在授权预算上，第一次就会 warn、第二次就硬停。
+  const narrow = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true, maxDenies: 1 } }),
+  })
+  const one = await narrow.call("edit", { path: "src/a.ts", content: "x" })
+  assert.equal(one?.block, true, "a readOnly edit is refused")
+  assert.doesNotMatch(one.reason, /in a row/, "a grant budget of one is not reached by the first readOnly write")
+  const two = await narrow.call("write", { path: "src/b.ts", content: "x" })
+  assert.equal(two?.terminate, undefined, "nor spent by the second: the write budget owns these refusals")
+  assert.match(two?.reason ?? "", /Write refusal 2 in a row/, "the second refusal warns on the write budget")
+  narrow.restore()
+  console.log("  ok   readOnly 的写拒走写预算：第 2 次 warn（指向报告）、第 3 次硬停")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

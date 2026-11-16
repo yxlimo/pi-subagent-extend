@@ -23,7 +23,7 @@
  *
  * 生效时的规则：
  * - read / edit / write / grep / find / ls：解析 path（缺省为 cwd），命中范围
- *   放行，否则拒绝；readOnly 时 edit / write 一律拒绝
+ *   放行，否则拒绝；readOnly 时 edit / write 一律拒绝（走写预算，出路是回报告）
  * - bash：默认拒绝。bindings 里写 bash.allow（命令前缀白名单，如 "pnpm run typecheck"）
  *   后，只有命中白名单的命令放行，并且改写成交给沙箱 helper 执行：读写范围由
  *   Landlock 强制（内核 ABI 7 起），网络默认断（bash.network 可开）：断网时连
@@ -1078,7 +1078,12 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			return bail(`pi-subagent-extend: read budget exhausted (${policy.maxReads} reads).`);
 		}
 		if (isWrite && policy.readOnly) {
-			return bail(`pi-subagent-extend: this session is read-only; ${event.toolName} is refused (source: ${policy.source}).`);
+			// readOnly 与 writeScope: [] 是同一种处境（写不了、放宽读范围也解决不了），所以走写预算：
+			// 出路是改成交报告，而不是去求援。记到授权预算上会让子代理连撞 5 次、还被指去
+			// contact_supervisor——它求不到任何东西，readOnly 是父代理刻意的选择。
+			return writeBail(
+				`pi-subagent-extend: this session is read-only; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+			);
 		}
 		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
 		// 这是用法错误不是权限错误，不计入撞权限计数。
@@ -1222,9 +1227,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			return { block: true, reason: boundary.reason, terminate: false };
 		}
 
-		// 拒绝分两类，分类标准只有一条：**父代理放宽授权能不能解决**。
-		//   能 → 撞权限计数（bail）：范围外路径、命令不在白名单、read 预算、readOnly 写、
+		// 拒绝分三类，分类标准只有一条：**父代理放宽授权能不能解决**。
+		//   能 → 撞权限计数（bail）：范围外路径、命令不在白名单、read 预算、
 		//         工具不在 allowTools、整个 bash 被关。这些是「授权与任务不匹配」的信号。
+		//   写不了 → 写预算（writeBail）：写范围外、readOnly 会话里的写。放宽授权也解决不了，
+		//          正解是改成交报告，所以计数与文案都跟授权那类分开。
 		//   不能 → 只拒不计（deny）：用法错误（缺 path、空命令、shell 元字符）、
 		//          项目 profile 的硬禁令、永远不开放的工具、环境/内核缺能力。
 		// 把后一类算进预算，会让一次参数写错就提前判死长任务。
