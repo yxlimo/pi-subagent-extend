@@ -49,8 +49,19 @@ points at whatever the main checkout happens to have installed, and both directi
   gains the packages the worktree asked for — measured 4 → 5 top-level entries with nothing added
   to the main checkout's own manifest.
 
+- **pnpm's bookkeeping is rewritten in the wrong checkout.** With `virtualStoreType: global`
+  (pnpm's own recommendation for git worktrees) each project records the virtual store as a
+  *relative* path in `node_modules/.modules.yaml`. Opened through the link, that file belongs to the
+  main checkout while the depth pnpm computes belongs to the worktree, so an install rewrites the
+  main checkout's copy: `../../../../.local/share/pnpm/store/v11/links` became
+  `../../../../../../.local/share/pnpm/store/v11/links` in a measured run, with the manifest
+  untouched. That value now describes whichever project ran last — resolved from the worktree it
+  points at a directory that does not exist (measured `exists: false`).
+
 So the hook removes that link before running the declaration (a real directory is left alone) and
-the project decides what to install.
+the project decides what to install. Measured with the hook: the worktree gets its own
+`node_modules`, its install still takes ~45ms because the global virtual store is reused, and the
+main checkout's `.modules.yaml` is left exactly as it was.
 
 Only a symlink is installed globally; the script itself is versioned here:
 
