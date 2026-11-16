@@ -200,10 +200,15 @@ scope and network are already fixed:
   in the spec are writable: the scope, the working directory, `node_modules`, the
   `bash.writablePaths` entries, the device nodes below and the host temporary directory. A
   write outside them fails with `EPERM`.
-- **Network**: a private network namespace, so TCP, UDP and DNS are all unreachable and only
-  the loopback interface remains. A private mount namespace additionally shadows the
-  `nscd` and `systemd-resolved` unix socket directories with an empty tmpfs, because a unix
-  socket crosses a network namespace and host names would otherwise still resolve.
+- **Network**: a private network namespace with loopback brought up and nothing else, so
+  nothing can leave it: a connection to any host fails with `ENETUNREACH` (there is no
+  interface carrying a route out) and a name lookup fails with `EAI_AGAIN`, because the
+  `nscd` and `systemd-resolved` unix socket directories are shadowed with an empty tmpfs — a
+  unix socket crosses a network namespace, so host names would otherwise still resolve.
+  Loopback being up is what lets an offline test suite start a server and talk to it. The
+  isolation comes from the namespace rather than from a Landlock rule: Landlock's network
+  rules are per port, so handling `ConnectTcp` would refuse loopback connections too, which
+  is exactly what a test suite needs.
 - **Processes**: a private PID namespace with a freshly mounted `/proc`, so only the
   sandbox's own processes are visible. Host processes cannot be seen, another process's
   `/proc/<pid>/environ` cannot be read, and no signal reaches across the boundary. PID 1 is

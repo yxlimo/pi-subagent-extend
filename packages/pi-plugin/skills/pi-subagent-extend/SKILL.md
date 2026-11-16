@@ -35,7 +35,7 @@ description: 委派 pi-subagents 子代理时，用 extensionBindings 把它的�
 
 项目若用 `<!-- main-agent-only:start -->` 标记，同一行还要加 `, …/src/child-context.ts`，否则子代理会读到主代理专属段落（见 skill `pi-subagent-extend-context`）。
 
-`bash.read` / `bash.write` 里的命令靠沙箱 helper（`packages/helper` 的 Rust 二进制）跑：文件范围由 Landlock 强制，默认断网（TCP/UDP/DNS 全断），进程与 capability 也一并隔离（看不到宿主进程、命令无任何 capability）。宿主需要 Landlock ABI 7（Linux 6.15+）；helper 缺失或内核不够时 bash 保持关闭（其余功能不受影响）。
+`bash.read` / `bash.write` 里的命令靠沙箱 helper（`packages/helper` 的 Rust 二进制）跑：文件范围由 Landlock 强制，默认断网（出网 TCP/UDP 全断、DNS 解析失败，但沙箱内 loopback 可用，本地 server 起得来也连得上），进程与 capability 也一并隔离（看不到宿主进程、命令无任何 capability）。宿主需要 Landlock ABI 7（Linux 6.15+）；helper 缺失或内核不够时 bash 保持关闭（其余功能不受影响）。
 
 ## 调用模板
 

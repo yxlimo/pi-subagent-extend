@@ -2,8 +2,8 @@
 
 use crate::spec::Spec;
 use landlock::{
-    path_beneath_rules, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible,
-    LandlockStatus, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
+    path_beneath_rules, Access, AccessFs, BitFlags, CompatLevel, Compatible, LandlockStatus,
+    Ruleset, RulesetAttr, RulesetCreatedAttr, ABI,
 };
 use std::path::{Path, PathBuf};
 
@@ -65,7 +65,7 @@ pub fn abi_or_reason() -> Result<i32, String> {
 }
 
 /// Restrict this process: reads under `spec.read`, writes only under
-/// `spec.write`, and no TCP when the spec asks for an offline command.
+/// `spec.write`, and no outbound TCP when the spec asks for an offline command.
 ///
 /// The restriction applies to the calling process and everything it starts, so
 /// the caller only has to `exec` the command afterwards.
@@ -82,14 +82,12 @@ pub fn apply(spec: &Spec) -> Result<(), String> {
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(AccessFs::from_all(ABI_USED))
         .map_err(|e| format!("cannot handle file access rights: {e}"))?;
-    if spec.offline {
-        // Handling the right without adding any port rule denies every port.
-        ruleset = ruleset
-            .handle_access(AccessNet::BindTcp)
-            .map_err(|e| format!("cannot handle TCP bind: {e}"))?
-            .handle_access(AccessNet::ConnectTcp)
-            .map_err(|e| format!("cannot handle TCP connect: {e}"))?;
-    }
+    // Offline needs no Landlock network rule: the command runs in its own
+    // network namespace (namespace.rs), which starts empty and gets loopback
+    // brought up and nothing else, so there is no route to anywhere. Landlock's
+    // net rules are port-based, so they cannot express "loopback only" — using
+    // them here would refuse the local connections that make a test suite
+    // work offline.
 
     let created = ruleset
         .create()

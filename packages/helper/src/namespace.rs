@@ -72,12 +72,59 @@ pub fn isolate(offline: bool, cwd: Option<&Path>) -> Result<Isolated, String> {
 
     let mut shadowed = Vec::new();
     if offline {
+        bring_up_loopback()?;
         for dir in resolver_dirs() {
             mount_tmpfs(&dir)?;
             shadowed.push(dir);
         }
     }
     Ok(Isolated { shadowed })
+}
+
+/// Bring `lo` up inside the fresh network namespace.
+///
+/// A new netns starts with loopback administratively down, so `bind` succeeds
+/// (it does not need the interface) while every connection to it fails with
+/// `ENETUNREACH` — a test that starts a local server would still be unable to
+/// talk to it. The namespace has no other interface and no route out, so
+/// bringing loopback up does not make the command any less offline.
+fn bring_up_loopback() -> Result<(), String> {
+    /// `<linux/sockios.h>`
+    const SIOCGIFFLAGS: libc::c_ulong = 0x8913;
+    const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
+
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        return Err(format!(
+            "cannot open a socket to configure lo: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `ifreq` is plain old data; zeroing it is the documented way to
+    // start, since the union has no default.
+    let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (slot, byte) in request.ifr_name.iter_mut().zip(b"lo\0") {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: fd is an open socket and request is a live, correctly sized ifreq.
+    let read_flags = unsafe { libc::ioctl(fd, SIOCGIFFLAGS, &mut request) };
+    if read_flags < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(format!("cannot read the flags of lo: {error}"));
+    }
+    // SAFETY: same request, now carrying the flags just read.
+    unsafe {
+        request.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+    }
+    // SAFETY: as above; SIOCSIFFLAGS writes the flags back.
+    let write_flags = unsafe { libc::ioctl(fd, SIOCSIFFLAGS, &request) };
+    let write_error = (write_flags < 0).then(std::io::Error::last_os_error);
+    unsafe { libc::close(fd) };
+    match write_error {
+        Some(error) => Err(format!("cannot bring lo up: {error}")),
+        None => Ok(()),
+    }
 }
 
 /// Mount a fresh procfs, so `/proc` shows this PID namespace and not the host.
