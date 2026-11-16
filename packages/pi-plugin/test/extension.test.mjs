@@ -39,6 +39,10 @@ function helperAbi(bin) {
 }
 
 const described = helperAbi(helperBin);
+// Cases that execute the helper for real need a kernel that can enforce the
+// sandbox. With the stub there is nothing to enforce, so those parts are skipped
+// instead of asserting on the stub's silence.
+const liveSandbox = described?.landlock?.supported === true;
 if (described?.landlock?.supported) {
   process.env.PI_SUBAGENT_EXTEND_HELPER = helperBin
 } else {
@@ -1030,10 +1034,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     })
     const liveInput = { command: "git add b.txt" }
     assert.equal(await live.call("bash", liveInput), undefined, "git add is allowlisted")
-    const exec = spawnSync("/bin/sh", ["-c", liveInput.command], { cwd: wtDir, encoding: "utf8", env: gitEnv })
-    assert.equal(exec.status, 0, `sandboxed git add failed: ${exec.stderr}`)
-    const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: wtDir, encoding: "utf8", env: gitEnv })
-    assert.match(staged.stdout, /b\.txt/, "the file is really staged inside the sandbox")
+    if (liveSandbox) {
+      const exec = spawnSync("/bin/sh", ["-c", liveInput.command], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+      assert.equal(exec.status, 0, `sandboxed git add failed: ${exec.stderr}`)
+      const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: wtDir, encoding: "utf8", env: gitEnv })
+      assert.match(staged.stdout, /b\.txt/, "the file is really staged inside the sandbox")
+    } else {
+      console.log("  skip  live git add: no real sandbox on this kernel")
+    }
     live.restore()
 
     // 只读沙箱：父代理明确选了只读树，不因为「git 需要一个可写索引」偷偷放开主仓 .git。
@@ -1171,22 +1179,26 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await offlineHandler.call("bash", input), undefined, "the probe is allowlisted")
   assert.equal(specOf(input.command).offline, true, "bash is offline by default")
 
-  const exec = spawnSync("/bin/sh", ["-c", input.command], { cwd: workdir, encoding: "utf8" })
-  const output = `${exec.stdout}${exec.stderr}`
-  // 建得出网络命名空间时报 ENETUNREACH；建不出来时由 Landlock 兜底，报连接 EACCES。
-  assert.match(output, /ENETUNREACH|EACCES/u, "the command really fails on the network")
+  if (liveSandbox) {
+    const exec = spawnSync("/bin/sh", ["-c", input.command], { cwd: workdir, encoding: "utf8" })
+    const output = `${exec.stdout}${exec.stderr}`
+    // 建得出网络命名空间时报 ENETUNREACH；建不出来时由 Landlock 兜底，报连接 EACCES。
+    assert.match(output, /ENETUNREACH|EACCES/u, "the command really fails on the network")
 
-  const noted = await offlineHandler.result("bash", output)
-  // 字符串 content 会被拼成字符串，parts 数组则多一个 text part；两种形状都取尾部。
-  const note = typeof noted?.content === "string" ? noted.content : (noted?.content?.at(-1)?.text ?? "")
-  assert.match(note, /\[sandbox\]/u, "the failure is annotated so it can be recognised")
-  assert.match(note, /off per the parent/u, "it names the cause")
-  assert.match(note, /not a broken machine/u, "it says this is not an environment fault")
-  assert.match(note, /contact_supervisor/u, "it says which channel can widen the grant")
-  assert.match(note, /"network": true/u, "it names what the parent would have to grant")
+    const noted = await offlineHandler.result("bash", output)
+    // 字符串 content 会被拼成字符串，parts 数组则多一个 text part；两种形状都取尾部。
+    const note = typeof noted?.content === "string" ? noted.content : (noted?.content?.at(-1)?.text ?? "")
+    assert.match(note, /\[sandbox\]/u, "the failure is annotated so it can be recognised")
+    assert.match(note, /off per the parent/u, "it names the cause")
+    assert.match(note, /not a broken machine/u, "it says this is not an environment fault")
+    assert.match(note, /contact_supervisor/u, "it says which channel can widen the grant")
+    assert.match(note, /"network": true/u, "it names what the parent would have to grant")
 
-  // 同一份结果再走一次不重复追加。
-  assert.equal(await offlineHandler.result("bash", noted.content), undefined, "already annotated results are left alone")
+    // 同一份结果再走一次不重复追加。
+    assert.equal(await offlineHandler.result("bash", noted.content), undefined, "already annotated results are left alone")
+  } else {
+    console.log("  skip  live network probe: no real sandbox on this kernel")
+  }
 
   // 本地连接被拒在沙箱里是正常测试结果，不能补这句提示（loopback 是通的）。
   assert.equal(
@@ -1243,25 +1255,31 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("bash", outInput), undefined, "the writer script is allowlisted")
   const outSpec = specOf(outInput.command)
   assert.equal(outSpec.write.includes(outsidePath), false, "the outside path is not granted")
-  const outExec = spawnSync("/bin/sh", ["-c", outInput.command], { cwd: workdir, encoding: "utf8" })
-  assert.match(`${outExec.stdout}${outExec.stderr}`, /EACCES|Permission denied/u, "the write really is refused")
-  assert.equal(existsSync(outsidePath), false, "nothing was written outside the grant")
+  if (liveSandbox) {
+    const outExec = spawnSync("/bin/sh", ["-c", outInput.command], { cwd: workdir, encoding: "utf8" })
+    assert.match(`${outExec.stdout}${outExec.stderr}`, /EACCES|Permission denied/u, "the write really is refused")
+    assert.equal(existsSync(outsidePath), false, "nothing was written outside the grant")
 
-  const outNote = await h.result("bash", `${outExec.stdout}${outExec.stderr}`)
-  const note = typeof outNote?.content === "string" ? outNote.content : (outNote?.content?.at(-1)?.text ?? "")
-  assert.match(note, /\[sandbox\]/u, "the refusal is annotated")
-  assert.ok(note.includes(outsidePath), "the note names the path that was refused")
-  assert.match(note, /writablePaths/u, "the note says what the parent would have to grant")
-  assert.match(note, /contact_supervisor/u, "the note names the channel")
-  assert.equal(await h.result("bash", note), undefined, "already annotated results are left alone")
+    const outNote = await h.result("bash", `${outExec.stdout}${outExec.stderr}`)
+    const note = typeof outNote?.content === "string" ? outNote.content : (outNote?.content?.at(-1)?.text ?? "")
+    assert.match(note, /\[sandbox\]/u, "the refusal is annotated")
+    assert.ok(note.includes(outsidePath), "the note names the path that was refused")
+    assert.match(note, /writablePaths/u, "the note says what the parent would have to grant")
+    assert.match(note, /contact_supervisor/u, "the note names the channel")
+    assert.equal(await h.result("bash", note), undefined, "already annotated results are left alone")
+  } else {
+    console.log("  skip  live write refusal: no real sandbox on this kernel")
+  }
 
   // 授权内：同样的脚本写得进去，且不该有任何提示。
   const inInput = { command: `sh write.sh ${insidePath}` }
   assert.equal(await h.call("bash", inInput), undefined, "the writer script is allowlisted")
-  const inExec = spawnSync("/bin/sh", ["-c", inInput.command], { cwd: workdir, encoding: "utf8" })
-  assert.equal(inExec.status, 0, `writing inside the grant works: ${inExec.stderr}`)
-  assert.ok(existsSync(insidePath), "the file really landed")
-  assert.equal(await h.result("bash", `${inExec.stdout}${inExec.stderr}`), undefined, "a granted write is not annotated")
+  if (liveSandbox) {
+    const inExec = spawnSync("/bin/sh", ["-c", inInput.command], { cwd: workdir, encoding: "utf8" })
+    assert.equal(inExec.status, 0, `writing inside the grant works: ${inExec.stderr}`)
+    assert.ok(existsSync(insidePath), "the file really landed")
+    assert.equal(await h.result("bash", `${inExec.stdout}${inExec.stderr}`), undefined, "a granted write is not annotated")
+  }
 
   // 宿主权限被拒不能归因到沙箱：我们自己也读不到那个文件时，保持沉默。
   await h.call("bash", { command: `sh write.sh ${outsidePath}` })
