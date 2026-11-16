@@ -226,6 +226,16 @@ fn run_command(
 /// Print what this machine can enforce, as JSON, so the extension can gate on
 /// it instead of guessing from the kernel version.
 fn describe() -> i32 {
+    let (report, supported) = report();
+    println!("{report}");
+    match supported {
+        true => 0,
+        false => EXIT_UNSUPPORTED,
+    }
+}
+
+/// What `--describe` prints, and whether the sandbox can run here.
+fn report() -> (serde_json::Value, bool) {
     let resolver: Vec<String> = namespace::resolver_dirs()
         .iter()
         .map(|dir| dir.display().to_string())
@@ -233,7 +243,14 @@ fn describe() -> i32 {
     let userns = namespace::available();
     let (supported, abi, reason) = match sandbox::abi_or_reason() {
         Ok(abi) => (true, abi, serde_json::Value::Null),
-        Err(reason) => (false, 0, serde_json::Value::from(reason)),
+        // Report the ABI the kernel actually has, not 0: the reason already says
+        // it is too old, and a caller reading the number should see the truth.
+        // 0 is left for the case where Landlock itself is missing.
+        Err(reason) => (
+            false,
+            sandbox::kernel_abi().unwrap_or(0),
+            serde_json::Value::from(reason),
+        ),
     };
     let report = serde_json::json!({
         "helper": "pi-subagent-extend-helper",
@@ -247,11 +264,7 @@ fn describe() -> i32 {
         "network_namespace": userns,
         "resolver_sockets": resolver,
     });
-    println!("{report}");
-    match supported {
-        true => 0,
-        false => EXIT_UNSUPPORTED,
-    }
+    (report, supported)
 }
 
 #[cfg(test)]
@@ -274,5 +287,21 @@ mod tests {
         ];
         let error = run_with_spec(&args).expect_err("the spec cannot be read");
         assert_eq!(error.0, EXIT_BAD_SPEC, "unexpected error: {}", error.1);
+    }
+
+    /// The number is a diagnosis: on an old kernel it has to be the real ABI, not
+    /// a placeholder that hides which kernel the user is on.
+    #[test]
+    fn the_report_carries_the_measured_abi() {
+        let (report, supported) = report();
+        let reported = report["landlock"]["kernel_abi"].as_i64().unwrap_or(-1);
+        match sandbox::kernel_abi() {
+            Ok(abi) => assert_eq!(reported, i64::from(abi)),
+            // No Landlock at all: there is no number to report.
+            Err(_) => {
+                assert_eq!(reported, 0);
+                assert!(!supported, "a kernel without Landlock is unsupported");
+            }
+        }
     }
 }
