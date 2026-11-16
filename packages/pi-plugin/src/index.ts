@@ -72,8 +72,51 @@ const EXEC_TOOLS = ["bash", "powershell", "codemode"];
  */
 const SAFE_TOOLS = ["structured_output", "contact_supervisor", "intercom"];
 
-/** shell 元字符：出现就不放行，否则白名单前缀可以被拼进任意命令。 */
-const SHELL_META = /[;&|<>()`$\n\r\\]/;
+/**
+ * 命令里是否有**未加引号**的 shell 控制字符。
+ *
+ * 命令最终以 `bash -lc <command>` 执行，所以引号语义就是 bash 的语义：
+ * 单引号内一切惰性；双引号内只有 `$`、反引号、反斜杠仍会展开，`; & | < > ( )`
+ * 都是普通字符。之前是纯文本正则匹配，于是 `python3 -c "print(1)"` 这种引号内的
+ * 括号也被拒——dogfooding 时一个子代理因此无法自验 YAML。
+ *
+ * 不进引号的正斜杠也一律拒；引号闭合不对（子代理手写错）也拒，交给它重写。
+ */
+export function hasUnquotedShellControl(command: string): boolean {
+	let quote: '"' | "'" | undefined;
+	for (let i = 0; i < command.length; i += 1) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === '"') {
+			// 双引号内反斜杠仍会转义，跳过后一个字符（保守：当成惰性）
+			if (ch === "\\") {
+				i += 1;
+				continue;
+			}
+			if (ch === '"') {
+				quote = undefined;
+				continue;
+			}
+			if (ch === "$" || ch === "`") return true;
+			continue;
+		}
+		if (ch === "'") {
+			quote = "'";
+			continue;
+		}
+		if (ch === '"') {
+			quote = '"';
+			continue;
+		}
+		if (ch === "\\" || ch === "\n" || ch === "\r") return true;
+		if (";&|<>()`$".includes(ch)) return true;
+	}
+	// 引号没闭合：命令本身是坏的，直接拒
+	return quote !== undefined;
+}
 
 interface Policy {
 	globs: string[];
@@ -1178,7 +1221,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					`pi-subagent-extend: command blocked by the project profile: "${forbidden}" (source: ${policy.source}); extensionBindings cannot lift it.`,
 				);
 			}
-			if (SHELL_META.test(command)) {
+			if (hasUnquotedShellControl(command)) {
 				return deny(
 					`pi-subagent-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Allowed: ${preview(allEntries(rule))}`,
 				);

@@ -49,7 +49,7 @@ too.
 | `read` | path resolved (a missing one means the working directory), allowed when inside the scope, subject to `maxReads` |
 | `edit` / `write` | the target must be inside the write scope (`writeScope`, defaulting to `scope`); refused even inside it when `readOnly` is set |
 | `grep` / `find` / `ls` | as `read` |
-| `bash` | refused entirely without an allowlist; with one, only matching commands are allowed and each is rewritten to run under the helper |
+| `bash` | refused entirely without an allowlist; with one, only matching commands are allowed and each is rewritten to run under the helper. Shell control characters are judged **outside quotes only** — the command runs as `bash -lc <command>`, so a `;` or `(` inside single quotes is an ordinary character while `$` and a backtick still expand inside double quotes |
 | `powershell` / `codemode` | always refused: there is no path to judge, so they would escape the scope |
 | `structured_output` | allowed: a session-level tool that touches no files |
 | `contact_supervisor` / `intercom` | always allowed: asking the supervisor is the escalation channel |
@@ -115,13 +115,21 @@ default, a partial object enables only the fields it names, `"probe": false` dis
 | Criterion | Default | Behaviour |
 | --- | --- | --- |
 | Read-only idling | explicit: `idleWriteMs: 360000`, `abortGraceMs: 120000` | no write activity within `idleWriteMs` warns at the next tool boundary; after `abortGraceMs` more, the turn stops |
-| Repeating a command | on, `repeatBash: 3` | the third identical `bash` command warns, the fourth stops |
+| Repeating a command | on, `repeatBash: 3` | the third identical read-class `bash` command warns, the fourth stops |
 | Finished early | explicit: `successIdleMs: 300000`, `successPatterns` | once output matches a success marker, no new change within `successIdleMs` stops the turn |
 | Writing litter | explicit: `forbidWritePatterns: []` | a `write`/`edit` target matching the pattern is refused outright |
 
 Write activity means `edit` and `write` calls and commands matching `bash.write`. Reads do not
 count, or a subagent could circle with read-only `bash` and escape the criterion. A task with
 `readOnly: true` skips the two time-based criteria, which are meaningless for it.
+
+The repeating-command criterion means "the same thing repeated **without progress**", so write
+activity also clears its counts and cancels a warning already issued: a subagent that edits a file and
+re-runs the same test command is working, not spinning. The cost is that write-class commands are not
+covered by this criterion at all — a profile that lists an interpreter in the `write` column (Node,
+`python3`) exempts that interpreter's commands, and no amount of repetition trips the check. Read-class
+commands, the real spinning case, are unaffected. This was measured the hard way: two coding subagents
+were stopped mid-task by the criterion before the reset existed.
 
 ### The denial budget
 

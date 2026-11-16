@@ -176,10 +176,17 @@ export class Probe {
 		return this.#cfg;
 	}
 
-	/** 有写入活动：重置空转计时器，清掉已武装的 warn。 */
+	/** 有写入活动：重置空转计时器，清掉已武装的 warn，并把打转计数清零。 */
 	noteWriteActivity(): void {
 		if (this.#stopped) return;
 		this.#idle = { armed: false, warned: false, message: "", abortAt: 0 };
+		// 判据 2 的语义是「同一件事没有进展地重复」，写活动就是进展：计数清零。
+		// 已经发出的 spin warn 也要撤掉——否则子代理改完文件再跑同一条测试，仍会被
+		// 宽限计时器判死。dogfooding 实测过：一个 coder 子代理第 3 次跑同一条测试收到
+		// warn，中途改了代码，宽限到期照样被停。代价是写类命令自身不再受这条判据约束，
+		// 读类命令（真正的原地打转）不受影响。
+		this.#bashCounts.clear();
+		this.#repeat = { armed: false, warned: false, message: "", abortAt: 0 };
 		this.#disarmSuccess();
 		this.#startIdleTimer();
 	}

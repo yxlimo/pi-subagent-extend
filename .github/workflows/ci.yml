@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to commit SHAs rather than tags: a tag is a movable
+# pointer, so a retargeted tag is a supply-chain risk. When upgrading an
+# action, resolve the new tag to its commit SHA and update it here, keeping
+# the `# vN` comment in sync.
 jobs:
   check:
     # Four legs: the helper behaves differently on each shape a host can
@@ -61,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: check (${{ matrix.mode }})
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Nothing here pushes, and a persisted token would sit in .git/config
           # where the sandboxed commands these tests run can read it.
@@ -83,11 +87,11 @@ jobs:
         if: matrix.lift == 'yes'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: 12
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           cache: pnpm

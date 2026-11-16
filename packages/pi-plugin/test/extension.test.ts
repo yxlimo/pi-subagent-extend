@@ -571,6 +571,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 }
 
 // 19. Repeat probe: same bash command warns then stops.
+//     只数读类命令：写活动（edit/write 工具、命中 write 列的命令）算进展，计数会被清零，
+//     见测试 57。这条判据的语义是「同一件事没有进展地重复」。
 {
   const { Probe } = await import(join(repo, "src", "probe.ts"))
   const clock = fakeClock()
@@ -580,15 +582,15 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     hooks: { warn: () => {} },
     host: clock.host,
   })
-  p.noteBashStart("pnpm test", "write")
-  p.noteBashStart("pnpm test", "write")
+  p.noteBashStart("pnpm test", "read")
+  p.noteBashStart("pnpm test", "read")
   assert.equal(p.atToolBoundary(), undefined, "below the threshold nothing happens")
-  p.noteBashStart("pnpm test", "write")
+  p.noteBashStart("pnpm test", "read")
   assert.equal(p.atToolBoundary()?.stop, false, "the Nth repeat warns")
-  const stop = p.noteBashStart("pnpm test", "write")
+  const stop = p.noteBashStart("pnpm test", "read")
   assert.equal(stop?.stop, true, "one more repeat stops the run")
   p.dispose()
-  console.log("  ok   原地打转：第 3 次 warn，第 4 次停止")
+  console.log("  ok   原地打转：第 3 次 warn，第 4 次停止（只数读类命令）")
 }
 
 // 20. Junk-file probe blocks probe artifacts; deny budget warns then stops.
@@ -1756,6 +1758,77 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(outside?.block, true, "and still confines reads outside it")
   dotted.restore()
   console.log("  ok   范围写 '.' 等于整棵树，'./x' 等于 'x'；写仍受 writeScope 限制")
+}
+
+// 56. 元字符判定要看引号：命令最终以 `bash -lc <command>` 执行，单引号内一切惰性，
+//      双引号内只有 $ / 反引号 / 反斜杠仍展开。纯文本匹配会连引号内的括号一起拒，
+//      dogfooding 时一个子代理因此无法自验 YAML（python3 -c "print(1)" 被拒）。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["python3", "echo", "node"] } },
+    }),
+  })
+  const allowed = async (command: string, why: string): Promise<void> => {
+    assert.equal(await h.call("bash", { command }), undefined, why)
+  }
+  const refused = async (command: string, why: string): Promise<void> => {
+    const r = await h.call("bash", { command })
+    assert.equal(r?.block, true, why)
+    assert.match(r.reason, /metacharacters/, `${why} (names the cause)`)
+  }
+
+  // 引号内的控制字符是普通字符，不该被拒
+  await allowed('python3 -c "print(1)"', "parentheses inside double quotes are inert")
+  await allowed('echo "a|b"', "a pipe inside double quotes is inert")
+  await allowed('echo "a; b"', "a semicolon inside double quotes is inert")
+  await allowed("echo 'a;b'", "single quotes make everything inert")
+  // 单引号内惰性：这等于「允许白名单里的解释器执行任意代码」。这是刻意接受的：
+  // 沙箱边界是 Landlock 与命名空间，不是命令文本；解释器能不能用由 profile 决定。
+  await allowed("python3 -c 'import os; os.system(\"id\")'", "single quotes are inert even for an interpreter")
+
+  // 引号外的一律拒
+  await refused("echo a; b", "an unquoted semicolon is refused")
+  await refused("echo a && b", "an unquoted && is refused")
+  await refused("echo $(id)", "command substitution is refused")
+  await refused('echo "x$(id)"', "command substitution expands inside double quotes too")
+  await refused("echo `id`", "a backtick is refused")
+  await refused('echo "unclosed', "an unterminated quote is refused")
+  h.restore()
+  console.log("  ok   元字符判定看引号：引号内惰性放行，引号外与命令替换一律拒")
+}
+
+// 57. 打转判据是「同一件事没有进展地重复」：写活动就是进展，计数清零、已发出的 warn 撤掉。
+//      dogfooding 实测的误杀：一个 coder 子代理第 3 次跑同一条测试收到 warn，中途改了代码，
+//      宽限到期照样被停。写类命令按定义就是改动，因此不再受这条判据约束。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": {
+        scope: ["src/**"],
+        bash: { read: ["node test/x.ts"], write: ["pnpm run fix"] },
+      },
+    }),
+  })
+
+  // 写类命令反复执行：每一次都是改动，不算打转
+  for (let i = 0; i < 5; i += 1) {
+    assert.equal(await h.call("bash", { command: "pnpm run fix" }), undefined, `write-class repeat ${i + 1} runs`)
+  }
+
+  // 读类命令之间做一次改动（编辑文件），也不该被判打转
+  for (let i = 0; i < 4; i += 1) {
+    assert.equal(await h.call("bash", { command: "node test/x.ts" }), undefined, `test run ${i + 1} runs after a change`)
+    assert.equal(await h.call("edit", { path: "src/a.ts", content: "x" }), undefined, "the edit between runs is allowed")
+  }
+
+  // 对照：没有改动时原地重复，判据照旧生效
+  assert.equal(await h.call("bash", { command: "node test/x.ts" }), undefined, "first bare repeat runs")
+  assert.equal(await h.call("bash", { command: "node test/x.ts" }), undefined, "second bare repeat runs")
+  const warned = await h.call("bash", { command: "node test/x.ts" })
+  assert.match(warned?.reason ?? "", /spinning/, "without a change in between, the third repeat still warns")
+  h.restore()
+  console.log("  ok   打转判据把写活动算作进展；无改动的原地重复照旧拦截")
 }
 
 rmSync(workdir, { recursive: true, force: true })

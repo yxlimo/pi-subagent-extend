@@ -43,6 +43,8 @@ Only two kinds of events reset the idle timer:
 1. `edit` / `write` tool calls
 2. bash commands matching the `bash.write` column
 
+Only **read-class** commands are counted for spinning: a command that writes (the `bash.write` column, or an `edit`/`write` call) is progress, so it clears the counts and cancels a warning already issued. A coder that edits a file and re-runs the same test command is therefore never stopped by this criterion — a profile that lists an interpreter in the `write` column (`node`, `python3`) exempts that interpreter's commands entirely.
+
 Commands in the `bash.read` column, and `read` / `grep` / `find` / `ls`, do not count. So "spinning with read-only bash commands" and "repeatedly scanning with read tools" are both judged as idling — this is intentional: no amount of read-only commands counts as progress.
 
 Corollary: if a task genuinely needs extensive read-only investigation, either loosen `idleWriteMs` or set `readOnly: true` (which skips both time-based criteria, "read-only idling" and "finished early").
