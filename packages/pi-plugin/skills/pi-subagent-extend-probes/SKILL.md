@@ -1,53 +1,53 @@
 ---
 name: pi-subagent-extend-probes
-description: 给受限子代理配探针时使用：检测只读空转、原地打转、早可收工、造杂物、撞权限，命中即拦截当次调用，达到 stop 条件后本轮直接结束。适用场景：子代理反复读同一处或反复撞同一个拒绕而不推进、任务已实质完成却还在试、开始创建探针杂文件。写明 extensionBindings 里 pi-subagent-extend/1 的 maxDenies 与 probe 字段与默认值、warn 与 stop 的差别（stop 是硬停，没有收尾回合），以及子代理被停后父代理该看什么。范围与 bash 白名单见 pi-subagent-extend。
+description: For configuring probes on restricted subagents: detects read-only idling, repeating a command, finished early, writing litter, and permission refusals; a hit blocks that call, and once a stop condition is reached the turn ends immediately. Use when a subagent keeps re-reading the same spot or re-hitting the same refusal without progress, keeps trying after the task is effectively complete, or starts creating probe litter files. Documents the maxDenies and probe fields of pi-subagent-extend/1 in extensionBindings with their defaults, the difference between warn and stop (stop is a hard stop with no wrap-up turn), and what the parent agent should look at after a subagent is stopped. Scope and the bash allowlist are covered in pi-subagent-extend.
 ---
 
-# 探针：检测子代理的空转与无效工作
+# Probes: detecting subagent idling and ineffective work
 
-范围限制（`scope`）只用来看住「能碰哪些文件」；探针看的是「有没有在推进」。两者共用同一次委派的 `extensionBindings`，namespace 同为 `pi-subagent-extend/1`。
+The scope restriction (`scope`) only governs which files a subagent can touch; probes watch whether it is making progress. Both live in the same delegation's `extensionBindings` and share the `pi-subagent-extend/1` namespace.
 
-## 用在什么场景
+## When it applies
 
-| 现象 | 对应判据 |
+| Symptom | Criterion |
 | --- | --- |
-| 反复读同一处文件/目录，没有任何写操作 | 只读空转 |
-| 同一类命令或路径反复失败，但每次都原样重试 | 原地打转 |
-| 任务事实上已完成（typecheck 已通过）却还在继续试 | 早可收工 |
-| 在仓库里留下探针用的临时文件 | 造杂物 |
-| 反复碰同一个权限拒绝 | 撞权限 |
+| Repeatedly reading the same file/directory with no write operations | read-only idling |
+| The same kind of command or path keeps failing, but is retried verbatim every time | repeating a command |
+| The task is effectively done (typecheck already passed) but it keeps trying | finished early |
+| Leaving temporary probe files in the repository | writing litter |
+| Repeatedly hitting the same permission refusal | permission refusal |
 
-判据命中即拦截当次 tool_call 并给出理由；达到 stop 条件后本轮直接结束（被拦结果都带 `terminate`），没有收尾回合。
+When a criterion hits, the current tool_call is blocked with a reason; once a stop condition is reached the turn ends immediately (every blocked result carries `terminate`), with no wrap-up turn.
 
-## 默认行为
+## Default behavior
 
-不写 `probe` 时只有两条纯错误信号在工作，误伤小：
+When `probe` is not written, only two pure error signals are active, so collateral damage is low:
 
-| 判据 | 默认 | 说明 |
+| Criterion | Default | Notes |
 | --- | --- | --- |
-| 原地打转 | 开，`repeatBash: 3` | 同一条 bash 命令原文（trim 后）第 3 次 → warn，第 4 次 → stop |
-| 撞权限 | 开，`maxDenies: 5` | 连续第 5 次**授权类**拒绝 → warn（要求它去求援），第 6 次 → 硬停。只统计「父代理放宽授权能解决」的拒绝：范围外路径、命令不在白名单、read 预算、readOnly 写、工具不在 `allowTools`、整个 bash 被关 |
+| repeating a command | on, `repeatBash: 3` | The same bash command verbatim (after trim) the 3rd time → warn, the 4th → stop |
+| permission refusal | on, `maxDenies: 5` | The 5th consecutive **authorization-type** refusal → warn (asking it to escalate), the 6th → hard stop. Only refusals that a parent agent granting broader authorization could resolve are counted: paths outside scope, commands not in the allowlist, read budget, writing under readOnly, tools not in `allowTools`, bash entirely disabled |
 
-会误伤慢任务的三条必须显式配置：`probe: {}` 一次打开全部默认值，写部分字段则只打开写到的那些，`probe: false` 全关。
+The three criteria that can misfire on slow tasks must be explicitly configured: `probe: {}` turns on all defaults at once, writing only some fields turns on just those, and `probe: false` turns everything off.
 
-| 判据 | 字段 | 默认值（显式开启后） | 触发 |
+| Criterion | Fields | Default (after explicit enable) | Trigger |
 | --- | --- | --- | --- |
-| 只读空转 | `probe.idleWriteMs` / `probe.abortGraceMs` | 6 分钟 / 2 分钟 | 这么久没有任何写入活动 → warn；再过宽限 → stop |
-| 早可收工 | `probe.successIdleMs` / `probe.successPatterns` | 5 分钟 / `["fail=0", "0 failed", ...]` | bash 输出命中成功标记后，这么久无新改动 → stop |
-| 造杂物 | `probe.forbidWritePatterns` | `[]` | `write`/`edit` 目标路径命中正则 → 直接拒绝该次写入 |
+| read-only idling | `probe.idleWriteMs` / `probe.abortGraceMs` | 6 minutes / 2 minutes | No write activity for this long → warn; after the grace period → stop |
+| finished early | `probe.successIdleMs` / `probe.successPatterns` | 5 minutes / `["fail=0", "0 failed", ...]` | After bash output matches a success marker, no new changes for this long → stop |
+| writing litter | `probe.forbidWritePatterns` | `[]` | A `write`/`edit` target path matches the regex → that write is refused outright |
 
-## 什么算「写入活动」
+## What counts as "write activity"
 
-只有两种事件会重置空转计时器：
+Only two kinds of events reset the idle timer:
 
-1. `edit` / `write` 工具调用
-2. bash 命令命中 `bash.write` 列
+1. `edit` / `write` tool calls
+2. bash commands matching the `bash.write` column
 
-`bash.read` 列的命令、`read` / `grep` / `find` / `ls` 都不算。所以「拿 bash 只读命令反复打转」和「拿读工具反复扫」一样会被判成空转——这是有意为之：只读命令刷得再多也不算推进。
+Commands in the `bash.read` column, and `read` / `grep` / `find` / `ls`, do not count. So "spinning with read-only bash commands" and "repeatedly scanning with read tools" are both judged as idling — this is intentional: no amount of read-only commands counts as progress.
 
-推论：如果任务确实需要大量只读调查，要么把 `idleWriteMs` 放宽，要么设 `readOnly: true`（它会跳过「只读空转」和「早可收工」两条时间判据）。
+Corollary: if a task genuinely needs extensive read-only investigation, either loosen `idleWriteMs` or set `readOnly: true` (which skips both time-based criteria, "read-only idling" and "finished early").
 
-## 配置模板
+## Configuration template
 
 ```json
 "pi-subagent-extend/1": {
@@ -64,111 +64,111 @@ description: 给受限子代理配探针时使用：检测只读空转、原地�
 }
 ```
 
-## 停机语义（父代理必须知道）
+## Stop semantics (what the parent agent must know)
 
-warn 只拦一次 tool_call 并把理由写给它；stop 是**硬停**：被拦的结果都带 `terminate`，pi 在整批工具结果都 terminating 时结束本轮（`docs/extensions.md`）。所以：
+warn only blocks a single tool_call and writes the reason to it; stop is a **hard stop**: every blocked result carries `terminate`, and pi ends the turn when the whole batch of tool results is terminating (`docs/extensions.md`). Therefore:
 
-- **停机之后没有收尾回合**。子代理不会再有「写最终汇报」的机会，父代理要靠它停下前已产出的内容加上被拒理由判断发生了什么。想让子代理自己交代，就该在它还没撞线时让它报。
-- **求援通道不受停机影响**。`contact_supervisor` / `intercom` / `structured_output` 先于停机判定，永远放行——这一点在**同一批里有放行结果**时（整批不全是 terminating，本轮继续）才真正救命：被停的子代理仍能把「我卡在哪、需要什么」送出来。
-- 结果末尾的 `[sandbox]` 标注（网络被禁、写越界）**不是拒绝**：它只解释已经在沙箱里失败的那次调用，不计入撞权限、不触发停机、不消耗 read 预算。看见它不必当作「又被拒了一次」，直接按里面的建议处理（要授权就 `contact_supervisor`）。
-- 停机理由不会被当成当前调用的判定。文案会明确写「which criterion stopped the run」以及触发它的那次调用；不要把里面的路径当成「刚被拒的路径」——那是历史。
+- **There is no wrap-up turn after a stop.** The subagent gets no further chance to "write a final report"; the parent agent has to infer what happened from what was produced before the stop plus the refusal reasons. If you want the subagent to explain itself, have it report before it crosses the line.
+- **Escalation channels are unaffected by a stop.** `contact_supervisor` / `intercom` / `structured_output` are checked before the stop decision and are always allowed through — this only truly saves you when **the same batch contains an allowed result** (the batch is not entirely terminating, so the turn continues): the stopped subagent can still get "where I am stuck and what I need" out.
+- A `[sandbox]` annotation at the end of a result (network disabled, write out of bounds) is **not a refusal**: it only explains a call that already failed inside the sandbox; it does not count toward permission refusals, does not trigger a stop, and does not consume the read budget. Do not treat it as "refused again"; just follow the suggestion inside (use `contact_supervisor` if authorization is needed).
+- The stop reason is not a judgment of the current call. The text explicitly says "which criterion stopped the run" and names the call that triggered it; do not treat the path in it as "the path that was just refused" — that is history.
 
-## 作为父代理的注意事项
+## Notes for the parent agent
 
-- 「早可收工」的坑：成功标记命中后只要还有新改动就不停，但任务若在验证之后还要继续做别的事，就会被判「该收工了」。**把验证命令放在任务最后一步**，或者不要给它配这一条。
-- `successPatterns` 默认是 `fail=0` / `0 failed` 这类测试汇总标记；项目用别的输出格式就自己写（如 `no errors`、`All files pass`）。别写成过宽的 `ok`、`passed`——几乎每条命令都会命中。
-- 想限制子代理乱写调试文件，用 `forbidWritePatterns` 点名项目自己的临时文件名（如 `scratch/.*`、`_tmp-.*`）。命中是拒绝单次写入，不停机。
-- 同一轮委派里反复出现「原地打转」说明任务描述有问题（要求它重复同一动作），先修任务而不是调大 `repeatBash`。
-- 「撞权限」只统计**授权类**拒绝，判据是「父代理放宽授权或调整设置能不能解决」。计数的是：范围外路径（含把 `.` 当路径）、命令不在白名单、read 预算用尽、`readOnly` 下写、工具不在 `allowTools`、整个 bash 被关。不计数的是：用法错误（缺 path、shell 元字符、空命令）与硬规则（`powershell`/`codemode` 这类永久不开放的工具、profile 的 `bash.deny`）——把这类算进预算，一次参数写错就能把长任务提前判死。看到子代理报用法错误，改 task 说清楚，不要靠调大 `maxDenies` 掩盖。
-- 探针只管确定性信号。语义层面的漏测、不安全改动，交给 pi-subagents 自带的 LLM watchdog（`subagents.watchdog`），两者互补。
+- The "finished early" trap: after a success marker hits, it only stops once there are no new changes, so a task that still has work after verification will be judged "time to finish". **Put the verification command as the last step of the task**, or do not configure this criterion.
+- `successPatterns` defaults to test-summary markers like `fail=0` / `0 failed`; if the project uses a different output format, write your own (e.g. `no errors`, `All files pass`). Do not use overly broad `ok` or `passed` — almost every command would match.
+- To stop a subagent from carelessly writing debug files, use `forbidWritePatterns` to name the project's own temporary file patterns (e.g. `scratch/.*`, `_tmp-.*`). A hit refuses that single write, without stopping the run.
+- Frequent "repeating a command" in the same delegation indicates a problem with the task description (it asks for the same action repeatedly); fix the task first instead of raising `repeatBash`.
+- **Permission refusal** only counts **authorization-type** refusals, judged by whether the parent agent could resolve it by granting broader authorization or adjusting settings. Counted: paths outside scope (including using `.` as a path), commands not in the allowlist, read budget exhausted, writing under `readOnly`, tools not in `allowTools`, bash entirely disabled. Not counted: usage errors (missing path, shell metacharacters, empty command) and hard rules (tools that are permanently unavailable such as `powershell`/`codemode`, and the agent profile's `bash.deny`) — counting these against the budget would let a single parameter typo kill a long task prematurely. When a subagent reports a usage error, fix the task to be clearer instead of masking it with a larger `maxDenies`.
+- Probes only handle deterministic signals. Semantic-level missed tests and unsafe changes are left to pi-subagents' built-in LLM watchdog (`subagents.watchdog`); the two complement each other.
 
-## 与 pi-subagents 自带能力的配合
+## Working with pi-subagents' built-in capabilities
 
-委派规则（brief 怎么写、一个 cwd 一个写者、resume/steer 的用法）以 **pi-subagents 自带的 skill** 为准，本 skill 只讲探针这一层：范围限制管「能碰什么」，探针管「有没有在推进」。
+Delegation rules (how to write a brief, one writer per cwd, how to use resume/steer) follow **pi-subagents' built-in skill**; this skill only covers the probe layer: scope restrictions govern "what can be touched", probes govern "whether progress is being made".
 
-pi-subagents 的 skill 已经规定了等待方式——派完活让出回合，靠原生完成通知唤醒，不要 sleep、不要轮询、不要对普通子代理用 `bg_wait`。要查细节按需读一节，不要通读：
+pi-subagents' skill already defines how to wait — after delegating, yield the turn and rely on the native completion notification to wake up; do not sleep, do not poll, and do not use `bg_wait` on ordinary subagents. To check details, read one section on demand rather than reading it all:
 
 ```js
 subagent({ action: "guide", options: { topic: "tool-reference/execution-parameters" } })
 subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination-child-asks-parent" } })
 ```
 
-本文下面列的 topic 都是 pi-subagents 随包文档里的真实小节名，版本升级后按同一地址读即可。
+The topics listed below are real section names in pi-subagents' bundled documentation; after a version upgrade, read them at the same address.
 
-| 想查 | guide topic |
+| What you want to look up | guide topic |
 | --- | --- |
 | `timeoutMs` / `toolTimeoutMs` / `checkpointBeforeDeadlineMs` / `toolBudget` / `extensionBindings` | `tool-reference/execution-parameters` |
-| 查子代理状态与 transcript | `tool-reference/status` |
-| 保留子代理、resume 资格 | `tool-reference/retained-children` |
-| resume / steer / stop 的确切语义 | `tool-reference/resume`、`tool-reference/steer`、`tool-reference/stop` |
-| 验收证据与 gate | `tool-reference/acceptance-gates` |
-| 子代理主动问父代理（`contact_supervisor`） | `workflows/supervisor-coordination-child-asks-parent` |
-| LLM watchdog 的触发时机与模型选择 | `watchdog/when-it-runs`、`watchdog/choosing-a-model` |
+| Subagent status and transcript | `tool-reference/status` |
+| Retaining subagents, resume eligibility | `tool-reference/retained-children` |
+| Exact semantics of resume / steer / stop | `tool-reference/resume`, `tool-reference/steer`, `tool-reference/stop` |
+| Acceptance evidence and gates | `tool-reference/acceptance-gates` |
+| A subagent proactively asking its parent (`contact_supervisor`) | `workflows/supervisor-coordination-child-asks-parent` |
+| When the LLM watchdog runs and model choice | `watchdog/when-it-runs`, `watchdog/choosing-a-model` |
 
-探针只管确定性信号（计数、时间、路径模式），下面几项管的是别的事，配好之后不需要探针再做。
+Probes only handle deterministic signals (counts, time, path patterns); the items below handle other concerns and need no probe once configured.
 
-### 分工表
+### Division of labor
 
-| 需求 | 该用谁 | 怎么配 |
+| Need | What to use | How to configure |
 | --- | --- | --- |
-| 整个 run 最多跑多久 | 原生 run 级 deadline | `options.timeoutMs`（或 agent frontmatter `timeoutMs`）；到期即终局 |
-| 单个 tool call 卡死 | 原生 tool deadline | 已知快命令默认 5 分钟；要改就 `options.toolTimeoutMs` |
-| 快到期时先收尾 | 原生 checkpoint steer | `options.checkpointBeforeDeadlineMs`（**仅 async 单代理**）：到点前在下一个 tool 边界投递「checkpoint and stop」，要求报改动/构建测试状态/剩余工作 |
-| 工具调用总数封顶 | 原生 `toolBudget` | `{ soft, hard, block }`；到 hard 后默认封 read/grep/find/ls。**写实现类子代理别设**（会先封读不封写） |
-| 语义质量：漏测、越界改、循环风险 | 原生 LLM watchdog | `subagents.watchdog`，边界 review + 每 N 个 tool 的 cadence review，high 级会发现给模型 |
-| 交付验收：改了哪些文件、测试跑没跑 | 原生 acceptance gate | `options.gate: "pnpm test"` 或 `acceptance: { level, criteria, evidence, verify }` |
-| 子代理中途要资源/要授权 | `contact_supervisor` / `intercom` | 始终放行；也可以父代理 `subagent({ action: "steer", id, message })` 反向插话 |
-| 空转、打转、验证完不收工、乱写临时文件 | **探针** | 本文档上面几条 |
+| Overall cap on how long a run may take | Native run-level deadline | `options.timeoutMs` (or agent frontmatter `timeoutMs`); when it expires the run is over |
+| A single tool call hangs | Native tool deadline | Known-fast commands default to 5 minutes; change with `options.toolTimeoutMs` |
+| Wrap up before the deadline | Native checkpoint steer | `options.checkpointBeforeDeadlineMs` (**async single agent only**): delivers "checkpoint and stop" at the next tool boundary before the deadline, asking for changed files / build-test status / remaining work |
+| Cap on total tool calls | Native `toolBudget` | `{ soft, hard, block }`; at hard, read/grep/find/ls are blocked by default. **Do not set it for implementation subagents** (reads get blocked before writes) |
+| Semantic quality: missed tests, out-of-scope changes, loop risk | Native LLM watchdog | `subagents.watchdog`, boundary review + cadence review every N tools; high severity is surfaced to the model |
+| Delivery acceptance: which files changed, whether tests ran | Native acceptance gate | `options.gate: "pnpm test"` or `acceptance: { level, criteria, evidence, verify }` |
+| Subagent needs resources/authorization mid-task | `contact_supervisor` / `intercom` | Always allowed; the parent can also interject via `subagent({ action: "steer", id, message })` |
+| Idling, spinning, not finishing after verification, writing temporary files carelessly | **Probes** | The items above in this document |
 
-### 具体的配合方式
+### How they combine
 
-**探针 + run deadline。** deadline 管总时长，探针管「有动作但没推进」。两个都开时注意：`checkpointBeforeDeadlineMs` 会在 deadline 前发收尾 steer，若此时探针也判了空转，子代理会同时收到两个指令，以先到的为准。实践上：主任务用 `timeoutMs` 兜底，`idleWriteMs` 设在 `timeoutMs` 的三分之一左右，让它比总超时更早发现空转。
+**Probes + run deadline.** The deadline governs total duration; probes govern "acting but not progressing". When both are on, note: `checkpointBeforeDeadlineMs` sends a wrap-up steer before the deadline, and if a probe also judges idling at that moment, the subagent receives both instructions at once — whichever arrives first wins. In practice: back the main task with `timeoutMs`, and set `idleWriteMs` to about a third of `timeoutMs` so idling is caught earlier than the overall timeout.
 
-**探针 + acceptance gate。** 「早可收工」靠 bash 输出里的成功标记推断验证已过，是启发式的；真正的验收应该交给 gate——`gate: "pnpm test"` 由宿主执行并把结果记成证据。所以：**验证命令交给 gate，探针里不要配 `successPatterns` 去猜**。两者同时开时，`successPatterns` 若命中得太早（比如命令回显而不是真实结果），会把还在干活的子代理误判成该收工。
+**Probes + acceptance gate.** "Finished early" infers that verification passed from success markers in bash output — it is heuristic; real acceptance should be left to the gate — `gate: "pnpm test"` is executed by the host and recorded as evidence. So: **hand the verification command to the gate and do not configure `successPatterns` in probes to guess**. When both are on, if `successPatterns` matches too early (e.g. the command's echo rather than the real result), a subagent still working will be misjudged as done.
 
-**探针 + 撞权限 + steer。** 撞权限停下后父代理有两种走法：重新派一单（探索型任务，成本低）或对保留的会话 `resume` 补授权续做（长任务，不想重来）。`resume` 会复用原子代理的 session 与契约，bindings 属于新一次 launch，可以改。
+**Probes + permission refusals + steer.** After a stop from permission refusals, the parent agent has two options: re-delegate a fresh task (exploratory tasks, low cost) or `resume` the retained session with added authorization (long tasks you do not want to redo). `resume` reuses the original subagent's session and contract; the bindings belong to a new launch and can be changed.
 
-**探针 + LLM watchdog。** 不冲突，配置通道不同：探针走 `extensionBindings`，watchdog 走 settings 的 `subagents.watchdog`。watchdog 自己有一条 `stalemateRepeats`（默认 3 次同样 warning）会结束轮次，那是语义层面的；探针的打转判据是命令层面的，两者可能同时命中，不重复计费也不用互相关闭。
+**Probes + LLM watchdog.** They do not conflict; they use different configuration channels: probes go through `extensionBindings`, the watchdog through `subagents.watchdog` in settings. The watchdog has its own `stalemateRepeats` (default 3 identical warnings) that ends a turn — that is at the semantic level; the probe's repeating criterion is at the command level. Both may fire at once; they are not billed twice and do not need to disable each other.
 
-**探针 + 后台运行。** 后台（`async: true`）子代理在独立进程里跑，探针照常工作；`checkpointBeforeDeadlineMs` 只在 async 单代理上有效。前台阻塞运行时没有这种收尾机制，而探针的 stop 是**硬停**（本轮直接结束，不会给子代理写汇报的机会）——所以长任务靠 `contact_supervisor` 主动上报，而不是指望停下来的那一刻。
+**Probes + background runs.** Background (`async: true`) subagents run in a separate process and probes work as usual; `checkpointBeforeDeadlineMs` only works on async single agents. Foreground blocking runs have no such wrap-up mechanism, and a probe stop is a **hard stop** (the turn ends immediately, with no chance for the subagent to write a report) — so long tasks should proactively report via `contact_supervisor` rather than relying on the moment of the stop.
 
-### 等待方式：让出回合，不要 sleep
+### How to wait: yield the turn, don't sleep
 
-等待方式由 pi-subagents 的 skill 规定，此处不重述：派完活让出回合，靠原生完成通知唤醒；不要 sleep、不要轮询，也不要对普通子代理用 `bg_wait`——sleep 会占着前台 tool call，反而把完成通知降级成 steering。确需在当轮等结果才用 `bg_wait({ id, stopOnAttention: false })`，要中途看进展用 `subagent({ action: "status", id, options: { view: "transcript", lines: 80 } })`，按需查、不循环。`lastUpdate` 不能当心跳：runner 每秒在内存推进它，但只在活动分类变化时才重写 `status.json`。
+How to wait is defined by pi-subagents' skill and is not restated here: after delegating, yield the turn and rely on the native completion notification to wake up; do not sleep, do not poll, and do not use `bg_wait` on ordinary subagents — sleeping occupies a foreground tool call and degrades the completion notification into steering. Only use `bg_wait({ id, stopOnAttention: false })` when you genuinely need to wait for a result within the current turn, and use `subagent({ action: "status", id, options: { view: "transcript", lines: 80 } })` to check progress mid-way — query on demand, never in a loop. `lastUpdate` cannot be used as a heartbeat: the runner advances it in memory every second but only rewrites `status.json` when the activity classification changes.
 
-### 不要叠加的东西
+### Things not to stack
 
-- **不要给写实现类子代理设 `toolBudget.hard`**：它先封读和搜索，子代理拿不到上下文反而更容易空转，探针随后把 run 判死，看起来像探针误伤。要限制就限制范围（`scope`）和时长（`timeoutMs`）。
-- **不要同时配 `successPatterns` 和 gate 的同一份验证**：一处判成功就够了，两处容易先后不一致。
-- **不要用 `probe: false` 来「省事」**：默认只开打转和撞权限，关掉等于放弃两个最便宜的错误信号。真要静音就写 `probe: { repeatBash: 50 }` 这类具体放宽。
+- **Do not set `toolBudget.hard` for implementation subagents**: it blocks reads and searches first, the subagent gets less context and idles more easily, and the probe then kills the run — it looks like a probe misfire. To restrict, limit the scope (`scope`) and duration (`timeoutMs`).
+- **Do not configure the same verification in both `successPatterns` and the gate**: one place deciding success is enough; two places tend to disagree over time.
+- **Do not use `probe: false` to "save effort"**: by default only repeating and permission refusals are on, so turning it off gives up the two cheapest error signals. To actually silence it, write a specific relaxation such as `probe: { repeatBash: 50 }`.
 
-## 与 review 子代理（sidecar 评审）配合
+## Working with review subagents (sidecar review)
 
-评审子代理在主流程之外旁挂：写实现的那单不管评审，评审单自己起一个 fresh-context 子代理看 diff。它和探针的关系是**两类 agent 配两套 bindings**。
+Review subagents run alongside the main flow: the implementation task does not do the review; the review task starts its own fresh-context subagent to look at the diff. Its relationship with probes is **two kinds of agents get two sets of bindings**.
 
-### sidecar 评审的形态
+### Forms of sidecar review
 
-| 形态 | 谁起 | 怎么用 |
+| Form | Started by | How to use |
 | --- | --- | --- |
-| `/parallel-review` | 用户或父代理 | 并行起多个 reviewer，各给一个角度（正确性、测试、简化），回来看综合结论；加 `autofix` 才动手改 |
-| `/review-loop` | 同上 | worker → reviewer → fix-worker 循环，直到干净或到上限 |
-| `/parallel-cleanup` | 同上 | 实现完之后的清理型评审，只审不改 |
-| `acceptance.review` | 原生验收 | `{ level: "checked", review: { required: true } }`；`acceptanceRole: "writer"` 的 async/dynamic writer 会自动带这条 |
-| `acceptanceRole: "read-only"` | 原生验收 | 只读角色（reviewer、scout、validator）推断为 `none`，不需要证据门槛 |
+| `/parallel-review` | User or parent agent | Start multiple reviewers in parallel, each with one angle (correctness, tests, simplification), then read the combined conclusion; only `autofix` makes changes |
+| `/review-loop` | Same as above | worker → reviewer → fix-worker loop until clean or the limit is reached |
+| `/parallel-cleanup` | Same as above | Cleanup review after implementation; reviews only, no changes |
+| `acceptance.review` | Native acceptance | `{ level: "checked", review: { required: true } }`; async/dynamic writers with `acceptanceRole: "writer"` get this automatically |
+| `acceptanceRole: "read-only"` | Native acceptance | Read-only roles (reviewer, scout, validator) infer to `none`; no evidence threshold needed |
 
-### bindings 怎么分
+### How to split bindings
 
-**只有强制的形态才需要配探针。** 评审子代理本来就该只读、不该跑测试、不该长时间不产出「结论」——时间判据（只读空转、早可收工）对它是误伤源，一律不配。
+**Only mandatory forms need probes.** Review subagents are supposed to be read-only, not run tests, and not go long without producing a "conclusion" — the time-based criteria (read-only idling, finished early) are a source of misfires for them, so never configure those.
 
 ```json
-// 实现型子代理：范围收窄 + 允许跑验证 + 探针全开
+// Implementation subagent: narrowed scope + verification allowed + all probes on
 "pi-subagent-extend/1": {
   "scope": ["src/auth/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
   "probe": { "idleWriteMs": 360000, "abortGraceMs": 120000 }
 }
 
-// 评审型子代理：只读、范围给到整棵相关树、探针只留默认两条
+// Review subagent: read-only, scope covering the whole relevant tree, only the two default probes
 "pi-subagent-extend/1": {
   "scope": ["src/auth/**", "src/lib/**"],
   "readOnly": true,
@@ -176,23 +176,23 @@ subagent({ action: "guide", options: { topic: "workflows/supervisor-coordination
 }
 ```
 
-要点：
+Key points:
 
-- **评审要读得比实现宽**。实现子代理的 scope 只该有它要改的那块；评审要看改动涉及的依赖、类型定义、测试，scope 得覆盖这些，否则评审会一路撞权限被硬停，而它停前留下的痕迹会被父代理误读成「实现有问题」。
-- **评审单 `readOnly: true`**：同时跳过「只读空转」和「早可收工」两条时间判据（本来就是只读任务），但「原地打转」「撞权限」「造杂物」仍然生效——评审反复跑同一条命令或乱写临时文件一样是浪费。
-- **`maxDenies` 对评审单更重要**：评审忘了给某个目录的读权限时，它会立刻停下并报告「缺哪个目录」，父代理据此补 scope 重跑评审即可，不用重新实现。
+- **Reviews need to read more broadly than implementations.** An implementation subagent's scope should only cover what it changes; a review must look at the dependencies, type definitions, and tests involved in the change, so its scope has to cover those, otherwise the review will keep hitting permission refusals until hard-stopped, and the traces it leaves before stopping will be misread by the parent as "the implementation is broken".
+- **Review tasks get `readOnly: true`**: this skips both time-based criteria, "read-only idling" and "finished early" (the task is inherently read-only), but "repeating a command", "permission refusal", and "writing litter" still apply — a review repeatedly running the same command or carelessly writing temporary files is still waste.
+- **`maxDenies` matters more for review tasks**: when a review lacks read permission for some directory, it stops immediately and reports "which directory is missing", and the parent agent just extends the scope and reruns the review — no need to redo the implementation.
 
-### 与验收 gate 的分工
+### Division of labor with the acceptance gate
 
-`acceptance.review` 是**验收环节**：跑完实现、证据齐了之后，再独立起一个 reviewer 判「能不能收」。
-探针是**运行环节**：在实现或评审进行的**途中**判「有没有在推进」。
+`acceptance.review` is the **acceptance phase**: after the implementation runs and the evidence is complete, an independent reviewer is started to judge whether it can be accepted.
+Probes are the **runtime phase**: they judge "whether progress is being made" **while** implementation or review is running.
 
-两者不冲突也不重复：
+The two do not conflict or overlap:
 
-- 探针判死一轮实现 → 那轮没有交付，不需要进验收。
-- 探针放过、审核通过 → gate 报 `verified` / 失败，跟探针无关。
-- 别指望探针代替评审：探针只能看见「没写文件、重复命令、验证通过后还在磨」，看不见「改错了、漏了测试、越界重构」。
+- A probe kills an implementation turn → that turn has no deliverable and does not go to acceptance.
+- Probes let it pass and the review approves → the gate reports `verified` / failure, unrelated to probes.
+- Do not expect probes to replace review: probes only see "no files written, repeated commands, grinding on after verification passed", not "changed it wrong, missed tests, out-of-scope refactoring".
 
-### 一个容易踩的坑
+### An easy trap to fall into
 
-`/parallel-review` 和 `/parallel-cleanup` 的默认约定是**评审不要往仓库写文件**（`output: false`，不改代码）。如果你给的评审 bindings 里 `readOnly: false` 且 scope 包含源码目录，评审模型可能顺手「帮你修」——于是评审变成第二个写入者，而源实现子代理可能还在跑，两个写者撞同一个工作树。要么评审单 `readOnly: true`，要么等实现的 run 完全结束再起评审。
+The default convention for `/parallel-review` and `/parallel-cleanup` is that **reviews must not write files into the repository** (`output: false`, no code changes). If the review bindings you provide have `readOnly: false` and a scope that includes source directories, the review model may "fix things for you" along the way — the review becomes a second writer while the implementation subagent may still be running, and two writers collide on the same working tree. Either set the review task to `readOnly: true`, or wait until the implementation run has fully finished before starting the review.
