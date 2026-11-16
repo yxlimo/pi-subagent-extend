@@ -1149,5 +1149,68 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   交接单提示（后台）：context 里补上注入的通知，其它消息不动")
 }
 
+// 37. 离线沙箱里的网络失败要就地说明「主代理没授权」，否则子代理会当成机器坏了，
+//     换 registry / 加 timeout 反复重试，把轮次全浪费掉。
+{
+  const netprobe = join(workdir, "netprobe.sh")
+  writeFileSync(
+    netprobe,
+    [
+      "#!/bin/sh",
+      "node -e 'const s=require(\"net\").connect({host:\"1.1.1.1\",port:80});",
+      "s.on(\"error\",e=>{console.error(e.code);process.exit(1)});",
+      "setTimeout(()=>process.exit(2),3000)'",
+      "",
+    ].join("\n"),
+  )
+
+  const offlineHandler = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["**"], bash: { read: ["sh netprobe.sh"] } } }),
+  })
+  const input = { command: "sh netprobe.sh" }
+  assert.equal(await offlineHandler.call("bash", input), undefined, "the probe is allowlisted")
+  assert.equal(specOf(input.command).offline, true, "bash is offline by default")
+
+  const exec = spawnSync("/bin/sh", ["-c", input.command], { cwd: workdir, encoding: "utf8" })
+  const output = `${exec.stdout}${exec.stderr}`
+  assert.match(output, /ENETUNREACH/u, "the command really fails on the network")
+
+  const noted = await offlineHandler.result("bash", output)
+  // 字符串 content 会被拼成字符串，parts 数组则多一个 text part；两种形状都取尾部。
+  const note = typeof noted?.content === "string" ? noted.content : (noted?.content?.at(-1)?.text ?? "")
+  assert.match(note, /\[sandbox\]/u, "the failure is annotated so it can be recognised")
+  assert.match(note, /disabled by the parent/u, "it names the cause")
+  assert.match(note, /not a broken machine/u, "it says this is not an environment fault")
+  assert.match(note, /contact_supervisor/u, "it says which channel can widen the grant")
+  assert.match(note, /"network": true/u, "it names what the parent would have to grant")
+
+  // 同一份结果再走一次不重复追加。
+  assert.equal(await offlineHandler.result("bash", noted.content), undefined, "already annotated results are left alone")
+
+  // 本地连接被拒在沙箱里是正常测试结果，不能补这句提示（loopback 是通的）。
+  assert.equal(
+    await offlineHandler.result("bash", "Error: connect ECONNREFUSED 127.0.0.1:3000"),
+    undefined,
+    "ECONNREFUSED is a normal local result, not a permission problem",
+  )
+  assert.equal(await offlineHandler.result("bash", "FAIL src/a.test.ts > adds 1+1"), undefined, "unrelated failures are untouched")
+  assert.equal(await offlineHandler.result("read", "ENETUNREACH"), undefined, "only bash results are annotated")
+  offlineHandler.restore()
+
+  // 开了网络的会话不补：那时网络失败确实是环境问题。
+  const onlineHandler = await handler({
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["**"], bash: { read: ["sh netprobe.sh"], network: true } },
+    }),
+  })
+  assert.equal(
+    await onlineHandler.result("bash", "Error: connect ENETUNREACH 1.1.1.1:80"),
+    undefined,
+    "an online sandbox is not annotated",
+  )
+  onlineHandler.restore()
+  console.log("  ok   离线沙箱的网络失败被标注为「主代理未授权」，且不误报本地拒绝与在线会话")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

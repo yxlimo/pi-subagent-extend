@@ -269,6 +269,14 @@ after it has been rewritten. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary pa
 - A missing helper fails closed: allowlisted commands do not run either, and the refusal
   states the reason and the build command. `PI_SUBAGENT_EXTEND_HELPER` overrides the binary
   path.
+- A network failure inside the sandbox is annotated. When a `bash` result contains
+  `ENETUNREACH`, `EAI_AGAIN`, `ENOTFOUND` or a name-resolution failure and the command ran
+  offline, a short `[sandbox]` note is appended saying the network was disabled by the
+  parent's bindings, that retrying with another registry or a longer timeout will fail the
+  same way, and that `contact_supervisor` is the way to ask for it. A raw errno otherwise
+  reads like a broken machine, which is exactly what makes an agent retry. `ECONNREFUSED` is
+  deliberately not annotated: loopback works, so a refused local port is an ordinary test
+  result, and an online sandbox is never annotated either.
 - The limit is deliberate: the sandbox prevents **out-of-scope writes and network access**,
   not reads. Running a test suite requires reading the whole tree, `node_modules` and
   configuration files included, so inside the sandbox `cat` can still read files outside the

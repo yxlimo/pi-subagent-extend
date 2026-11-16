@@ -46,6 +46,7 @@ import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
+import { networkFailureNote } from "./sandbox-note.ts";
 import { Probe, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
@@ -756,15 +757,23 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		probe?.dispose();
 	});
 
-	// tool_result 干两件事：
+	// tool_result 干三件事：
 	// 1. 探针 3 要看 bash 的输出；
-	// 2. 子代理的 worktree 单会在这里返回交接单路径，就地补一句「该看哪个键」。
+	// 2. 子代理的 worktree 单会在这里返回交接单路径，就地补一句「该看哪个键」；
+	// 3. 离线沙箱里的网络失败要就地说明「这是主代理没授权」，否则子代理会当成
+	//    环境坏了，换 registry / 加 timeout 反复重试。
 	pi.on("tool_result", async (event) => {
 		const text = textOf(event.content);
-		if (probe && event.toolName === "bash") probe.noteBashResult(text);
-		const hint = handoffHintFor(text);
-		if (!hint) return undefined;
-		return { content: withHint(event.content, hint) };
+		const isBash = event.toolName === "bash";
+		if (probe && isBash) probe.noteBashResult(text);
+		// bash 没开时命令根本没跑，别去解释它的结果。
+		const offline = policy.bash !== undefined && policy.bash.network !== true;
+		const hints = [
+			handoffHintFor(text),
+			isBash ? networkFailureNote(text, offline) : undefined,
+		].filter((hint): hint is string => Boolean(hint));
+		if (!hints.length) return undefined;
+		return { content: withHint(event.content, hints.join("\n\n")) };
 	});
 
 	// 后台子代理完成后，pi-subagents 用 sendMessage 把通知注入会话（正文带 `Parallel handoff:`）。
