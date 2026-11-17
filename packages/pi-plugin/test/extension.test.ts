@@ -2220,5 +2220,74 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   注解只在命令真的失败时出现：输出正文里的 EACCES 不触发")
 }
 
+// 63. 启动前的依赖完整性闸门：有 lockfile 却没有 node_modules/.bin 的目录，bash 直接失败并点名。
+//     代价是每个目录一次 readdir；换来的是第一条构建命令不会在沙箱里自己去装依赖然后卡住。
+//     计数归属：它拒的是环境，不是授权 —— 重试也不会变好，所以不进任何预算。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  mkdirSync(join(tree, "web"), { recursive: true })
+  writeFileSync(join(tree, "web", "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  mkdirSync(join(tree, "node_modules", ".bin"), { recursive: true })
+
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], maxDenies: 1, bash: { read: ["git status"] } } }),
+  })
+  const first = await h.call("bash", { command: "git status" })
+  assert.equal(first?.block, true, "bash is refused while a lockfile directory has no node_modules")
+  assert.match(first.reason, /web/, "the refusal names the directory that is missing")
+  assert.match(first.reason, /node_modules\/\.bin/, "and names what is missing in it")
+  assert.match(first.reason, /contact_supervisor/, "and the way out")
+  assert.equal(first.terminate, undefined, "the first refusal does not stop the run")
+
+  // 判别式：授权预算压到 1。若这类拒绝记在预算上，第二次就 warn、第三次就硬停。
+  const second = await h.call("bash", { command: "git status" })
+  assert.doesNotMatch(String(second?.reason), /in a row/, "an uninstalled dependency is not an authorisation refusal")
+  const third = await h.call("bash", { command: "git status" })
+  assert.equal(third?.terminate, undefined, "retrying never reaches a hard stop: retrying cannot install anything")
+
+  // 补上 .bin 之后立刻可用（目录清单有缓存，缺的那一项每轮重查）。
+  mkdirSync(join(tree, "web", "node_modules", ".bin"), { recursive: true })
+  const allowed = await h.call("bash", { command: "git status" })
+  assert.notEqual(allowed?.block, true, "once every lockfile directory has node_modules/.bin the gate opens")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门：缺 node_modules/.bin 的 lockfile 目录让 bash 直接失败，且不占任何预算")
+}
+
+// 64. 闸门可以关掉：任务可能只需要读文件，装依赖本就是另一件事。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-off-"))
+  writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], bash: { read: ["git status"], dependencyGate: false } },
+    }),
+  })
+  const out = await h.call("bash", { command: "git status" })
+  assert.notEqual(out?.block, true, "dependencyGate: false turns the gate off")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门可以关：bash.dependencyGate=false 时不检查")
+}
+
+// 65. 只有 package.json 的目录不算依赖根：那可能只是个配置包，永远不会装依赖。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-nolock-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { read: ["git status"] } } }),
+  })
+  const out = await h.call("bash", { command: "git status" })
+  assert.notEqual(out?.block, true, "no lockfile means no dependency root, so the gate stays out of the way")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门只认 lockfile：只有 package.json 的目录不触发")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

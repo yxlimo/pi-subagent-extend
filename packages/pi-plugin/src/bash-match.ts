@@ -39,6 +39,11 @@ export interface BashRule {
 	 */
 	deny: string[];
 	/**
+	 * 启动前的依赖完整性闸门（默认开）：有 lockfile 却没有 node_modules/.bin 的目录，
+	 * 让 bash 直接失败并点名，而不是让第一条构建命令在沙箱里去装依赖、然后挂住。
+	 */
+	dependencyGate: boolean;
+	/**
 	 * 是否给沙箱里的 git 注入全局排除规则（node_modules/、.pnpm-store/）。
 	 * 默认开：防止子代理 `git add -A` 把依赖目录吸进索引。
 	 */
@@ -138,5 +143,6 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 		scratchPaths: cfg.scratchPaths === false ? false : stringList(cfg.scratchPaths),
 		gitExcludes: cfg.gitExcludes !== false,
 		deny: stringList(cfg.deny),
+		dependencyGate: cfg.dependencyGate !== false,
 	};
 }

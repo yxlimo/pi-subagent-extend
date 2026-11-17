@@ -82,6 +82,7 @@ subagent(
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
 | `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one. |
+| `bash.dependencyGate` | `boolean` | Defaults to `true`. Before a command runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also have `node_modules/.bin`. If one does not, bash is refused and the refusal names the directory, because the alternative is a build that tries to install inside the sandbox — where the store is usually not writable — and either hangs or fails with output that points at nothing. `false` turns the check off. |
 
 `/permission` shows the read scope, the write scope when it differs, the bash allowlist, both
 read and write denial counts, and the probe state. The namespace is `pi-subagent-extend/1`;
@@ -115,7 +116,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and then three offline suites: 62 scope cases, 10 context cases and 6
+`pnpm test` runs a lint pass and then three offline suites: 65 scope cases, 10 context cases and 6
 sessions against a real pi process driven by a scripted mock model. No model and no network beyond
 localhost. The suites are TypeScript and are type checked with the source, so a typo in a fixture is
 a compile error rather than an assertion that silently passes. See [testing](docs/testing.md).
