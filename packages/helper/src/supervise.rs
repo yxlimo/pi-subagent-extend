@@ -13,6 +13,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
 /// Set by the supervisor once the command is running.
 static COMMAND_PID: AtomicI32 = AtomicI32::new(0);
@@ -21,19 +22,19 @@ static COMMAND_PID: AtomicI32 = AtomicI32::new(0);
 ///
 /// `child_main` is expected to `exec`; returning from it means the command could
 /// not be started, and the returned value becomes the exit status.
-pub fn run(child_main: impl FnOnce() -> i32, fresh_proc: bool) -> Result<i32, String> {
+pub fn run(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<u64>) -> Result<i32, String> {
     match unsafe { libc::fork() } {
         -1 => Err(format!(
             "cannot fork the sandbox init: {}",
             std::io::Error::last_os_error()
         )),
-        0 => supervisor(child_main, fresh_proc),
+        0 => supervisor(child_main, fresh_proc, stall),
         pid => Ok(decode(wait_for(pid)?)),
     }
 }
 
 /// The PID 1 of the new namespace: mount a fresh procfs, then supervise.
-fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool) -> ! {
+fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<u64>) -> ! {
     // If the caller dies, the whole namespace must die with it, otherwise the
     // command is orphaned inside a namespace nobody can reach.
     unsafe {
@@ -76,16 +77,199 @@ fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool) -> ! {
         }
         pid => {
             COMMAND_PID.store(pid, Ordering::SeqCst);
-            let status = match wait_for(pid) {
-                Ok(status) => status,
-                Err(error) => {
-                    eprintln!("pi-subagent-extend-helper: {error}");
-                    unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
-                }
+            let code = match stall {
+                Some(seconds) if seconds > 0 => match wait_with_stall(pid, seconds, fresh_proc) {
+                    Ok(code) => code,
+                    Err(error) => {
+                        eprintln!("pi-subagent-extend-helper: {error}");
+                        crate::EXIT_SANDBOX_FAILED
+                    }
+                },
+                _ => match wait_for(pid) {
+                    Ok(status) => decode(status),
+                    Err(error) => {
+                        eprintln!("pi-subagent-extend-helper: {error}");
+                        crate::EXIT_SANDBOX_FAILED
+                    }
+                },
             };
-            unsafe { libc::_exit(decode(status)) }
+            unsafe { libc::_exit(code) }
         }
     }
+}
+
+/// Wait for the command while watching its CPU time, and kill the tree when it stops using any.
+///
+/// A wall-clock limit cannot tell a long compile from a deadlock; CPU time can. A tree that is
+/// working accumulates CPU in every sample, a deadlocked one accumulates none — it waits on a lock, a
+/// socket, or a child that died without closing a pipe. The supervisor is the only process that sees
+/// the whole subtree (it is PID 1 of the namespace), so the measurement belongs here.
+///
+/// This is opt-in and it has an honest blind spot: a command that deliberately sleeps (
+/// `sleep 300`, a poll loop backing off) also uses no CPU, and the helper cannot see output — stdio is
+/// inherited, not piped — so "no output" cannot corroborate it. That is why the extension leaves it
+/// off unless a caller asks for it.
+fn wait_with_stall(pid: libc::pid_t, stall_seconds: u64, private_proc: bool) -> Result<i32, String> {
+    // Sample often enough to notice a stall promptly, but never spin.
+    let period = Duration::from_millis(250).max(Duration::from_secs(stall_seconds).checked_div(4).unwrap_or(Duration::from_millis(250)));
+    let limit = Duration::from_secs(stall_seconds);
+    let mut cpu = tree_cpu(pid, private_proc);
+    let mut quiet_since = Instant::now();
+    loop {
+        match try_wait(pid)? {
+            Some(status) => return Ok(decode(status)),
+            None => {}
+        }
+        std::thread::sleep(period);
+        match try_wait(pid)? {
+            Some(status) => return Ok(decode(status)),
+            None => {}
+        }
+        let now = tree_cpu(pid, private_proc);
+        if now > cpu {
+            cpu = now;
+            quiet_since = Instant::now();
+            continue;
+        }
+        if quiet_since.elapsed() < limit {
+            continue;
+        }
+        eprintln!(
+            "pi-subagent-extend-helper: cpu stall: the command tree used no CPU for {} s while still running; killing it (a working build would have used CPU — this is usually a lock, a socket, or an orphaned child, not a slow compile)",
+            stall_seconds
+        );
+        kill_tree(pid, private_proc);
+        // Reap what we killed so the exit status we report is ours, not a stray SIGCHLD.
+        let _ = wait_for(pid);
+        return Ok(crate::EXIT_STALLED);
+    }
+}
+
+/// `waitpid` without blocking; `None` means the child is still running.
+fn try_wait(pid: libc::pid_t) -> Result<Option<libc::c_int>, String> {
+    let mut status: libc::c_int = 0;
+    loop {
+        let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if reaped == pid {
+            return Ok(Some(status));
+        }
+        if reaped == 0 {
+            return Ok(None);
+        }
+        if reaped < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(format!("cannot wait for the command: {error}"));
+        }
+    }
+}
+
+/// Cumulative CPU (utime + stime, in clock ticks) of the command and every descendant.
+///
+/// With a private procfs the whole table is the namespace, so summing every entry is both correct
+/// and cheap. Without one the table is the host's, where summing everything would let unrelated
+/// work mask a stall — there the walk follows parent links from the command instead.
+fn tree_cpu(root: libc::pid_t, private_proc: bool) -> u64 {
+    let stats = proc_stats();
+    if private_proc {
+        return stats.iter().map(|s| s.utime + s.stime).sum();
+    }
+    let mut total = 0;
+    let mut frontier = vec![root];
+    let mut seen = 0usize;
+    while let Some(pid) = frontier.pop() {
+        seen += 1;
+        if seen > 4096 {
+            break;
+        }
+        if let Some(stat) = stats.iter().find(|s| s.pid == pid) {
+            total += stat.utime + stat.stime;
+        }
+        for stat in &stats {
+            if stat.ppid == pid {
+                frontier.push(stat.pid);
+            }
+        }
+    }
+    total
+}
+
+/// Kill every process of the command tree, deepest last. PID 1 exiting would take the namespace with
+/// it, but the host case has no such guarantee.
+fn kill_tree(root: libc::pid_t, private_proc: bool) {
+    let stats = proc_stats();
+    if !private_proc {
+        let mut frontier = vec![root];
+        let mut seen = 0usize;
+        while let Some(pid) = frontier.pop() {
+            seen += 1;
+            if seen > 4096 {
+                break;
+            }
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            for stat in &stats {
+                if stat.ppid == pid {
+                    frontier.push(stat.pid);
+                }
+            }
+        }
+        return;
+    }
+    for stat in &stats {
+        if stat.pid != std::process::id() as libc::pid_t {
+            unsafe { libc::kill(stat.pid, libc::SIGKILL) };
+        }
+    }
+}
+
+struct ProcStat {
+    pid: libc::pid_t,
+    ppid: libc::pid_t,
+    utime: u64,
+    stime: u64,
+}
+
+/// Read `/proc/<pid>/stat` for every process visible in `/proc`.
+fn proc_stats() -> Vec<ProcStat> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<libc::pid_t>().ok()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if let Some(stat) = parse_stat(pid, &text) {
+            out.push(stat);
+        }
+    }
+    out
+}
+
+/// Parse the fields of `/proc/<pid>/stat` that matter here.
+///
+/// The second field is the executable name in parentheses and may itself contain spaces and
+/// parentheses, so everything before the last `)` has to be skipped rather than split on whitespace.
+fn parse_stat(pid: libc::pid_t, text: &str) -> Option<ProcStat> {
+    let close = text.rfind(')')?;
+    let rest: Vec<&str> = text[close + 1..].split_whitespace().collect();
+    // After the name come state, ppid, pgrp, session, tty, tpgid, flags, minflt, cminflt, majflt,
+    // cmajflt, utime, stime: state is index 0, so ppid is 1, utime 11, stime 12.
+    let ppid = rest.get(1)?.parse().ok()?;
+    let utime = rest.get(11)?.parse().ok()?;
+    let stime = rest.get(12)?.parse().ok()?;
+    Some(ProcStat {
+        pid,
+        ppid,
+        utime,
+        stime,
+    })
 }
 
 /// Hand a signal that reached the supervisor to the command.
@@ -141,5 +325,21 @@ mod tests {
     fn a_signal_death_becomes_128_plus_signal() {
         // SIGKILL (9) without the exited bit.
         assert_eq!(decode(9), 137);
+    }
+
+    #[test]
+    fn a_stat_line_with_parentheses_in_the_name_still_parses() {
+        // 第二个字段是带括号的可执行名，名字里可以出现空格和括号 —— 按空白切分必然错位，
+        // 所以必须从最后一个 ')' 之后开始读。这里用一个真实会出现的形状：编译器驱动进程。
+        let line = "4242 (cc1plus (worker)) S 4200 4242 4242 0 -1 4194560 1 0 0 0 1234 567 0 0";
+        let stat = parse_stat(4242, line).expect("parses");
+        assert_eq!(stat.ppid, 4200);
+        assert_eq!(stat.utime, 1234);
+        assert_eq!(stat.stime, 567);
+    }
+
+    #[test]
+    fn a_truncated_stat_line_parses_to_nothing() {
+        assert!(parse_stat(1, "1 (init) S").is_none());
     }
 }

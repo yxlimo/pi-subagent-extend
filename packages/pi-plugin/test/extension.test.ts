@@ -2596,5 +2596,50 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   停机后的调用收到状态说明，不复述触发停机的旧命令")
 }
 
+// 75. The CPU-stall watchdog is opt-in, reaches the spec only when on, and its kill is annotated.
+//     背景：墙钟超时分不开「死锁」和「长编译」。判据在 helper 侧（它是 PID 1，看得见整棵
+//     子树），扩展这一层只有三件事要负责：默认关、开启时把秒数写进 spec、被它杀掉时给模型
+//     一句「重试没用」的说明 —— 否则模型会把它当成偶发失败，原样再跑一遍。
+{
+  const { parseBashRule } = await import(join(repo, "src", "bash-match.ts"))
+  assert.equal(parseBashRule({ read: ["pnpm test"] })?.cpuStallSeconds, false, "off unless asked for")
+  assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: false })?.cpuStallSeconds, false, "explicit false stays off")
+  assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: 0 })?.cpuStallSeconds, false, "0 means off, not kill at once")
+  assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: 90 })?.cpuStallSeconds, 90, "a positive value arms it")
+  assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: "60" })?.cpuStallSeconds, 60, "a numeric string is accepted")
+
+  const armed = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: [workdir], bash: { write: ["node"], cpuStallSeconds: 90 } },
+    }),
+  })
+  const armedInput = { command: "node build.mjs" }
+  await armed.call("bash", armedInput)
+  assert.equal(specOf(armedInput.command).stallSeconds, 90, "the seconds reach the spec")
+  armed.restore()
+
+  const plain = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: [workdir], bash: { write: ["node"] } } }),
+  })
+  const plainInput = { command: "node build.mjs" }
+  await plain.call("bash", plainInput)
+  assert.equal(
+    "stallSeconds" in specOf(plainInput.command),
+    false,
+    "when off the key is absent: an older helper rejects unknown fields",
+  )
+  plain.restore()
+
+  const { cpuStallNote } = await import(join(repo, "src", "sandbox-note.ts"))
+  const killed = "pi-subagent-extend-helper: cpu stall: the command tree used no CPU for 90 s while still running; killing it"
+  assert.match(String(cpuStallNote(killed)), /no CPU for 90 s/, "the note carries what the helper measured")
+  assert.match(String(cpuStallNote(killed)), /Retrying stalls the same way/, "and says a retry will not help")
+  assert.equal(cpuStallNote("FAIL src/app.test.ts > adds numbers"), undefined, "an ordinary test failure is left alone")
+  assert.equal(cpuStallNote(`${killed}\n\n[sandbox] already annotated`), undefined, "the note is added once")
+  console.log("  ok   CPU 卡死看门狗：默认关、开启才进 spec、被杀时的说明点明重试无用")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

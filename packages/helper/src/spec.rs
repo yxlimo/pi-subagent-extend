@@ -37,6 +37,13 @@ pub struct Spec {
     /// Environment variables to set for the command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Kill the command tree when it uses no CPU for this many seconds.
+    ///
+    /// Absent means no watchdog. The extension omits the field unless a caller asked
+    /// for it, which also keeps the document readable by a helper built before this
+    /// field existed (`deny_unknown_fields` would reject an unknown key, not ignore it).
+    #[serde(default, rename = "stallSeconds", skip_serializing_if = "Option::is_none")]
+    pub stall_seconds: Option<u64>,
 }
 
 impl Spec {
