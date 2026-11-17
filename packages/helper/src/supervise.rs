@@ -113,19 +113,24 @@ fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<
 /// `sleep 300`, a poll loop backing off) also uses no CPU, and the helper cannot see output — stdio is
 /// inherited, not piped — so "no output" cannot corroborate it. That is why the extension leaves it
 /// off unless a caller asks for it.
+/// 采样间隔，同时也是「命令是否已经退出」的检查间隔。
+///
+/// 两者共用同一个循环，所以这个间隔直接决定每条命令完成后的额外延迟上限——早先它取
+/// `阈值 / 4`，`stallSeconds: 90` 时就是 22.5 秒，一个 `true` 要 22.5 秒才回到调用方。
+/// 现在钉在 [250ms, 1s]：扫一遍 `/proc` 只要微秒级，密一点不贵，而上限保证退出延迟不超过
+/// 一秒。`stall_seconds` 为 0 不会走到这里（调用方保证 > 0）。
+fn poll_period(stall_seconds: u64) -> Duration {
+    Duration::from_millis(250)
+        .max(Duration::from_secs(stall_seconds) / 4)
+        .min(Duration::from_secs(1))
+}
+
 fn wait_with_stall(
     pid: libc::pid_t,
     stall_seconds: u64,
     private_proc: bool,
 ) -> Result<i32, String> {
-    // Poll often enough to notice a stall promptly, but never spin — and keep the interval
-    // independent of how long a stall has to last. Tying the two together cost every command
-    // that much latency before its exit was even noticed: with `stallSeconds: 90` a `true`
-    // return took 22.5 s to reach the caller, because completion was only checked once per
-    // sample. A scan of a few hundred `/proc` entries is microseconds, so one second is cheap.
-    let period = Duration::from_millis(250)
-        .max(Duration::from_secs(stall_seconds) / 4)
-        .min(Duration::from_secs(1));
+    let period = poll_period(stall_seconds);
     let limit = Duration::from_secs(stall_seconds);
     let mut cpu = tree_cpu(pid, private_proc);
     let mut quiet_since = Instant::now();
@@ -375,11 +380,26 @@ mod tests {
     fn a_stat_line_with_parentheses_in_the_name_still_parses() {
         // 第二个字段是带括号的可执行名，名字里可以出现空格和括号 —— 按空白切分必然错位，
         // 所以必须从最后一个 ')' 之后开始读。这里用一个真实会出现的形状：编译器驱动进程。
-        let line = "4242 (cc1plus (worker)) S 4200 4242 4242 0 -1 4194560 1 0 0 0 1234 567 0 0";
+        // 尾两位是 cutime/cstime：不下标错就只有靠它们才能钉住，早先这里是 `0 0`，
+        // 于是「读错一位」也能通过，而那样一来 cutime 的修复就等于没做。
+        let line = "4242 (cc1plus (worker)) S 4200 4242 4242 0 -1 4194560 1 0 0 0 1234 567 89 10";
         let stat = parse_stat(4242, line).expect("parses");
         assert_eq!(stat.ppid, 4200);
         assert_eq!(stat.utime, 1234);
         assert_eq!(stat.stime, 567);
+        assert_eq!(stat.cutime, 89);
+        assert_eq!(stat.cstime, 10);
+        assert_eq!(stat.total(), 1900, "reaped children stay in the sum");
+    }
+
+    #[test]
+    fn the_poll_period_is_bounded_at_both_ends() {
+        // 下界保证不空转，上界保证退出检测的延迟不超过一秒 —— 这就是 22.5 秒那条 bug 的回归线。
+        assert_eq!(poll_period(1), Duration::from_millis(250));
+        assert_eq!(poll_period(2), Duration::from_millis(500));
+        assert_eq!(poll_period(4), Duration::from_secs(1));
+        assert_eq!(poll_period(90), Duration::from_secs(1));
+        assert_eq!(poll_period(86_400), Duration::from_secs(1));
     }
 
     #[test]

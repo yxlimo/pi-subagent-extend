@@ -333,10 +333,8 @@ export class Probe {
 		const now = this.#host.now();
 		const expired = [this.#idle, this.#repeat].find((w) => w.warned && now >= w.abortAt);
 		if (expired) {
-			this.#stopped = true;
-			this.#clearTimers();
-			this.#stopReason = `${expired.message}\nGrace expired; the run stops here. Summarize what changed and what blocks you.`;
-			this.#causeSent = true;
+			// 这一次的原因就由这次调用返回，所以标记为「已交给模型」。
+			this.#stopWith(`${expired.message}\nGrace expired; the run stops here. Summarize what changed and what blocks you.`, true);
 			return { reason: this.#stopReason, stop: true };
 		}
 		const armed = [this.#repeat, this.#idle].find((w) => w.armed);
@@ -367,13 +365,26 @@ export class Probe {
 		this.#fireIdleAbort();
 	}
 
-	#fireIdleAbort(): void {
-		if (this.#stopped) return;
+	/**
+	 * 停机。三处（grace 到期、空转、早可收工）都走这里，因为 `#causeSent` 的正确值取决于调用点：
+	 * 由这次调用把原因返回出去的，标 true；由计时器触发、只能等下一个边界补发的，标 false。
+	 * 原先三处各写三行，新加一处忘了写就不会补发 —— 那正是这次要修的 bug 的形状。
+	 */
+	#stopWith(reason: string, causeSent: boolean): void {
 		this.#stopped = true;
 		this.#clearTimers();
-		this.#stopReason =
+		this.#stopReason = reason;
+		this.#causeSent = causeSent;
+	}
+
+	#fireIdleAbort(): void {
+		if (this.#stopped) return;
+		// 计时器停机没有工具调用可以带回原因，`#hooks.warn` 只是 UI 提示，所以留给下一个边界补发。
+		this.#stopWith(
 			`Criterion: idle — nothing written for over ${ms(this.#cfg.idleWriteMs + this.#cfg.abortGraceMs)} ` +
-			"and no write-capable bash ran. The run stops here: state what you confirmed and why nothing changed.";
+				"and no write-capable bash ran. The run stops here: state what you confirmed and why nothing changed.",
+			false,
+		);
 		this.#hooks.warn(this.#stopReason);
 	}
 
@@ -389,11 +400,11 @@ export class Probe {
 		this.#successArmed = true;
 		this.#successTimer = this.#schedule(() => {
 			if (this.#stopped) return;
-			this.#stopped = true;
-			this.#clearTimers();
-			this.#stopReason =
+			this.#stopWith(
 				`Criterion: work is done — success marker "${marker}" matched and nothing changed for ${ms(this.#cfg.successIdleMs)}. ` +
-				"The run stops here; report the result.";
+					"The run stops here; report the result.",
+				false,
+			);
 			this.#hooks.warn(this.#stopReason);
 		}, this.#cfg.successIdleMs);
 	}

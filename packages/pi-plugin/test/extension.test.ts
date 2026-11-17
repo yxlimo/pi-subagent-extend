@@ -2665,35 +2665,63 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.match(String(second?.reason), /stopped earlier/, "but from then on they get the status line")
   assert.ok(!/criterion: idle/i.test(String(second?.reason)), "without repeating the cause a third time")
   p.dispose()
+
+  // 早可收工那条计时器同理：它也不经过任何工具调用。
+  const clock2 = fakeClock()
+  const done = new Probe({
+    config: {
+      ...defaultProbe(),
+      successIdleMs: 1000,
+      successPatterns: ["all tests passed"],
+    },
+    readOnly: false,
+    hooks: { warn: () => {} },
+    host: clock2.host,
+  })
+  done.noteBashStart("pnpm test", "write")
+  done.noteBashResult("all tests passed", "x")
+  clock2.advance(1000)
+  const doneFirst = done.atToolBoundary()
+  assert.equal(doneFirst?.stop, true, "the success-marker timer stops the run")
+  assert.match(String(doneFirst?.reason), /work is done/, "and the first boundary names the criterion")
+  const doneSecond = done.atToolBoundary()
+  assert.match(String(doneSecond?.reason), /stopped earlier/, "while the next one gets the status line")
+  done.dispose()
   console.log("  ok   计时器停机也要把原因交给模型一次（之后才换成状态说明）")
 }
 
 // 77. Two bash calls in one message pair their outputs by call id.
 //     缺陷：单槽 `#pending` 在并行的工具调用下会把先到的结果记到后一条命令名下，再丢掉另一条 ——
 //     输出比对于是张冠李戴，而这条判据的代价就是误杀。pi 默认并行执行同一条消息里的调用。
+//     这里必须用**两条不同命令**：同一命令时两个槽指向同一个计数键，单槽也能得出同样结果，
+//     那样这条用例就什么也没钉住（第一版正是如此）。
 {
   const { Probe } = await import(join(repo, "src", "probe.ts"))
   const clock = fakeClock()
   const p = new Probe({
-    config: { ...defaultProbe(), repeatBash: 2 },
+    config: { ...defaultProbe(), repeatBash: 3 },
     readOnly: true,
     hooks: { warn: () => {} },
     host: clock.host,
   })
-  // 第一条命令已经跑过一次，基线是 "same"。
-  p.noteBashStart("ls -la", "read", "call-1")
-  p.noteBashResult("same", "call-1")
-  p.noteBashStart("ls -la", "read", "call-2")
-  p.noteBashResult("same", "call-2")
-  // 两条并行进入，结果以相反顺序回来：第二条带回新输出，第一条与上一次相同。
-  p.noteBashStart("ls -la", "read", "call-3")
-  p.noteBashStart("ls -la", "read", "call-4")
-  p.noteBashResult("different", "call-4")
-  p.noteBashResult("same", "call-3")
-  const after = p.noteBashStart("ls -la", "read", "call-5")
-  assert.notEqual(after?.stop, true, "the call whose output changed reset the count, not the other one")
+  // a 与 b 并行进入，结果按相反顺序回来。
+  p.noteBashStart("ls -la a", "read", "call-1")
+  p.noteBashStart("ls -la b", "read", "call-2")
+  p.noteBashResult("b1", "call-2")
+  p.noteBashResult("a1", "call-1")
+  // 再来一轮：a 带回新输出（进展，计数清零），b 与上次相同（继续累加）。
+  p.noteBashStart("ls -la a", "read", "call-3")
+  p.noteBashStart("ls -la b", "read", "call-4")
+  p.noteBashResult("a2", "call-3")
+  p.noteBashResult("b2", "call-4")
+  // 第三次 a：输出与 a2 相同，计数应为 2，还不到 3，不该停。
+  // 单槽时 a1 的结果被记到 b 名下、a 的基线被丢掉，于是这次被当成第 3 次 → 误杀。
+  const a3 = p.noteBashStart("ls -la a", "read", "call-5")
+  // 固定实现下 a 的计数已被新输出清零，第 3 次什么也不返回；单槽下 a 的计数是累加到 3 的，
+  // 于是这里会给出「同一命令重复 3 次」的警告（`stop: false`，下一次就硬停）。
+  assert.equal(a3, undefined, "a's own changed output reset its count; a single slot warns here")
   p.dispose()
-  console.log("  ok   并行 bash 调用按 toolCallId 配对输出（单槽会记错并误杀）")
+  console.log("  ok   并行 bash 调用按 toolCallId 配对输出（单槽会记到另一条命令名下并误杀）")
 }
 
 // 78. `cpuStallSeconds` rejects values that would silently mean something else.
