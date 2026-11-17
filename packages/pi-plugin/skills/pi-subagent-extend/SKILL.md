@@ -1,11 +1,11 @@
 ---
 name: pi-subagent-extend
-description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope — every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping are covered by pi-subagent-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagent-extend-context.
+description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope — every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). When the project declares the role in `.pi/subagent-bindings.json`, dispatch with `agent`, `model` and `task` only and let the profile carry the scope. Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping are covered by pi-subagent-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagent-extend-context.
 ---
 
 # pi-subagent-extend: confine a subagent to the task scope
 
-When delegating a subagent, pass the scope of this task through `extensionBindings`. In the subagent's session, every tool_call outside that scope is refused (fail closed): this keeps the subagent from wandering through the repository aimlessly.
+When delegating a subagent, pass the scope of this task through `extensionBindings` — unless the project declares the role in `.pi/subagent-bindings.json`, in which case the profile carries the scope and the dispatch passes only `agent`, `model` and `task` (see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time)). In the subagent's session, every tool_call outside that scope is refused (fail closed): this keeps the subagent from wandering through the repository aimlessly.
 
 ## When to use it
 
@@ -34,11 +34,26 @@ The delegated agent must be able to load this extension. Choose one:
 
 Without the extension loaded, passing bindings does nothing: no interception happens.
 
+Under a project profile the role's loader is declared instead of the entry point: it imports the extension itself, so listing `…/src/index.ts` is not needed (see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time)).
+
 If the project uses the `<!-- main-agent-only:start -->` marker, add `, …/src/child-context.ts` to the same line, otherwise the subagent reads the main-agent-only sections (see skill `pi-subagent-extend-context`).
 
 The commands in `bash.read` / `bash.write` run under the sandbox helper (the Rust binary in `packages/helper`): the file scope is enforced by Landlock, the network is off by default (all outbound TCP/UDP is cut and DNS resolution fails, but loopback works inside the sandbox, so a local server can be started and reached), and processes and capabilities are isolated as well (the host processes are invisible, the command has no capability at all). The host needs Landlock ABI 7 (Linux 6.15+); when the helper is missing or the kernel is too old, bash stays disabled (the remaining features are unaffected).
 
 ## Call template
+
+**When the project declares a profile for the role, pass only `agent`, `model` and `task`:**
+
+```text
+subagent(agent: "coder", model: "buddy/coder-d", task: "<task description>")
+```
+
+Hand-written `extensionBindings` is the path for a one-off scope, not the default, because it fails in two ways:
+
+- **A fan-out cannot carry it.** `extensionBindings` is a top-level parameter of `subagent` only. A `tasks` item accepts `agent`, `task`, `cwd` and `model` and nothing else, and rejects any other field; the same holds for a `chain` step and for `args.tasks` of a `workflow: "parallel"` script. There is no place in a parallel dispatch to declare a scope.
+- **It is forgotten.** A dispatch that carries neither bindings nor a profile is not constrained at all: the extension is loaded and inactive.
+
+Declaring the role once in `.pi/subagent-bindings.json` removes both — see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time).
 
 Reading or writing files, no commands needed:
 
@@ -156,30 +171,43 @@ Entries come in two forms:
 
 ## Profiles (per-role defaults, no need to pass them each time)
 
-`extensionBindings` can only be hand-written on each dispatch; an agent definition has nowhere to declare defaults, and forgetting to pass them means **no restriction at all**. A profile keeps the defaults with the agent definition:
+`extensionBindings` can only be hand-written on each dispatch; an agent definition has nowhere to declare defaults, and forgetting to pass them means **no restriction at all**. A profile keeps the defaults with the role, and a dispatch to that role then needs only `agent`, `model` and `task`.
+
+Adding a role takes three pieces. This repository has both of its roles wired up, and `coder` is the worked example:
+
+1. **The role's key in `.pi/subagent-bindings.json`**, beside `default`. The value is built from the same fields as the two tables above:
+
+```json
+// .pi/subagent-bindings.json (trimmed)
+{
+  "default": { "maxDenies": 8, "bash": { "deny": ["git commit"] } },
+  "coder": { "scope": ["."], "bash": { "read": ["cat"], "write": ["node"], "writable": true } },
+  "review": { "scope": ["."], "readOnly": true, "bash": { "read": ["git diff"] } }
+}
+```
+
+2. **A loader at `.pi/agent-profiles/<role>.ts`** — two lines, and the import path has to be absolute because Node does not expand `~` in an import specifier:
 
 ```ts
-// .pi/agent-profiles/writer.ts (two lines)
-// the path must be absolute: Node does not expand `~` in an import
-import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
-export default profile("writer");
+// .pi/agent-profiles/coder.ts
+import { profile } from "/home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+
+export default profile("coder");
 ```
+
+3. **That loader's path in `subagentOnlyExtensions` of the agent definition** at `.pi/agents/<agent>.md`:
 
 ```markdown
 ---
-name: be-core
-subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, <project root>/.pi/agent-profiles/writer.ts
+name: coder
+subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
 ---
 ```
 
-```json
-// .pi/subagent-bindings.json (project root)
-{
-  "default": { "maxDenies": 5 },
-  "writer": { "bash": { "read": ["mise run typecheck"], "write": ["mise run test"], "writable": true } },
-  "review": { "readOnly": true, "bash": { "read": ["git diff", "rg"], "deny": ["git stash"] } }
-}
-```
+Two things about the third piece:
+
+- **The loader is also the extension's entry point.** It imports `profile.ts`, which calls `activate()`, so the loader alone loads the extension and constrains the session — `.pi/agents/coder.md` declares nothing else for this extension. Declaring `…/src/index.ts` beside it, as `.pi/agents/ext-review.md` does, adds an entry point without a role; the profile is carried by the loader either way.
+- **Omitting the loader leaves the extension loaded but constraining nothing (fail open).** The role is learned from the module that is loaded, not from the agent's name: without the loader no profile name reaches `activate()`, the policy stays inactive, and every tool call passes. Listing the extension's entry point in `subagentOnlyExtensions` is not enough for exactly this reason — the session looks confined and is not.
 
 Rules:
 
