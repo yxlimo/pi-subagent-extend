@@ -814,14 +814,40 @@ function commandHead(command: string): string {
 const PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn", "bun", "npx", "pnpx", "bunx", "corepack"]);
 
 /**
+ * 包在另一条命令外面的壳。`sh -c "pnpm test"`、`env pnpm test`、`exec pnpm test`
+ * 的第二个词才是真正要跑的命令，只看第一个词会把它们当成阅读类放过去。
+ */
+const COMMAND_WRAPPERS = new Set([
+	"sh", "bash", "zsh", "dash", "ash", "ksh", "env", "exec", "command",
+	"nohup", "setsid", "nice", "ionice", "stdbuf", "timeout", "xargs",
+]);
+
+/** 命令里是否出现了包管理器这个词元（跳过引号、分隔符与前置赋值）。 */
+function invokesPackageManager(command: string): boolean {
+	for (const token of command.split(/[\s'"`;|&()<>]+/)) {
+		const word = token.replace(/^[A-Za-z_][A-Za-z0-9_]*=/, "");
+		if (word && PACKAGE_MANAGERS.has(basename(word))) return true;
+	}
+	return false;
+}
+
+/**
  * 闸门只管「会去装依赖」的那几类：写类命令（构建、测试）与包管理器本身。
  *
  * `git` 与只读命令不受影响。git 不需要 node_modules，而「先落任务日志再提交」这种保树
  * 纪律恰恰在依赖缺失时最要用得上 —— 把 git 一起挡掉，拒绝就发生在最不该发生的时刻。
+ *
+ * 包装器要穿透：载荷里出现包管理器就按包管理器算，否则 `sh -c "pnpm test"` 会从侧面
+ * 跳过闸门。脚本文件（`node build.mjs`）里写的是什么从命令行看不出来，那是这条判据的
+ * 边界，写进文档而不是靠猜。
  */
 function dependencyGateApplies(command: string, access: "read" | "write"): boolean {
-	if (commandHead(command) === "git") return false;
-	return access === "write" || PACKAGE_MANAGERS.has(commandHead(command));
+	const head = commandHead(command);
+	if (head === "git") return false;
+	if (access === "write") return true;
+	if (PACKAGE_MANAGERS.has(head)) return true;
+	// 只在头是包装器时才看载荷：`rg pnpm` 是搜这个字，不该被拦。
+	return COMMAND_WRAPPERS.has(head) && invokesPackageManager(command);
 }
 
 /** 闸门的最终判定：关掉、不适用或依赖齐全时返回 undefined。 */
