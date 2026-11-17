@@ -82,7 +82,7 @@ subagent(
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
 | `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one. |
-| `bash.dependencyGate` | `boolean` | Defaults to `true`. Before a build or a package-manager command runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also have `node_modules/.bin`; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. `false` turns the check off. |
+| `bash.dependencyGate` | `boolean` | Defaults to `true`. Before a write-classified command or a package-manager invocation runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also show an install — `node_modules/.bin`, or `.pnp.cjs` for a Yarn PnP project; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. `false` turns the check off. |
 
 `/permission` shows the read scope, the write scope when it differs, the bash allowlist, both
 read and write denial counts, and the probe state. The namespace is `pi-subagent-extend/1`;
@@ -116,7 +116,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and then three offline suites: 65 scope cases, 10 context cases and 6
+`pnpm test` runs a lint pass and then three offline suites: 68 scope cases, 10 context cases and 6
 sessions against a real pi process driven by a scripted mock model. No model and no network beyond
 localhost. The suites are TypeScript and are type checked with the source, so a typo in a fixture is
 a compile error rather than an assertion that silently passes. See [testing](docs/testing.md).

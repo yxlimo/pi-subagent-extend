@@ -740,18 +740,29 @@ function detectScratchDirs(cwd: string): { dir: string; primary: boolean }[] {
 
 /**
  * 有依赖的项目以 lockfile 为准（只有 package.json 不算：那可能只是个配置包）。
- * 判据就一条：有 lockfile 的目录必须有 node_modules/.bin。
+ * 判据：有 lockfile 的目录必须出现过安装结果 —— `node_modules/.bin`，或 Yarn PnP 的 `.pnp.cjs`。
  */
-const LOCKFILES = new Set(["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb", "bun.lock"]);
+const LOCKFILES = new Set([
+	"pnpm-lock.yaml",
+	"package-lock.json",
+	"npm-shrinkwrap.json",
+	"yarn.lock",
+	"bun.lockb",
+	"bun.lock",
+]);
 
-/** 依赖根的清单一轮会话里不会变；缺的 `.bin` 每轮重查，装好了立刻恢复。 */
-const dependencyRootsCache = new Map<string, string[]>();
+/** Yarn 2+ 的 PnP 不建 node_modules，`.pnp.cjs` 才是「装好了」的凭据。 */
+const PNP_MARKERS = [".pnp.cjs", ".pnp.js"];
 
+/**
+ * 依赖根：cwd 往下两层里有 lockfile 的目录。
+ *
+ * 不缓存。会话中途 `git checkout` 一个新增了包的分支是很常见的动作，而闸门的 `git` 豁免
+ * 恰好让这个动作畅通无阻 —— 缓存会让闸门停在旧结论上。这个扫描只在闸门真正生效时跑，
+ * 代价是几个 readdir。
+ */
 function dependencyRoots(cwd: string): string[] {
 	const key = resolve(cwd);
-	const cached = dependencyRootsCache.get(key);
-	if (cached) return cached;
-
 	const found: string[] = [];
 	const roots = [key];
 	let frontier = [key];
@@ -765,7 +776,6 @@ function dependencyRoots(cwd: string): string[] {
 			} catch {
 				continue;
 			}
-			if (entries.some((entry) => entry.isFile() && LOCKFILES.has(entry.name))) found.push(dir);
 			for (const entry of entries) {
 				if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
 				const child = resolve(dir, entry.name);
@@ -777,7 +787,21 @@ function dependencyRoots(cwd: string): string[] {
 		frontier = next;
 	}
 
-	dependencyRootsCache.set(key, found);
+	// 收集完再遍扫：工具链探测也是这个范围（含孙目录），只查 frontier 会漏掉
+	// `apps/web/pnpm-lock.yaml` 这种标准 monorepo 布局，而文档承诺的是两层。
+	for (const dir of roots) {
+		let entries: Dirent[] = [];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		// 软链的 lockfile 也是 lockfile（workspace 常把它链到共享文件）。
+		if (entries.some((entry) => (entry.isFile() || entry.isSymbolicLink()) && LOCKFILES.has(entry.name))) {
+			found.push(dir);
+		}
+	}
+
 	return found;
 }
 
@@ -789,8 +813,14 @@ function dependencyRoots(cwd: string): string[] {
  */
 function missingDependencies(cwd: string): string[] {
 	return dependencyRoots(cwd)
-		.filter((dir) => !existsSync(resolve(dir, "node_modules", ".bin")))
+		.filter((dir) => !installed(dir))
 		.map((dir) => relative(cwd, dir) || ".");
+}
+
+/** 装好的两个凭据：`node_modules/.bin`（普通安装）或 `.pnp.cjs`（Yarn PnP）。 */
+function installed(dir: string): boolean {
+	if (existsSync(resolve(dir, "node_modules", ".bin"))) return true;
+	return PNP_MARKERS.some((marker) => existsSync(resolve(dir, marker)));
 }
 
 /** 闸门的拒绝文案；依赖齐了返回 undefined。 */
@@ -799,7 +829,7 @@ function dependencyGateReason(cwd: string): string | undefined {
 	if (missing.length === 0) return undefined;
 	const shown = missing.slice(0, 3).join(", ");
 	const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : "";
-	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin, so a build or test would install inside the sandbox. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.`;
+	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin or .pnp.cjs, so this command would run against an unfinished install. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.`;
 }
 
 /** 命令的第一个词，跳过 `FOO=bar cmd` 这类前置赋值。 */
@@ -822,13 +852,20 @@ const COMMAND_WRAPPERS = new Set([
 	"nohup", "setsid", "nice", "ionice", "stdbuf", "timeout", "xargs",
 ]);
 
-/** 命令里是否出现了包管理器这个词元（跳过引号、分隔符与前置赋值）。 */
-function invokesPackageManager(command: string): boolean {
-	for (const token of command.split(/[\s'"`;|&()<>]+/)) {
-		const word = token.replace(/^[A-Za-z_][A-Za-z0-9_]*=/, "");
-		if (word && PACKAGE_MANAGERS.has(basename(word))) return true;
+/**
+ * 包装器后面真正要跑的那条命令的名字。
+ *
+ * 跳过包装器自己、它的选项、`NAME=value` 前置赋值和纯数值参数（`timeout 30 pnpm test`）。
+ * 只看头而不扫描全部词元：`sh -c "rg pnpm"` 是在搜这个字，不该被当成要装依赖。
+ */
+function payloadHead(command: string): string {
+	const words = command.split(/[\s'"]+/).filter(Boolean);
+	for (const word of words.slice(1)) {
+		if (word.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || /^[0-9]/.test(word)) continue;
+		if (COMMAND_WRAPPERS.has(basename(word))) continue;
+		return basename(word);
 	}
-	return false;
+	return "";
 }
 
 /**
@@ -837,17 +874,24 @@ function invokesPackageManager(command: string): boolean {
  * `git` 与只读命令不受影响。git 不需要 node_modules，而「先落任务日志再提交」这种保树
  * 纪律恰恰在依赖缺失时最要用得上 —— 把 git 一起挡掉，拒绝就发生在最不该发生的时刻。
  *
- * 包装器要穿透：载荷里出现包管理器就按包管理器算，否则 `sh -c "pnpm test"` 会从侧面
- * 跳过闸门。脚本文件（`node build.mjs`）里写的是什么从命令行看不出来，那是这条判据的
- * 边界，写进文档而不是靠猜。
+ * 包装器要穿透到载荷的命令名上，否则 `sh -c "pnpm test"` 会从侧面跳过闸门；但只认载荷
+ * 的命令名，不认命令里出现的字，否则 `sh -c "rg pnpm"` 会被误拦。脚本文件
+ * （`node build.mjs`）里写的是什么从命令行看不出来，那是这条判据的边界。
  */
 function dependencyGateApplies(command: string, access: "read" | "write"): boolean {
 	const head = commandHead(command);
 	if (head === "git") return false;
-	if (access === "write") return true;
-	if (PACKAGE_MANAGERS.has(head)) return true;
-	// 只在头是包装器时才看载荷：`rg pnpm` 是搜这个字，不该被拦。
-	return COMMAND_WRAPPERS.has(head) && invokesPackageManager(command);
+	if (!COMMAND_WRAPPERS.has(head)) {
+		if (access === "write") return true;
+		return PACKAGE_MANAGERS.has(head);
+	}
+	// 包装器要穿透到载荷的命令名；`env git commit` 照样享 git 豁免。
+	// `command -v pnpm` 是问「这个工具在不在」，不是跑它。
+	if (head === "command" && /(^|\s)-[vV](\s|$)/.test(command)) return false;
+	const payload = payloadHead(command);
+	if (payload === "" || payload === "git") return false;
+	if (PACKAGE_MANAGERS.has(payload)) return true;
+	return access === "write";
 }
 
 /** 闸门的最终判定：关掉、不适用或依赖齐全时返回 undefined。 */
