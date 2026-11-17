@@ -155,7 +155,7 @@ fn wait_with_stall(
             "pi-subagent-extend-helper: cpu stall: the command tree used no CPU for {} s while still running; killing it (a working build would have used CPU — this is usually a lock, a socket, or an orphaned child, not a slow compile)",
             stall_seconds
         );
-        kill_tree(pid, private_proc);        // Reap what we killed so the exit status we report is ours, not a stray SIGCHLD.
+        kill_tree(pid, private_proc); // Reap what we killed so the exit status we report is ours, not a stray SIGCHLD.
         let _ = wait_for(pid);
         return Ok(crate::EXIT_STALLED);
     }

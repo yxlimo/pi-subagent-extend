@@ -68,8 +68,8 @@ subagent(
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `scope` | `string[]` | Globs describing what the subagent may read. Required; an empty array refuses all file access. |
-| `writeScope` | `string[]` | Globs describing what `edit` and `write` may touch. Defaults to `scope`; an empty array makes writing impossible while reads keep working. A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
-| `readOnly` | `boolean` | Refuse `edit` and `write` even inside the scope: the same as `writeScope: []`, budget included — the refusal is charged to `maxWriteDenies` and answered with a report rather than an escalation. |
+| `writeScope` | `string[]` | Globs describing what `edit` and `write` may touch. Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
+| `readOnly` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. The refusal is charged to `maxWriteDenies` and answered with a report rather than an escalation. |
 | `maxReads` | `number` | Cap on successful reads. |
 | `allowTools` | `string[]` | Extra non-executor tool names to allow. |
 | `maxDenies` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |

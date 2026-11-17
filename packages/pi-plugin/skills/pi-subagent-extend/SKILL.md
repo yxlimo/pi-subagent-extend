@@ -13,6 +13,7 @@ When delegating a subagent, pass the scope of this task through `extensionBindin
 | --- | --- | --- |
 | The subagent should only read/write the few files of this task | `scope`, plus `readOnly` for a read-only task | [The scope field](#the-scope-field) |
 | The subagent should read the whole task scope but write into one directory (a review allowed to write only its report) | `writeScope` | [The scope field](#the-scope-field) |
+| A read-only reviewer still needs to write its report somewhere outside the tree | `readOnly` + an absolute `writeScope` entry + `write` in `allowTools` | [The scope field](#the-scope-field) |
 | The subagent has to run typecheck, tests or a build itself | `bash.read` / `bash.write`, plus `writable` when the artefacts land on disk | [The bash field](#the-bash-field) |
 | The subagent runs in `worktree: true` and has to install dependencies | The project commits `.pi/worktree-setup.sh`, together with `writablePaths` / `network` | [bash in a worktree](#bash-in-a-worktree) |
 | You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | agent profile | "Profiles (per-role defaults)" below |
@@ -108,8 +109,8 @@ subagent(
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `scope` | `string[]` | Required. Globs describing what the subagent may read; an empty array refuses all file access |
-| `writeScope` | `string[]` | Optional. Globs describing what `edit`/`write` may touch. Omitted means the same as `scope`; `[]` means no writes at all while reads keep working |
-| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused even inside the scope — the same as `writeScope: []` — which suits read-only research and review agents |
+| `writeScope` | `string[]` | Optional. Globs describing what `edit`/`write` may touch. Omitted means the same as `scope`; `[]` means no writes at all while reads keep working. Relative entries are bound to the task tree; an **absolute** entry grants that path wherever it is |
+| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused — the same as `writeScope: []` — which suits read-only research and review agents. An explicit `writeScope` beside it wins, so a reviewer can be given exactly one file to write |
 | `maxReads` | `number` | Optional. Upper bound on successful `read` calls; once it is exceeded, every read is refused |
 | `maxWriteDenies` | `number` | Optional. Write refusals have their own budget: defaults to 2, `0` disables. Kept apart from `maxDenies` because repeatedly trying to write is a usage mistake, answered by delivering a report |
 | `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way |

@@ -4,7 +4,7 @@ description: Read-only review of this repository, running under pi-subagent-exte
 inheritSkills: false
 inheritProjectContext: true
 thinking: high
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, bash, write
 subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts, /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts, /home/shay/extensions/pi-subagent-extend/.pi/agent-profiles/review.ts
 systemPromptMode: replace
 ---
@@ -31,3 +31,11 @@ Findings, each with evidence and the smallest fix:
 
 Cite `path:line`. Say exactly `No issues found.` when nothing qualifies. Do not invent problems to
 look thorough: a false finding costs more than a missed nit, because the parent has to verify it.
+
+## Where the report goes
+
+Write it to `/tmp/pi-review-reports/<run-id>.md` with the `write` tool — that directory is the single
+write grant this session has, and everything else is read-only. Write the file once, near the end,
+after the findings are settled; then repeat the full text in your final response as well, so the
+parent still has it if the file is lost. Do not try to append with `>` or `>>` in bash: the sandbox
+refuses those, and they are not granted anyway.

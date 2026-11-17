@@ -123,6 +123,14 @@ interface Policy {
 	regexps: RegExp[];
 	/** 写范围（edit / write 工具）。没配 writeScope 时等于读范围；readOnly 时为空。 */
 	writeGlobs: string[];
+	/**
+	 * writeScope 里写绝对路径的那几条，已 realpath，按前缀比对。
+	 *
+	 * 相对授权绑在项目树上（`matches` 里「落在工作树之外一律不认」是软链逃逸的唯一防线），
+	 * 但「把报告写到某个文件」本来就是树外的事。绝对路径是父代理明确点名的授权，不是子代理
+	 * 能自己构造的逃逸，所以单独放行；相对授权的老规则一点不动。
+	 */
+	absoluteWrite: string[];
 	writeRegexps: RegExp[];
 	source: string;
 	readOnly: boolean;
@@ -142,6 +150,7 @@ const INACTIVE: Policy = {
 	globs: [],
 	regexps: [],
 	writeGlobs: [],
+	absoluteWrite: [],
 	writeRegexps: [],
 	source: "not configured",
 	readOnly: true,
@@ -169,6 +178,7 @@ function denyAll(source: string): Policy {
 		globs: [],
 		regexps: [],
 		writeGlobs: [],
+		absoluteWrite: [],
 		writeRegexps: [],
 		source,
 		readOnly: true,
@@ -316,7 +326,8 @@ function mergeConfig(
 /**
  * 写范围（edit / write 工具），与 bash.writablePaths（进程层）分开：
  *   不写 writeScope → 等于读范围，现有派单行为不变；
- *   readOnly → 压过一切，等价于空写范围；
+ *   readOnly → 默认等价于空写范围；但**显式写的 writeScope 优先**，这样「只读会话 + 一个
+ *              报告文件」是能表达的，而不是非黑即白；
  *   写了 → 只认这一份，写超出即拒，读不受影响。
  */
 function parseWriteScope(
@@ -325,7 +336,7 @@ function parseWriteScope(
 	readOnly: boolean,
 	source: string,
 ): { writeGlobs?: string[]; error?: string } {
-	if (readOnly) return { writeGlobs: [] };
+	if (readOnly && config.writeScope === undefined) return { writeGlobs: [] };
 	if (config.writeScope === undefined) return { writeGlobs: globs };
 	const ws = config.writeScope;
 	if (!Array.isArray(ws) || ws.some((g) => typeof g !== "string" || !g.trim())) {
@@ -351,7 +362,9 @@ function parsePolicyObject(
 	const readOnly = config.readOnly === true;
 	const write = parseWriteScope(config, globs, readOnly, source);
 	if (write.error) return denyAll(write.error);
-	const writeGlobs = write.writeGlobs as string[];
+	const allWrite = write.writeGlobs as string[];
+	const absoluteWrite = allWrite.filter((g) => isAbsolute(g)).map((g) => canonical(g));
+	const writeGlobs = allWrite.filter((g) => !isAbsolute(g));
 	const allowTools = Array.isArray(config.allowTools)
 		? (config.allowTools as unknown[]).filter((t): t is string => typeof t === "string" && t.trim() !== "")
 		: [];
@@ -359,6 +372,7 @@ function parsePolicyObject(
 		globs,
 		regexps: compile(globs),
 		writeGlobs,
+		absoluteWrite,
 		writeRegexps: compile(writeGlobs),
 		source,
 		readOnly,
@@ -409,6 +423,22 @@ function matches(regexps: RegExp[], cwd: string, target: string): boolean {
 	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
 	for (const re of regexps) {
 		if (re.test(rel) || re.test(abs)) return true;
+	}
+	return false;
+}
+
+/**
+ * 绝对授权（writeScope 里的绝对路径）按前缀比对，允许落在树外。
+ *
+ * 只给写用：读范围继续绑定在项目树上。绝对路径是父代理点名的，子代理无法自己构造，
+ * 所以它不破坏「相对授权不能出树」那条防线。
+ */
+function underAny(grants: string[], cwd: string, target: string): boolean {
+	if (grants.length === 0) return false;
+	const abs = canonical(resolve(cwd, target));
+	for (const grant of grants) {
+		if (abs === grant) return true;
+		if (abs.startsWith(grant.endsWith(sep) ? grant : `${grant}${sep}`)) return true;
 	}
 	return false;
 }
@@ -1420,12 +1450,15 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 			return bail(`pi-subagent-extend: read budget exhausted (${policy.maxReads} reads).`);
 		}
-		if (isWrite && policy.readOnly) {
-			// readOnly 与 writeScope: [] 是同一种处境（写不了、放宽读范围也解决不了），所以走写预算：
-			// 出路是改成交报告，而不是去求援。记到授权预算上会让子代理连撞 5 次、还被指去
-			// contact_supervisor——它求不到任何东西，readOnly 是父代理刻意的选择。
+		const canWrite = policy.writeGlobs.length > 0 || policy.absoluteWrite.length > 0;
+		// 只对 readOnly 早退：`writeScope: []`（不是 readOnly）走下面那条「readable but not
+		// writable」，它说清了「读还是能读」，比一句「没有写授权」有用。
+		if (isWrite && policy.readOnly && !canWrite) {
+			// 一条写授权都没有（readOnly 且没写 writeScope，或 writeScope: []）与「写不进去」是同一种
+			// 处境：放宽读范围解决不了，所以走写预算。出路是改成交报告，而不是去求援——记到授权
+			// 预算上会让子代理连撞 5 次、还被指去 contact_supervisor，而它求不到任何东西。
 			return writeBail(
-				`pi-subagent-extend: this session is read-only; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+				`pi-subagent-extend: this session has no write grant; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.`,
 			);
 		}
 		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
@@ -1437,7 +1470,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		}
 		const readOk = matches(policy.regexps, cwd, target);
 		if (isWrite) {
-			if (!matches(policy.writeRegexps, cwd, target)) {
+			if (!matches(policy.writeRegexps, cwd, target) && !underAny(policy.absoluteWrite, cwd, target)) {
 				// 读得到、写不到：这是最常见也最容易误导的拒绝，文案要直说撞的是写范围，
 				// 并给出正解——回报告——而不是「换个路径再试」。
 				if (readOk) {
@@ -1500,7 +1533,9 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			: ", bash off";
 		const probeLine = probe ? ", probe on" : "";
 		const storeLine = policy.bash ? `, pnpm store ${detectPnpmStore(cwd).path ?? "detection failed"}` : "";
-		const mode = policy.readOnly ? "read-only" : "read-write";
+		const writeGrants = [...policy.writeGlobs, ...policy.absoluteWrite];
+		let mode = "read-write";
+		if (policy.readOnly) mode = writeGrants.length > 0 ? "read-only, except the granted writes" : "read-only";
 		const sameWrite = policy.writeGlobs.join("\n") === policy.globs.join("\n");
 		const writeNote = sameWrite ? "" : `, write scope ${policy.writeGlobs.length} entries`;
 		const msg = policy.globs.length
@@ -1691,9 +1726,9 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				? [
 					`Source: ${policy.source}`,
 					`Mode: ${policy.readOnly ? "read-only" : "read-write"}`,
-					policy.readOnly || policy.writeGlobs.join("\n") === policy.globs.join("\n")
+					policy.readOnly || [...policy.writeGlobs, ...policy.absoluteWrite].join("\n") === policy.globs.join("\n")
 						? undefined
-						: `Write scope: ${policy.writeGlobs.join(" | ") || "(none)"}`,
+						: `Write scope: ${[...policy.writeGlobs, ...policy.absoluteWrite].join(" | ") || "(none)"}`,
 					`Read scope: ${policy.globs.join(" | ") || "(none)"}`,
 					`Read denials: ${denyCounter.status()} · write denials: ${writeDenyCounter.status()}`,
 					policy.bash

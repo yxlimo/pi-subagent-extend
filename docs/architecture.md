@@ -47,7 +47,7 @@ too.
 | Tool | Behaviour |
 | --- | --- |
 | `read` | path resolved (a missing one means the working directory), allowed when inside the scope, subject to `maxReads` |
-| `edit` / `write` | the target must be inside the write scope (`writeScope`, defaulting to `scope`); refused even inside it when `readOnly` is set |
+| `edit` / `write` | the target must be inside the write scope (`writeScope`, defaulting to `scope`); `readOnly` refuses every write unless a `writeScope` is given explicitly |
 | `grep` / `find` / `ls` | as `read` |
 | `bash` | refused entirely without an allowlist; with one, only matching commands are allowed and each is rewritten to run under the helper. Shell control characters are judged **outside quotes only** — the command runs as `bash -lc <command>`, so a `;` or `(` inside single quotes is an ordinary character while `$` and a backtick still expand inside double quotes |
 | `powershell` / `codemode` | always refused: there is no path to judge, so they would escape the scope |
@@ -157,6 +157,15 @@ default, a partial object enables only the fields it names, `"probe": false` dis
 Write activity means `edit` and `write` calls and commands matching `bash.write`. Reads do not
 count, or a subagent could circle with read-only `bash` and escape the criterion. A task with
 `readOnly: true` skips the two time-based criteria, which are meaningless for it.
+
+A relative `writeScope` entry is bound to the task tree: `matches()` refuses anything whose real path
+falls outside it, which is the only defence against a symlink escaping the scope. An **absolute**
+entry is compared by prefix against the target's real path instead, so it can name something outside
+the tree. That is deliberate rather than an exception to the rule — an absolute path is the parent
+naming a destination, and a subagent cannot construct one to escape with. It is how a read-only
+review is given exactly one file to write: `readOnly: true` together with
+`writeScope: ["/tmp/pi-review-reports"]`, plus `write` in `allowTools`. Without an explicit
+`writeScope`, `readOnly` still means no writes at all.
 
 The repeating-command criterion means "the same thing repeated **without progress**", so write
 activity also clears its counts and cancels a warning already issued: a subagent that edits a file and

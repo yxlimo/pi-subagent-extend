@@ -1,121 +1,125 @@
 {
-	"default": {
-		"maxDenies": 8,
-		"maxWriteDenies": 4,
-		"bash": {
-			"deny": [
-				"git commit",
-				"git push",
-				"git rebase",
-				"git merge",
-				"git reset",
-				"git clean",
-				"git checkout",
-				"git restore",
-				"rm -rf"
-			]
-		}
-	},
-	"coder": {
-		"scope": [
-			"."
-		],
-		"writeScope": [
-			"."
-		],
-		"bash": {
-			"read": [
-				"git status",
-				"git diff",
-				"git log",
-				"git show",
-				"git branch",
-				"git rev-parse",
-				"git worktree list",
-				"cat",
-				"ls",
-				"rg",
-				"find",
-				"grep",
-				"sed",
-				"head",
-				"tail",
-				"wc",
-				"echo",
-				"node",
-				"python3",
-				"sh"
-			],
-			"write": [
-				"mkdir",
-				"cp",
-				"mv",
-				"rm",
-				"touch",
-				"sed",
-				"node",
-				"python3",
-				"cargo",
-				"npx",
-				"git init",
-				"git add",
-				"git switch",
-				"git stash",
-				"git worktree add"
-			],
-			"deny": [
-				"git commit",
-				"git push",
-				"git rebase",
-				"git merge",
-				"git reset",
-				"git clean",
-				"git checkout",
-				"git restore",
-				"rm -rf"
-			],
-			"writable": true,
-			"network": false
-		}
-	},
-	"review": {
-		"scope": [
-			"."
-		],
-		"readOnly": true,
-		"allowTools": [
-			"read",
-			"grep",
-			"find",
-			"ls",
-			"bash",
-			"contact_supervisor"
-		],
-		"maxDenies": 12,
-		"maxWriteDenies": 2,
-		"bash": {
-			"writable": false,
-			"dependencyGate": false,
-			"read": [
-				"git status",
-				"git diff",
-				"git log",
-				"git show",
-				"git rev-parse",
-				"git branch",
-				"rg",
-				"ls",
-				"cat",
-				"head",
-				"tail",
-				"wc",
-				"sed",
-				"find",
-				"grep",
-				"node",
-				"sh",
-				"test"
-			]
-		}
-	}
+  "default": {
+    "maxDenies": 8,
+    "maxWriteDenies": 4,
+    "bash": {
+      "deny": [
+        "git commit",
+        "git push",
+        "git rebase",
+        "git merge",
+        "git reset",
+        "git clean",
+        "git checkout",
+        "git restore",
+        "rm -rf"
+      ]
+    }
+  },
+  "coder": {
+    "scope": [
+      "."
+    ],
+    "writeScope": [
+      "."
+    ],
+    "bash": {
+      "read": [
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git branch",
+        "git rev-parse",
+        "git worktree list",
+        "cat",
+        "ls",
+        "rg",
+        "find",
+        "grep",
+        "sed",
+        "head",
+        "tail",
+        "wc",
+        "echo",
+        "node",
+        "python3",
+        "sh"
+      ],
+      "write": [
+        "mkdir",
+        "cp",
+        "mv",
+        "rm",
+        "touch",
+        "sed",
+        "node",
+        "python3",
+        "cargo",
+        "npx",
+        "git init",
+        "git add",
+        "git switch",
+        "git stash",
+        "git worktree add"
+      ],
+      "deny": [
+        "git commit",
+        "git push",
+        "git rebase",
+        "git merge",
+        "git reset",
+        "git clean",
+        "git checkout",
+        "git restore",
+        "rm -rf"
+      ],
+      "writable": true,
+      "network": false
+    }
+  },
+  "review": {
+    "scope": [
+      "."
+    ],
+    "readOnly": true,
+    "allowTools": [
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "bash",
+      "write",
+      "contact_supervisor"
+    ],
+    "maxDenies": 12,
+    "maxWriteDenies": 2,
+    "bash": {
+      "writable": false,
+      "dependencyGate": false,
+      "read": [
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git rev-parse",
+        "git branch",
+        "rg",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "sed",
+        "find",
+        "grep",
+        "node",
+        "sh",
+        "test"
+      ]
+    },
+    "writeScope": [
+      "/tmp/pi-review-reports"
+    ]
+  }
 }
