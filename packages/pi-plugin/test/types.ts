@@ -83,6 +83,8 @@ export interface ExtensionModule {
 	activate(pi: FakeExtensionApi, options?: { profileName?: string; profileFile?: string }): void
 	/** 扫描用的排序比较器，单独暴露出来以便钉住「顺序不随文件系统变化」。 */
 	sortByName<T extends { name: string }>(entries: T[]): T[]
+	/** 依赖闸门的扫描范围，暴露出来以便钉住 200 个目录的上限。 */
+	dependencyScope(cwd: string, ignored: string[]): string[]
 }
 
 export interface HandlerOptions {

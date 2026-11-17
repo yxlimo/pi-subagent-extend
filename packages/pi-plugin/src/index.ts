@@ -825,7 +825,7 @@ function dependencyRoots(cwd: string, ignored: string[]): string[] {
  * 被忽略的目录在遍历时就剪掉，而不是收集完再筛：一棵 fixtures 树能占满
  * DETECT_MAX_ROOTS 的名额，把真包挤出扫描范围，闸门于是无声失效。
  */
-function dependencyScope(cwd: string, ignored: string[]): string[] {
+export function dependencyScope(cwd: string, ignored: string[]): string[] {
 	const key = resolve(cwd);
 	if (gateIgnores(cwd, ignored, key)) return [];
 	const roots = [key];
@@ -842,6 +842,9 @@ function dependencyScope(cwd: string, ignored: string[]): string[] {
 				next.push(child);
 				if (roots.length >= DETECT_MAX_ROOTS) break;
 			}
+			// 外层也要断：内层 break 只退出当前目录，frontier 里剩下的每个目录还会各推一个
+			// 子目录进来，250 个目录的树能得 246 个 root，而文档说的是 200。
+			if (roots.length >= DETECT_MAX_ROOTS) break;
 		}
 		frontier = next;
 	}
@@ -881,6 +884,8 @@ function missingDependencies(cwd: string, ignored: string[]): string[] {
  */
 function gateIgnores(cwd: string, ignored: string[], dir: string): boolean {
 	return ignored.some((prefix) => {
+		// resolve 对绝对路径本就返回它自己，所以绝对前缀天然可以指到 cwd 之上；相对前缀
+		// 则一定落在 cwd 之下，包含 cwd 的只有 "." / ".." 这类写法（等于关掉整道闸门）。
 		const rel = relative(resolve(cwd, prefix), dir);
 		return rel === "" || !(rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel));
 	});
@@ -898,7 +903,13 @@ function dependencyGateReason(cwd: string, ignored: string[]): string | undefine
 	if (missing.length === 0) return undefined;
 	const shown = missing.slice(0, 3).join(", ");
 	const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : "";
-	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin or .pnp.cjs, so this command would run against an unfinished install. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.`;
+	// 忽略项是字面路径，不认 glob。写成 `fixtures/*` 或写错一个字母都会静默匹配不到任何目录，
+	// 于是「我明明忽略了它」变成调试题 —— 点名一句，省掉那一轮。
+	const globbed = ignored.filter((prefix) => /[*?]/.test(prefix));
+	const hint = globbed.length > 0
+		? ` Ignore entries are literal paths, not globs: ${globbed.join(", ")} matched nothing.`
+		: "";
+	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin or .pnp.cjs, so this command would run against an unfinished install. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.${hint}`;
 }
 
 /** 命令的第一个词，跳过 `FOO=bar cmd` 这类前置赋值。 */
