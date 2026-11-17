@@ -22,7 +22,11 @@ static COMMAND_PID: AtomicI32 = AtomicI32::new(0);
 ///
 /// `child_main` is expected to `exec`; returning from it means the command could
 /// not be started, and the returned value becomes the exit status.
-pub fn run(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<u64>) -> Result<i32, String> {
+pub fn run(
+    child_main: impl FnOnce() -> i32,
+    fresh_proc: bool,
+    stall: Option<u64>,
+) -> Result<i32, String> {
     match unsafe { libc::fork() } {
         -1 => Err(format!(
             "cannot fork the sandbox init: {}",
@@ -109,21 +113,29 @@ fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<
 /// `sleep 300`, a poll loop backing off) also uses no CPU, and the helper cannot see output — stdio is
 /// inherited, not piped — so "no output" cannot corroborate it. That is why the extension leaves it
 /// off unless a caller asks for it.
-fn wait_with_stall(pid: libc::pid_t, stall_seconds: u64, private_proc: bool) -> Result<i32, String> {
-    // Sample often enough to notice a stall promptly, but never spin.
-    let period = Duration::from_millis(250).max(Duration::from_secs(stall_seconds).checked_div(4).unwrap_or(Duration::from_millis(250)));
+fn wait_with_stall(
+    pid: libc::pid_t,
+    stall_seconds: u64,
+    private_proc: bool,
+) -> Result<i32, String> {
+    // Poll often enough to notice a stall promptly, but never spin — and keep the interval
+    // independent of how long a stall has to last. Tying the two together cost every command
+    // that much latency before its exit was even noticed: with `stallSeconds: 90` a `true`
+    // return took 22.5 s to reach the caller, because completion was only checked once per
+    // sample. A scan of a few hundred `/proc` entries is microseconds, so one second is cheap.
+    let period = Duration::from_millis(250)
+        .max(Duration::from_secs(stall_seconds) / 4)
+        .min(Duration::from_secs(1));
     let limit = Duration::from_secs(stall_seconds);
     let mut cpu = tree_cpu(pid, private_proc);
     let mut quiet_since = Instant::now();
     loop {
-        match try_wait(pid)? {
-            Some(status) => return Ok(decode(status)),
-            None => {}
+        if let Some(status) = try_wait(pid)? {
+            return Ok(decode(status));
         }
         std::thread::sleep(period);
-        match try_wait(pid)? {
-            Some(status) => return Ok(decode(status)),
-            None => {}
+        if let Some(status) = try_wait(pid)? {
+            return Ok(decode(status));
         }
         let now = tree_cpu(pid, private_proc);
         if now > cpu {
@@ -138,8 +150,7 @@ fn wait_with_stall(pid: libc::pid_t, stall_seconds: u64, private_proc: bool) -> 
             "pi-subagent-extend-helper: cpu stall: the command tree used no CPU for {} s while still running; killing it (a working build would have used CPU — this is usually a lock, a socket, or an orphaned child, not a slow compile)",
             stall_seconds
         );
-        kill_tree(pid, private_proc);
-        // Reap what we killed so the exit status we report is ours, not a stray SIGCHLD.
+        kill_tree(pid, private_proc);        // Reap what we killed so the exit status we report is ours, not a stray SIGCHLD.
         let _ = wait_for(pid);
         return Ok(crate::EXIT_STALLED);
     }
@@ -173,8 +184,16 @@ fn try_wait(pid: libc::pid_t) -> Result<Option<libc::c_int>, String> {
 /// work mask a stall — there the walk follows parent links from the command instead.
 fn tree_cpu(root: libc::pid_t, private_proc: bool) -> u64 {
     let stats = proc_stats();
+    let self_pid = std::process::id() as libc::pid_t;
     if private_proc {
-        return stats.iter().map(|s| s.utime + s.stime).sum();
+        // 私有 procfs 里就是这棵子树，但**包括我们自己**——supervisor 是那个每轮采样两次
+        // 的进程，它的 CPU 如果算进来，采样自身的开销就可能让 `now > cpu` 每轮都成立，
+        // 于是永远不判定为空闲。这正是大构建树（表格大、扫描贵）最会出问题的场景。
+        return stats
+            .iter()
+            .filter(|s| s.pid != self_pid)
+            .map(ProcStat::total)
+            .sum();
     }
     let mut total = 0;
     let mut frontier = vec![root];
@@ -185,7 +204,7 @@ fn tree_cpu(root: libc::pid_t, private_proc: bool) -> u64 {
             break;
         }
         if let Some(stat) = stats.iter().find(|s| s.pid == pid) {
-            total += stat.utime + stat.stime;
+            total += stat.total();
         }
         for stat in &stats {
             if stat.ppid == pid {
@@ -198,8 +217,12 @@ fn tree_cpu(root: libc::pid_t, private_proc: bool) -> u64 {
 
 /// Kill every process of the command tree, deepest last. PID 1 exiting would take the namespace with
 /// it, but the host case has no such guarantee.
-fn kill_tree(root: libc::pid_t, private_proc: bool) {
+fn kill_tree(root: libc::pid_t, private_proc: bool) -> bool {
     let stats = proc_stats();
+    let self_pid = std::process::id() as libc::pid_t;
+    // 先把根杀掉：下面的快照可能读空（`read_dir(/proc)` 失败就是空表），那样就什么也没杀，
+    // 而紧接着的 `wait_for` 会永久阻塞 —— 看门狗反过来把 helper 挂着。
+    unsafe { libc::kill(root, libc::SIGKILL) };
     if !private_proc {
         let mut frontier = vec![root];
         let mut seen = 0usize;
@@ -215,13 +238,15 @@ fn kill_tree(root: libc::pid_t, private_proc: bool) {
                 }
             }
         }
-        return;
+        return true;
     }
     for stat in &stats {
-        if stat.pid != std::process::id() as libc::pid_t {
+        if stat.pid != self_pid {
             unsafe { libc::kill(stat.pid, libc::SIGKILL) };
         }
     }
+    // 根已单独杀过，表为空也能保证至少杀了它。
+    true
 }
 
 struct ProcStat {
@@ -229,6 +254,20 @@ struct ProcStat {
     ppid: libc::pid_t,
     utime: u64,
     stime: u64,
+    cutime: u64,
+    cstime: u64,
+}
+
+impl ProcStat {
+    /// 这个进程累计消耗的 CPU，**包含已回收子进程的时间**。
+    ///
+    /// 只算 `utime + stime` 会让总量不单调：短命的子进程（`make` 每个编译单元、测试框架里
+    /// 成百上千个一闪而过的二进制）在两次采样之间就退出了，它们的 CPU 从总和里消失，
+    /// 于是一棵正在干活的树看起来和卡住一样 —— 误杀。`cutime`/`cstime` 正是把这些时间
+    /// 结转到父进程的字段。
+    fn total(&self) -> u64 {
+        self.utime + self.stime + self.cutime + self.cstime
+    }
 }
 
 /// Read `/proc/<pid>/stat` for every process visible in `/proc`.
@@ -260,15 +299,20 @@ fn parse_stat(pid: libc::pid_t, text: &str) -> Option<ProcStat> {
     let close = text.rfind(')')?;
     let rest: Vec<&str> = text[close + 1..].split_whitespace().collect();
     // After the name come state, ppid, pgrp, session, tty, tpgid, flags, minflt, cminflt, majflt,
-    // cmajflt, utime, stime: state is index 0, so ppid is 1, utime 11, stime 12.
+    // cmajflt, utime, stime, cutime, cstime: state is index 0, so ppid is 1, utime 11, stime 12,
+    // cutime 13, cstime 14.
     let ppid = rest.get(1)?.parse().ok()?;
     let utime = rest.get(11)?.parse().ok()?;
     let stime = rest.get(12)?.parse().ok()?;
+    let cutime = rest.get(13)?.parse().ok()?;
+    let cstime = rest.get(14)?.parse().ok()?;
     Some(ProcStat {
         pid,
         ppid,
         utime,
         stime,
+        cutime,
+        cstime,
     })
 }
 

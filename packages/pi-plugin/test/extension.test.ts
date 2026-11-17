@@ -2492,7 +2492,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   依赖闸门开关没变：false 全不查，true 查全部")
 }
 
-// 缺陷：两处广度优先扫描（工具链探测、依赖闸门）都按 readdir 的顺序取前
+// 71. 缺陷：两处广度优先扫描（工具链探测、依赖闸门）都按 readdir 的顺序取前
 // DETECT_MAX_ROOTS 个目录，而这个顺序由文件系统决定 —— 这台机器上 tmpfs 给的是排序
 // 结果，ext4 的 dir_index、XFS、NFS 给的是哈希序。同一个仓库在两台机器上因此可能扫到
 // 不同的目录，闸门在一台机器上放行、在另一台上拒绝，而且没有任何日志能看出差别。
@@ -2606,7 +2606,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: false })?.cpuStallSeconds, false, "explicit false stays off")
   assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: 0 })?.cpuStallSeconds, false, "0 means off, not kill at once")
   assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: 90 })?.cpuStallSeconds, 90, "a positive value arms it")
-  assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: "60" })?.cpuStallSeconds, 60, "a numeric string is accepted")
+  assert.equal(parseBashRule({ read: ["pnpm test"], cpuStallSeconds: "60" })?.cpuStallSeconds, false, "a string is refused, not coerced (see 78)")
 
   const armed = await handler({
     cwd: workdir,
@@ -2639,6 +2639,74 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(cpuStallNote("FAIL src/app.test.ts > adds numbers"), undefined, "an ordinary test failure is left alone")
   assert.equal(cpuStallNote(`${killed}\n\n[sandbox] already annotated`), undefined, "the note is added once")
   console.log("  ok   CPU 卡死看门狗：默认关、开启才进 spec、被杀时的说明点明重试无用")
+}
+
+// 76. A stop fired by a timer must still tell the model why.
+//     回归：把停机后的回复换成状态说明之后，计时器那条路（只读空转、早可收工）就什么都不说了 ——
+//     `#hooks.warn` 只是 UI 提示，从没进过模型上下文。于是模型收到「原因见上面的消息」，而上面
+//     没有那条消息。现在第一次边界补发原因，之后才是状态说明。
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), idleWriteMs: 1000, abortGraceMs: 500 },
+    readOnly: false,
+    hooks: { warn: () => {} },
+    host: clock.host,
+  })
+  clock.advance(1000)
+  assert.equal(p.atToolBoundary()?.stop, false, "the idle criterion warns first")
+  clock.advance(500)
+  const first = p.atToolBoundary()
+  assert.equal(first?.stop, true, "the grace expiring stops the run")
+  assert.match(String(first?.reason), /criterion: idle/i, "and the reason names the criterion")
+  const second = p.atToolBoundary()
+  assert.equal(second?.stop, true, "later calls are still refused")
+  assert.match(String(second?.reason), /stopped earlier/, "but from then on they get the status line")
+  assert.ok(!/criterion: idle/i.test(String(second?.reason)), "without repeating the cause a third time")
+  p.dispose()
+  console.log("  ok   计时器停机也要把原因交给模型一次（之后才换成状态说明）")
+}
+
+// 77. Two bash calls in one message pair their outputs by call id.
+//     缺陷：单槽 `#pending` 在并行的工具调用下会把先到的结果记到后一条命令名下，再丢掉另一条 ——
+//     输出比对于是张冠李戴，而这条判据的代价就是误杀。pi 默认并行执行同一条消息里的调用。
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), repeatBash: 2 },
+    readOnly: true,
+    hooks: { warn: () => {} },
+    host: clock.host,
+  })
+  // 第一条命令已经跑过一次，基线是 "same"。
+  p.noteBashStart("ls -la", "read", "call-1")
+  p.noteBashResult("same", "call-1")
+  p.noteBashStart("ls -la", "read", "call-2")
+  p.noteBashResult("same", "call-2")
+  // 两条并行进入，结果以相反顺序回来：第二条带回新输出，第一条与上一次相同。
+  p.noteBashStart("ls -la", "read", "call-3")
+  p.noteBashStart("ls -la", "read", "call-4")
+  p.noteBashResult("different", "call-4")
+  p.noteBashResult("same", "call-3")
+  const after = p.noteBashStart("ls -la", "read", "call-5")
+  assert.notEqual(after?.stop, true, "the call whose output changed reset the count, not the other one")
+  p.dispose()
+  console.log("  ok   并行 bash 调用按 toolCallId 配对输出（单槽会记错并误杀）")
+}
+
+// 78. `cpuStallSeconds` rejects values that would silently mean something else.
+//     `0.5` 先 floor 会得 0，而 `0 !== false` 就把 `stallSeconds: 0` 写进 spec —— 旧版 helper
+//     的 deny_unknown_fields 会整份拒绝。「关掉时不写键」的兼容性就在这里被破坏。`true` 经
+//     Number() 会变成 1，即「静默 1 秒就杀整棵树」，而不是「开」。
+{
+  const { parseBashRule } = await import(join(repo, "src", "bash-match.ts"))
+  assert.equal(parseBashRule({ read: ["x"], cpuStallSeconds: 0.5 })?.cpuStallSeconds, false, "a fraction below 1 is off, not 0")
+  assert.equal(parseBashRule({ read: ["x"], cpuStallSeconds: true })?.cpuStallSeconds, false, "true is not a threshold")
+  assert.equal(parseBashRule({ read: ["x"], cpuStallSeconds: "60" })?.cpuStallSeconds, false, "a string is not a number either")
+  assert.equal(parseBashRule({ read: ["x"], cpuStallSeconds: 1.9 })?.cpuStallSeconds, 1, "a fraction above 1 floors")
+  console.log("  ok   看门狗阈值只接受正数字：0.5 与 true 都是关，不会变成 0 或 1")
 }
 
 rmSync(workdir, { recursive: true, force: true })

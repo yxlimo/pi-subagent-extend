@@ -195,6 +195,12 @@ The call that trips a stop gets the reason in full, naming the command or the pa
 call after it gets a status line instead: the run was stopped earlier, nothing further will execute,
 report to the parent. Re-serving the original reason is the trap — it describes the action that caused
 the stop, and a subagent that has since changed course reads it as a verdict on the new command.
+
+A stop fired by a timer is the exception that has to be handled rather than assumed: the idle,
+done-early and stall paths have no tool call to answer, and their reason goes to the session's UI
+notification, which the model never sees. So the first tool boundary after such a stop delivers the
+reason, and only the ones after that get the status line. Announcing "the stop message above says why"
+when no such message was ever delivered is worse than saying nothing.
 Measured: a child stopped for repeating `ls -la …/.pnpm` moved to `ls -la docs` and was told the
 `.pnpm` story again, so it spent its remaining turns looking for a problem in `docs`.
 
