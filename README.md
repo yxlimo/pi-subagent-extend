@@ -81,7 +81,7 @@ subagent(
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
-| `bash.deny` | `string[]` | Commands no caller can allow; only a project profile can set this. |
+| `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one. |
 
 `/permission` shows the read scope, the write scope when it differs, the bash allowlist, both
 read and write denial counts, and the probe state. The namespace is `pi-subagent-extend/1`;
@@ -115,7 +115,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and then three offline suites: 50 scope cases, 10 context cases and 6
+`pnpm test` runs a lint pass and then three offline suites: 62 scope cases, 10 context cases and 6
 sessions against a real pi process driven by a scripted mock model. No model and no network beyond
 localhost. The suites are TypeScript and are type checked with the source, so a typo in a fixture is
 a compile error rather than an assertion that silently passes. See [testing](docs/testing.md).

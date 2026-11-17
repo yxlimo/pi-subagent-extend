@@ -88,7 +88,7 @@ warn only blocks a single tool_call and writes the reason to it; stop is a **har
 
 Delegation rules (how to write a brief, one writer per cwd, how to use resume/steer) follow **pi-subagents' built-in skill**; this skill only covers the probe layer: scope restrictions govern "what can be touched", probes govern "whether progress is being made".
 
-pi-subagents' skill already defines how to wait — after delegating, yield the turn and rely on the native completion notification to wake up; do not sleep, do not poll, and do not use `bg_wait` on ordinary subagents. To check details, read one section on demand rather than reading it all:
+pi-subagents' own skill defines how to wait; this skill does not restate it. To check details, read one section on demand rather than reading it all:
 
 ```js
 subagent({ action: "guide", options: { topic: "tool-reference/execution-parameters" } })
@@ -132,11 +132,7 @@ Probes only handle deterministic signals (counts, time, path patterns); the item
 
 **Probes + LLM watchdog.** They do not conflict; they use different configuration channels: probes go through `extensionBindings`, the watchdog through `subagents.watchdog` in settings. The watchdog has its own `stalemateRepeats` (default 3 identical warnings) that ends a turn — that is at the semantic level; the probe's repeating criterion is at the command level. Both may fire at once; they are not billed twice and do not need to disable each other.
 
-**Probes + background runs.** Background (`async: true`) subagents run in a separate process and probes work as usual; `checkpointBeforeDeadlineMs` only works on async single agents. Foreground blocking runs have no such wrap-up mechanism, and a probe stop is a **hard stop** (the turn ends immediately, with no chance for the subagent to write a report) — so long tasks should proactively report via `contact_supervisor` rather than relying on the moment of the stop.
-
-### How to wait: yield the turn, don't sleep
-
-How to wait is defined by pi-subagents' skill and is not restated here: after delegating, yield the turn and rely on the native completion notification to wake up; do not sleep, do not poll, and do not use `bg_wait` on ordinary subagents — sleeping occupies a foreground tool call and degrades the completion notification into steering. Only use `bg_wait({ id, stopOnAttention: false })` when you genuinely need to wait for a result within the current turn, and use `subagent({ action: "status", id, options: { view: "transcript", lines: 80 } })` to check progress mid-way — query on demand, never in a loop. `lastUpdate` cannot be used as a heartbeat: the runner advances it in memory every second but only rewrites `status.json` when the activity classification changes.
+**Probes + background runs.** Background (`async: true`) subagents run in a separate process and probes work as usual; `checkpointBeforeDeadlineMs` only works on async single agents. Foreground blocking runs have no such wrap-up mechanism, and a probe stop is a **hard stop**: the turn ends immediately, with no chance for the subagent to write a report.
 
 ### Things not to stack
 
@@ -144,57 +140,3 @@ How to wait is defined by pi-subagents' skill and is not restated here: after de
 - **Do not configure the same verification in both `successPatterns` and the gate**: one place deciding success is enough; two places tend to disagree over time.
 - **Do not use `probe: false` to "save effort"**: by default only repeating and permission refusals are on, so turning it off gives up the two cheapest error signals. To actually silence it, write a specific relaxation such as `probe: { repeatBash: 50 }`.
 
-## Working with review subagents (sidecar review)
-
-Review subagents run alongside the main flow: the implementation task does not do the review; the review task starts its own fresh-context subagent to look at the diff. Its relationship with probes is **two kinds of agents get two sets of bindings**.
-
-### Forms of sidecar review
-
-| Form | Started by | How to use |
-| --- | --- | --- |
-| `/parallel-review` | User or parent agent | Start multiple reviewers in parallel, each with one angle (correctness, tests, simplification), then read the combined conclusion; only `autofix` makes changes |
-| `/review-loop` | Same as above | worker → reviewer → fix-worker loop until clean or the limit is reached |
-| `/parallel-cleanup` | Same as above | Cleanup review after implementation; reviews only, no changes |
-| `acceptance.review` | Native acceptance | `{ level: "checked", review: { required: true } }`; async/dynamic writers with `acceptanceRole: "writer"` get this automatically |
-| `acceptanceRole: "read-only"` | Native acceptance | Read-only roles (reviewer, scout, validator) infer to `none`; no evidence threshold needed |
-
-### How to split bindings
-
-**Only mandatory forms need probes.** Review subagents are supposed to be read-only, not run tests, and not go long without producing a "conclusion" — the time-based criteria (read-only idling, finished early) are a source of misfires for them, so never configure those.
-
-```json
-// Implementation subagent: narrowed scope + verification allowed + all probes on
-"pi-subagent-extend/1": {
-  "scope": ["src/auth/**"],
-  "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
-  "probe": { "idleWriteMs": 360000, "abortGraceMs": 120000 }
-}
-
-// Review subagent: read-only, scope covering the whole relevant tree, only the two default probes
-"pi-subagent-extend/1": {
-  "scope": ["src/auth/**", "src/lib/**"],
-  "readOnly": true,
-  "maxDenies": 5
-}
-```
-
-Key points:
-
-- **Reviews need to read more broadly than implementations.** An implementation subagent's scope should only cover what it changes; a review must look at the dependencies, type definitions, and tests involved in the change, so its scope has to cover those, otherwise the review will keep hitting permission refusals until hard-stopped, and the traces it leaves before stopping will be misread by the parent as "the implementation is broken".
-- **Review tasks get `readOnly: true`**: this skips both time-based criteria, "read-only idling" and "finished early" (the task is inherently read-only), but "repeating a command", "permission refusal", and "writing litter" still apply — a review repeatedly running the same command or carelessly writing temporary files is still waste.
-- **`maxDenies` matters more for review tasks**: when a review lacks read permission for some directory, it stops immediately and reports "which directory is missing", and the parent agent just extends the scope and reruns the review — no need to redo the implementation.
-
-### Division of labor with the acceptance gate
-
-`acceptance.review` is the **acceptance phase**: after the implementation runs and the evidence is complete, an independent reviewer is started to judge whether it can be accepted.
-Probes are the **runtime phase**: they judge "whether progress is being made" **while** implementation or review is running.
-
-The two do not conflict or overlap:
-
-- A probe kills an implementation turn → that turn has no deliverable and does not go to acceptance.
-- Probes let it pass and the review approves → the gate reports `verified` / failure, unrelated to probes.
-- Do not expect probes to replace review: probes only see "no files written, repeated commands, grinding on after verification passed", not "changed it wrong, missed tests, out-of-scope refactoring".
-
-### An easy trap to fall into
-
-The default convention for `/parallel-review` and `/parallel-cleanup` is that **reviews must not write files into the repository** (`output: false`, no code changes). If the review bindings you provide have `readOnly: false` and a scope that includes source directories, the review model may "fix things for you" along the way — the review becomes a second writer while the implementation subagent may still be running, and two writers collide on the same working tree. Either set the review task to `readOnly: true`, or wait until the implementation run has fully finished before starting the review.
