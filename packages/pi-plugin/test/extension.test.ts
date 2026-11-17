@@ -2313,5 +2313,33 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   依赖闸门只认 lockfile：只有 package.json 的目录不触发")
 }
 
+// 67. 包装器不能从侧面跳过闸门：`sh -c "pnpm test"`、`env pnpm test` 的载荷里是包管理器，
+//     只看第一个词会把它们当成阅读类放过去。反过来，`rg pnpm` 是搜这个词，不该被拦。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-wrap-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": {
+        scope: ["."],
+        bash: { read: ["sh", "env", "exec", "rg"], write: ["/usr/bin/pnpm test"] },
+      },
+    }),
+  })
+  for (const cmd of ['sh -c "pnpm test"', "env pnpm test", "exec pnpm test", "/usr/bin/pnpm test"]) {
+    const out = await h.call("bash", { command: cmd })
+    assert.equal(out?.block, true, `the gate sees the package manager through ${cmd}`)
+    assert.match(String(out?.reason), /node_modules\/\.bin/, "and refuses for the documented reason")
+  }
+  const searching = await h.call("bash", { command: "rg pnpm" })
+  assert.notEqual(searching?.block, true, "mentioning the word is not invoking it")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门穿透包装器，但不误伤提到包管理器名字的搜索")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

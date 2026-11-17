@@ -175,7 +175,7 @@ directory in the tree (two levels down, same scan as the artefact directories) t
 package-manager lockfile (pnpm, npm, yarn, bun) must also have `node_modules/.bin`; otherwise the
 command is refused and the directory is named. Read-only commands and `git` are exempt on purpose:
 `git` needs no dependencies, and committing is what keeps a worktree from being discarded when a run
-ends. The gate reports a missing install, not an install that has drifted from its lockfile — that
+ends. Wrappers are looked through: when the first token is a shell or `env`/`exec`/`command`/`timeout` style wrapper and the payload names a package manager, the command is gated. A script file (`node build.mjs`, `./ci.sh`) is opaque to a text-level check, which is the honest limit of a guard that exists to avoid a confusing install attempt rather than to enforce a boundary. The gate reports a missing install, not an install that has drifted from its lockfile — that
 second failure is pnpm's `verify-deps-before-run` trying to fix things from inside the sandbox, and
 detecting it would mean comparing `.modules.yaml` against the lockfile, which is project knowledge
 this extension deliberately does not carry. The failure it prevents
