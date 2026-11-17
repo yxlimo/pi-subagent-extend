@@ -5,7 +5,7 @@ inheritSkills: false
 inheritProjectContext: true
 thinking: high
 tools: read, grep, find, ls, bash
-subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts, /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts, /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts, /home/shay/extensions/pi-subagent-extend/.pi/agent-profiles/review.ts
 systemPromptMode: replace
 ---
 

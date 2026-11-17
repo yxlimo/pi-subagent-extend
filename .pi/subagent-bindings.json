@@ -17,8 +17,12 @@
 		}
 	},
 	"coder": {
-		"scope": ["."],
-		"writeScope": ["."],
+		"scope": [
+			"."
+		],
+		"writeScope": [
+			"."
+		],
 		"bash": {
 			"read": [
 				"git status",
@@ -72,6 +76,46 @@
 			],
 			"writable": true,
 			"network": false
+		}
+	},
+	"review": {
+		"scope": [
+			"."
+		],
+		"readOnly": true,
+		"allowTools": [
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"bash",
+			"contact_supervisor"
+		],
+		"maxDenies": 12,
+		"maxWriteDenies": 2,
+		"bash": {
+			"writable": false,
+			"dependencyGate": false,
+			"read": [
+				"git status",
+				"git diff",
+				"git log",
+				"git show",
+				"git rev-parse",
+				"git branch",
+				"rg",
+				"ls",
+				"cat",
+				"head",
+				"tail",
+				"wc",
+				"sed",
+				"find",
+				"grep",
+				"node",
+				"sh",
+				"test"
+			]
 		}
 	}
 }
