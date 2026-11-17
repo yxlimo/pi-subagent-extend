@@ -2455,20 +2455,75 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.notEqual(allowed?.block, true, "an uninstalled ignored directory does not block a write once the real ones are installed")
   h.restore()
 
-  // cwd 自己落在被忽略的前缀里（任务被限制在那个样例目录内）同样不查：
-  // 否则「我明明忽略了它」在别名目录上会失效。
+  // cwd 自己落在被忽略的前缀里（任务被限制在那个样例目录内）同样不查。
+  // 这一条只能用**绝对**前缀表达：相对前缀永远在 cwd 之下，包含不了 cwd。
   const inner = await handler({
     cwd: join(tree, "fixtures", "sample"),
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["."] } },
+      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: [join(tree, "fixtures")] } },
     }),
   })
   const atCwd = await inner.call("bash", { command: "pnpm test" })
-  assert.notEqual(atCwd?.block, true, "a cwd inside the ignored prefix is not gated")
+  assert.notEqual(atCwd?.block, true, "an absolute prefix containing the cwd means nothing is gated")
   inner.restore()
+
+  // 同一个目录，同一份 lockfile，只把前缀换成相对写法：这一次必须被拦。
+  // 这条钉住「相对前缀在 cwd 之下」，否则上面那条会被误读成「任意写法都行」。
+  const relInner = await handler({
+    cwd: join(tree, "fixtures", "sample"),
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures"] } },
+    }),
+  })
+  const relCwd = await relInner.call("bash", { command: "pnpm test" })
+  assert.equal(relCwd?.block, true, "a relative prefix cannot contain the cwd, so this one still blocks")
+  relInner.restore()
 
   rmSync(tree, { recursive: true, force: true })
   console.log("  ok   依赖闸门可忽略目录前缀：忽略的树不贡献拒绝，真包照拦，cwd 同样适用")
+}
+
+// 81. 闸门的扫描同样停在 200 个目录，而且忽略项写成 glob 会被点名。
+//     缺陷一：`dependencyScope` 只有内层 break，外层 frontier 里每个剩余目录还会各推一个子
+//     目录，250 个目录的树能得 246 个 root，而文档说的是 200。
+//     缺陷二：忽略项是字面路径，`fixtures/*` 静默匹配不到任何目录，正是文档自称要避免的调试题。
+{
+  // 25 × 10 = 250 个第二代目录，加树根与 25 个第一代目录共 276 个名额，上限 200。
+  // 判别点放在 a24/b0：内层 break 一旦在 200 处停住，外层若不断，frontier 里剩下的每个
+  // 第一代目录还会各推一个 b0 进来（a18..a24），a24/b0 就落到范围内；外层断了就不会。
+  // 所以这里放 lockfile 且不装依赖：上限生效 → 放行，上限失效 → 被拦。名字补零，字典序即自然序。
+  // 25 × 10 = 250 个第二代目录，加树根与 25 个第一代目录共 276 个候选名额，上限 200。
+  // 直接测扫描结果本身：内层 break 只退出当前目录，外层若不断，frontier 里剩下的每个
+  // 第一代目录还会各推一个 b0 进来，总数会变成 207 而不是 200。
+  const wide = mkdtempSync(join(tmpdir(), "pi-subagent-extend-cap-"))
+  for (let a = 0; a < 25; a += 1) {
+    for (let b = 0; b < 10; b += 1) mkdirSync(join(wide, `a${String(a).padStart(2, "0")}`, `b${b}`), { recursive: true })
+  }
+  const scanned = ext.dependencyScope(wide, [])
+  assert.equal(scanned.length, 200, "the scan stops at the 200-directory cap")
+  assert.ok(!scanned.includes(join(wide, "a24", "b0")), "and the directories beyond it are not scanned")
+  assert.ok(scanned.includes(join(wide, "a00", "b0")), "while the early ones are")
+  rmSync(wide, { recursive: true, force: true })
+
+  // glob 写成忽略项：闸门照旧拒绝，但文案要点名它匹配不到任何目录。
+  // 必须是「有 lockfile、没装依赖」的目录，闸门才会真的拒绝并给出提示。
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-glob-"))
+  mkdirSync(join(tree, "fixtures"), { recursive: true })
+  writeFileSync(join(tree, "fixtures", "package.json"), "{}")
+  writeFileSync(join(tree, "fixtures", "pnpm-lock.yaml"), "lockfileVersion: 9\n")
+  const globH = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures/*"] } },
+    }),
+  })
+  const globbed = await globH.call("bash", { command: "pnpm test" })
+  assert.equal(globbed?.block, true, "a glob ignore entry matches nothing, so the gate still refuses")
+  assert.match(globbed.reason, /literal paths, not globs/, "and says so instead of leaving it to be discovered")
+  assert.match(globbed.reason, /fixtures\/\*/, "naming the entry that did not apply")
+  globH.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   闸门扫描封在 200 个目录；忽略项写成 glob 会被点名")
 }
 
 // 70. 数组写法不能顺手改掉两个老含义：`false` 仍是整道闸门的开关，显式 `true` 仍是「查全部」。

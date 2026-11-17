@@ -262,15 +262,22 @@ read-only task that never builds.
 A committed lockfile in a directory nobody installs — a `fixtures/` sample, a vendored example —
 would otherwise block every write in the tree, and the only escape would be turning the check off
 for the real packages too. `bash.dependencyGate` therefore also takes an array of directory
-prefixes to skip. A prefix is a plain path resolved against the working directory, and it covers
-that directory and everything below it, which is the same reading a `scope` entry gets; the match
-stops at a path boundary, so `fixtures` does not cover `fixtures-old`. Globs are not accepted: the
-question the list answers is "nobody installs here", which is one fixed location, and accepting
-`fixtures/*` would turn "I ignored it and it still blocks" into a debugging exercise. Ignored
-directories are pruned during the scan rather than filtered afterwards, so a deep ignored tree
-cannot exhaust the scan's root budget and push a real package out of range; a working directory
-that itself falls inside a prefix is not scanned at all. The array is a skip list, not a switch:
-`[]` behaves like `true`, and `false` remains the single way to stop checking.
+prefixes to skip. A relative prefix is resolved against the working directory and an absolute one is
+taken literally; either way it covers that directory and everything below it, which is the same
+reading a `scope` entry gets, and the match stops at a path boundary, so `fixtures` does not cover
+`fixtures-old`. Because a relative prefix is always *below* the working directory, the scan starts
+inside none of them; only an absolute prefix can contain the working directory, and then nothing is
+scanned at all. Two relative spellings, `.` and `..`, do resolve to the working directory or an
+ancestor of it and therefore turn the whole check off — they mean "ignore everything", which is what
+the prefix says, but `false` is the clearer way to write it.
+
+Entries are literal paths, not globs: the question the list answers is "nobody installs here", which
+is one fixed location. Nothing rejects a glob, so `fixtures/*` and a typo both match no directory and
+change nothing — which is why the refusal names any entry containing `*` or `?` instead of leaving
+that to be discovered. Ignored directories are pruned during the scan rather than filtered
+afterwards, so a deep ignored tree cannot exhaust the scan's root budget and push a real package out
+of range. The array is a skip list, not a switch: `[]` behaves like `true`, and `false` remains the
+single way to stop checking.
 
 The budget is **consecutive**, which is what the refusal text and the README promise: any allowed
 working call resets both counters, so a subagent that tries a path, learns, and moves on is never
