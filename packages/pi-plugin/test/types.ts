@@ -25,6 +25,8 @@ export interface SandboxSpec {
 	/** The directory the helper shadows with a private tmpfs; absent means /tmp. */
 	tmp?: string
 	offline: boolean
+	/** Seconds without CPU before the helper kills the tree; absent means no watchdog. */
+	stallSeconds?: number
 	env: Record<string, string>
 }
 

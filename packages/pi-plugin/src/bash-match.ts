@@ -48,6 +48,13 @@ export interface BashRule {
 	 */
 	dependencyGate: string[] | false;
 	/**
+	 * 命令树停止消耗 CPU 超过这么多秒就杀掉（默认关）。
+	 *
+	 * 墙钟超时分不开「死锁」和「长编译」，累计 CPU 分得开：干活的树每次采样都在涨，卡住的
+	 * 树一动不动。判据由 helper 实现 —— 它是子进程 PID 命名空间的 PID 1，看得见整棵子树。
+	 */
+	cpuStallSeconds: number | false;
+	/**
 	 * 是否给沙箱里的 git 注入全局排除规则（node_modules/、.pnpm-store/）。
 	 * 默认开：防止子代理 `git add -A` 把依赖目录吸进索引。
 	 */
@@ -148,5 +155,15 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 		gitExcludes: cfg.gitExcludes !== false,
 		deny: stringList(cfg.deny),
 		dependencyGate: cfg.dependencyGate === false ? false : stringList(cfg.dependencyGate),
+		// 未写 = 关。这条看门狗杀掉整棵进程树，默认打开会误杀刻意等待的命令（sleep、退避轮询），
+		// 而 helper 看不到输出（stdio 是继承的，不走管道），没法用「无输出」佐证。
+		cpuStallSeconds: stallSeconds(cfg.cpuStallSeconds),
 	};
+}
+
+/** `cpuStallSeconds`：未写、写坏、`false`、小于等于 0 一律当关闭。 */
+function stallSeconds(value: unknown): number | false {
+	const n = typeof value === "number" ? value : Number(value);
+	if (!Number.isFinite(n) || n <= 0) return false;
+	return Math.floor(n);
 }

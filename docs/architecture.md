@@ -166,6 +166,29 @@ covered by this criterion at all — a profile that lists an interpreter in the 
 commands, the real spinning case, are unaffected. This was measured the hard way: two coding subagents
 were stopped mid-task by the criterion before the reset existed.
 
+### The stall watchdog
+
+`bash.cpuStallSeconds` arms a watchdog in the helper, not in the extension, because only the helper
+can see the whole command tree: it is PID 1 of the private PID namespace, so `/proc` inside it lists
+exactly the subtree, and without a namespace it falls back to walking parent links. Either way the
+measurement is cumulative `utime + stime` across the tree, sampled every quarter of the threshold.
+
+A wall-clock timeout cannot distinguish the two failures this targets. A six-minute `cargo build` and
+a six-minute deadlock look identical from outside; CPU time separates them, because a compiling tree
+gains CPU in every sample and a tree blocked on a lock, a socket, or a child that died without closing
+a pipe gains none. When the tree has been quiet for the full threshold the helper kills it — inside
+the namespace that means killing the subtree, on a host it means walking the descendants first — prints
+one line naming the measurement, and exits with `79`, a code distinct from "the spec was bad" (`77`)
+and "the sandbox failed" (`78`) so the caller can tell them apart. Landlock does not permit an unknown
+exit path either way; the code is a signal, not a channel.
+
+It is off by default and both of its limits are real. A command that waits on purpose — `sleep 300`, a
+backoff loop — uses no CPU and will be killed. And the helper cannot corroborate with output, because
+stdio is inherited rather than piped; making it visible would mean buffering the command's output
+inside the supervisor, which is a different piece of work with its own cost for large builds. The
+result is annotated with a `[sandbox]` note that says a retry stalls the same way, since the natural
+model reaction to a killed command is to run it again.
+
 ### What a stopped run is told next
 
 The call that trips a stop gets the reason in full, naming the command or the path involved. Every

@@ -75,6 +75,20 @@ export function networkFailureNote(text: string, offline: boolean): string | und
 }
 
 /**
+ * 补在「命令树不再消耗 CPU 而被杀」后面的提示；不该补时返回 undefined。
+ *
+ * 这是 `bash.cpuStallSeconds` 打开时 helper 的动作：它按子树累计 CPU 判定，秒数是它量的。
+ * 提示的重点不是「失败了」，而是「重试没用」—— 卡在锁、socket、或被孤儿进程挂住的命令，
+ * 再跑一遍会以同样的方式卡住，而模型很容易把它当成一次偶发失败。
+ */
+export function cpuStallNote(text: string): string | undefined {
+	if (!text || text.includes(MARK)) return undefined
+	const matched = /cpu stall: the command tree used no CPU for (\d+) s/.exec(text)
+	if (!matched) return undefined
+	return `${MARK} no CPU for ${matched[1]} s, so the parent's stall watchdog killed it — a hung command, not a failing test. Retrying stalls the same way; report what you were running with contact_supervisor.`
+}
+
+/**
  * 补在「写到授权范围之外」后面的提示；不该补时返回 undefined。
  *
  * @param text bash 工具结果的纯文本

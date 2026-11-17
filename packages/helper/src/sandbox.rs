@@ -161,6 +161,7 @@ mod tests {
             tmp: None,
             offline: true,
             env: Default::default(),
+            stall_seconds: None,
         };
         let error = apply(&spec, true).expect_err("a missing path must be refused");
         assert!(

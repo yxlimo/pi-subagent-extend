@@ -46,7 +46,7 @@ import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
-import { networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
+import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
 import { Probe, STOP_NOTICE, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
@@ -1249,6 +1249,9 @@ export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
 			]),
 		],
 		offline: rule.network !== true,
+		// 只在开启时写：spec 是 deny_unknown_fields，旧版 helper 拿到这个键会直接拒掉整份
+		// spec，所以关闭时必须连键都不出现。
+		...(rule.cpuStallSeconds === false ? {} : { stallSeconds: rule.cpuStallSeconds }),
 		env: sandboxEnv(cwd, rule),
 	};
 }
@@ -1530,6 +1533,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			// 含这些字符串，于是它自己的一份正确改动被追加了「这在授权之外，去要 writablePaths」。
 			// 判断事实而不猜文案：工具结果自带 isError。
 			isBash && event.isError ? networkFailureNote(text, offline) : undefined,
+			isBash && event.isError ? cpuStallNote(text) : undefined,
 			isBash && ran && event.isError ? writeRefusalNote(text, ran.write, ran.cwd) : undefined,
 		].filter((hint): hint is string => Boolean(hint));
 		if (!hints.length) return undefined;

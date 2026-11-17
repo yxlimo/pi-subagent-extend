@@ -44,6 +44,11 @@ pub(crate) const EXIT_UNSUPPORTED: i32 = 76;
 pub(crate) const EXIT_BAD_SPEC: i32 = 77;
 /// The sandbox could not be set up, so the command must not run.
 pub(crate) const EXIT_SANDBOX_FAILED: i32 = 78;
+/// The command tree stopped using CPU and was killed by the stall watchdog.
+///
+/// Distinct from a timeout on purpose: exit status alone cannot tell a hung command from
+/// a slow one, and this one comes with an explanation on stderr.
+pub(crate) const EXIT_STALLED: i32 = 79;
 /// The command itself could not be executed.
 const EXIT_EXEC_FAILED: i32 = 127;
 
@@ -178,6 +183,7 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
     supervise::run(
         || run_command(program, program_args, spec, namespaces),
         namespaces,
+        spec.stall_seconds,
     )
     .map_err(|e| (EXIT_SANDBOX_FAILED, e))
 }
