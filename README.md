@@ -120,7 +120,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and then three offline suites: 71 scope cases, 10 context cases and 6
+`pnpm test` runs a lint pass and then three offline suites: 74 scope cases, 10 context cases and 6
 sessions against a real pi process driven by a scripted mock model. No model and no network beyond
 localhost. The suites are TypeScript and are type checked with the source, so a typo in a fixture is
 a compile error rather than an assertion that silently passes. See [testing](docs/testing.md).

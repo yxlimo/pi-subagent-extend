@@ -47,7 +47,7 @@ import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule 
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
-import { Probe, parseProbeConfig } from "./probe.ts";
+import { Probe, STOP_NOTICE, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-subagent-extend";
@@ -1357,10 +1357,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// only when every finalized result in the batch is terminating"）。停止后整批都会被拦，
 	// 所以不留「一切都拒绝、模型还在反复试」的软状态。
 	let stopped = false;
-	let stopReason = "";
+	/** 停机之后每次调用收到的话：只讲状态，不复述触发停机的那次动作。 */
+	const stopNotice = STOP_NOTICE;
 	const stop = (reason: string) => {
 		stopped = true;
-		stopReason = reason;
+		// 详细理由只回给触发停机的那一次；后续调用拿 stopNotice，见上面。
 		return { block: true, reason, terminate: true } as const;
 	};
 	let currentCtx: { cwd?: string; actions?: unknown; ui?: unknown } | undefined;
@@ -1562,7 +1563,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		const cwd = ctx.cwd ?? process.cwd();
 		// 求援通道不受任何停机影响：被停住的子代理最需要的就是「报告我卡在哪」。
 		if (SAFE_TOOLS.includes(event.toolName)) return undefined;
-		if (stopped) return { block: true, reason: stopReason, terminate: true };
+		if (stopped) return { block: true, reason: stopNotice, terminate: true };
 		// 探针在边界上的 warn / 到期停机，先于本工具的判定。
 		const boundary = probe?.atToolBoundary();
 		if (boundary) {

@@ -43,6 +43,11 @@ Only two kinds of events reset the idle timer:
 1. `edit` / `write` tool calls
 2. bash commands matching the `bash.write` column
 
+A repeat counts only when its **output did not change**. The same command returning new output is
+progress — that is what measuring a repository looks like — so the count resets and a warning already
+issued is withdrawn. A child that is genuinely stuck prints the same thing every time and still walks
+into the threshold.
+
 Only **read-class** commands are counted for spinning: a command that writes (the `bash.write` column, or an `edit`/`write` call) is progress, so it clears the counts and cancels a warning already issued. A coder that edits a file and re-runs the same test command is therefore never stopped by this criterion — a profile that lists an interpreter in the `write` column (`node`, `python3`) exempts that interpreter's commands entirely.
 
 Commands in the `bash.read` column, and `read` / `grep` / `find` / `ls`, do not count. So "spinning with read-only bash commands" and "repeatedly scanning with read tools" are both judged as idling — this is intentional: no amount of read-only commands counts as progress.
@@ -68,7 +73,7 @@ Corollary: if a task genuinely needs extensive read-only investigation, either l
 
 ## Stop semantics (what the parent agent must know)
 
-warn only blocks a single tool_call and writes the reason to it; stop is a **hard stop**: every blocked result carries `terminate`, and pi ends the turn when the whole batch of tool results is terminating (`docs/extensions.md`). Therefore:
+warn only blocks a single tool_call and writes the reason to it; stop is a **hard stop**: every blocked result carries `terminate`, and pi ends the turn when the whole batch of tool results is terminating (`docs/extensions.md`). The call that trips the stop gets the full reason; calls after it get a status line ("the run was stopped earlier") rather than the old reason over again, because that reason names the action that caused the stop and a subagent that changed course reads it as a verdict on the new command. `contact_supervisor` and `structured_output` stay open either way. Therefore:
 
 - **There is no wrap-up turn after a stop.** The subagent gets no further chance to "write a final report"; the parent agent has to infer what happened from what was produced before the stop plus the refusal reasons. If you want the subagent to explain itself, have it report before it crosses the line.
 - **Escalation channels are unaffected by a stop.** `contact_supervisor` / `intercom` / `structured_output` are checked before the stop decision and are always allowed through — this only truly saves you when **the same batch contains an allowed result** (the batch is not entirely terminating, so the turn continues): the stopped subagent can still get "where I am stuck and what I need" out.

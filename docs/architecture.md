@@ -150,7 +150,7 @@ default, a partial object enables only the fields it names, `"probe": false` dis
 | Criterion | Default | Behaviour |
 | --- | --- | --- |
 | Read-only idling | explicit: `idleWriteMs: 360000`, `abortGraceMs: 120000` | no write activity within `idleWriteMs` warns at the next tool boundary; after `abortGraceMs` more, the turn stops |
-| Repeating a command | on, `repeatBash: 3` | the third identical read-class `bash` command warns, the fourth stops |
+| Repeating a command | on, `repeatBash: 3` | the third read-class `bash` command whose output did not change warns, the next one stops |
 | Finished early | explicit: `successIdleMs: 300000`, `successPatterns` | once output matches a success marker, no new change within `successIdleMs` stops the turn |
 | Writing litter | explicit: `forbidWritePatterns: []` | a `write`/`edit` target matching the pattern is refused outright |
 
@@ -165,6 +165,20 @@ covered by this criterion at all — a profile that lists an interpreter in the 
 `python3`) exempts that interpreter's commands, and no amount of repetition trips the check. Read-class
 commands, the real spinning case, are unaffected. This was measured the hard way: two coding subagents
 were stopped mid-task by the criterion before the reset existed.
+
+### What a stopped run is told next
+
+The call that trips a stop gets the reason in full, naming the command or the path involved. Every
+call after it gets a status line instead: the run was stopped earlier, nothing further will execute,
+report to the parent. Re-serving the original reason is the trap — it describes the action that caused
+the stop, and a subagent that has since changed course reads it as a verdict on the new command.
+Measured: a child stopped for repeating `ls -la …/.pnpm` moved to `ls -la docs` and was told the
+`.pnpm` story again, so it spent its remaining turns looking for a problem in `docs`.
+
+Whether there *are* turns after a stop depends on pi, not on this extension: a hard stop ends the turn
+when every result in the batch carries `terminate`, and a subagent that keeps calling tools continues
+to get refusals. `contact_supervisor` and `structured_output` stay open throughout, so a stopped
+subagent can still report.
 
 ### The denial budget
 
