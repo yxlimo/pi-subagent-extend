@@ -637,7 +637,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const after = await h.call("read", { path: "src/real.ts" })
   assert.equal(after?.block, true, "once stopped, later calls are refused")
   assert.equal(after?.terminate, true, "refused terminally, not with a soft latch")
-  assert.match(after.reason, /denial budget/, "the reason still names the stop, not this call's verdict")
+	assert.match(
+		after.reason,
+		/stopped earlier/,
+		// 原来是「重发停机理由」，而那条理由里带着触发停机的具体命令；实测中被判打转的子代理
+		// 换去 `ls -la docs` 后仍收到点名 .pnpm 的旧文案，于是把新命令读成「也犯了那个错」。
+		// 现在讲状态：原因在上一条消息里，模型手里有。
+		"the reason says the run was stopped, without re-serving the old verdict",
+	)
   assert.ok(!/src\/real\.ts/.test(after.reason), "the stop reason does not pretend this call was out of scope")
   assert.equal(
     await h.call("contact_supervisor", { reason: "need_decision", message: "stuck" }),
@@ -2509,6 +2516,84 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     "sorting is not locale-sensitive",
   )
   console.log("  ok   扫描顺序是字典序，不随文件系统与 locale 变化")
+}
+
+// 72. Repeat probe counts a repeat only when the output did not change.
+//     缺陷：判据原先只看「同一条命令出现 N 次」，不看输出。一个在量目录布局的子代理
+//     三次 `ls` 同一个目录、每次输出都不同，却被判成原地打转并硬停 —— 那正是测量。
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), repeatBash: 3 },
+    readOnly: true,
+    hooks: { warn: () => {} },
+    host: clock.host,
+  })
+  let last: { stop: boolean } | undefined
+  for (const out of ["a", "b", "c", "d"]) {
+    last = p.noteBashStart("ls -la .pnpm", "read")
+    p.noteBashResult(out)
+    assert.notEqual(last?.stop, true, "a repeat that returns new output is progress, not spinning")
+  }
+  assert.equal(last, undefined, "and it never even warns")
+  p.dispose()
+  console.log("  ok   同一命令但输出有变化时不算原地打转")
+}
+
+// 73. The same command with byte-identical output is still spinning.
+//     这条与 72 成对：放宽的只有「输出变了」这一种，真卡住的孩子输出一字不差。
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), repeatBash: 3 },
+    readOnly: true,
+    hooks: { warn: () => {} },
+    host: clock.host,
+  })
+  for (let i = 0; i < 2; i += 1) {
+    p.noteBashStart("git status", "read")
+    p.noteBashResult("On branch main\nnothing to commit")
+  }
+  const third = p.noteBashStart("git status", "read")
+  assert.equal(third?.stop, false, "identical output still reaches the warn")
+  p.noteBashResult("On branch main\nnothing to commit")
+  const fourth = p.noteBashStart("git status", "read")
+  assert.equal(fourth?.stop, true, "and one more still stops the run")
+  p.dispose()
+  console.log("  ok   输出一字不差的重复仍算原地打转（72 的另一半）")
+}
+
+// 74. After a stop, later calls are told the run is stopped, not re-told the old command.
+//     缺陷：停机后每个调用收到的是同一条 #stopReason，而那句话描述的是触发停机的那次
+//     动作。实测：一个子代理被判打转后改去 `ls -la docs`，回来的仍是点名 .pnpm 的旧文案，
+//     于是它把新命令读成「也犯了那个错」。
+{
+  const { Probe } = await import(join(repo, "src", "probe.ts"))
+  const clock = fakeClock()
+  const p = new Probe({
+    config: { ...defaultProbe(), repeatBash: 2, abortGraceMs: 1000 },
+    readOnly: true,
+    hooks: { warn: () => {} },
+    host: clock.host,
+  })
+  p.noteBashStart("ls -la .pnpm", "read")
+  p.noteBashResult("same")
+  const warned = p.noteBashStart("ls -la .pnpm", "read")
+  assert.equal(warned?.stop, false, "the threshold warn comes first")
+  p.noteBashResult("same")
+  // 宽限到期由边界兑现（探针自己停机的那条路）。
+  clock.advance(1000)
+  const stopping = p.atToolBoundary()
+  assert.equal(stopping?.stop, true, "once the grace expires the run stops")
+  assert.match(String(stopping?.reason), /\.pnpm/, "the stopping call is told which command caused it")
+  const later = p.atToolBoundary()
+  assert.equal(later?.stop, true, "and later calls are still refused")
+  assert.ok(!String(later?.reason).includes(".pnpm"), "the old command is not quoted again")
+  assert.match(String(later?.reason), /stopped earlier/, "instead the call is told the run is stopped")
+  p.dispose()
+  console.log("  ok   停机后的调用收到状态说明，不复述触发停机的旧命令")
 }
 
 rmSync(workdir, { recursive: true, force: true })

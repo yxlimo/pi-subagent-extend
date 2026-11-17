@@ -239,15 +239,19 @@ const SCOPE = { "pi-subagent-extend/1": { scope: ["src/**"] } };
 		],
 		bindings: { "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 1 } },
 	});
-	const denials = run4.results.filter((r) => /outside the read scope|denial budget/.test(r.text));
+	const denials = run4.results.filter((r) => /outside the read scope|denial budget|stopped earlier/.test(r.text));
 	assert.equal(denials.length, 3, `expected warn, stop, then the latched stop; saw ${denials.length}`);
-	assert.match(denials[1].text, /denial budget/, "the second denial is the stop");
+	assert.match(denials[1].text, /denial budget/, "the second denial is the stop, and it names the criterion");
 	const latched = denials[2].text;
-	assert.match(latched, /denial budget/, "the post-stop call reports the stop reason");
+	// 原来断言的是「现在返回历史原因（点名 outside.md）」。改成状态说明，是因为实测证明
+	// 历史原因会被读成对当前动作的判决：一个被判打转的子代理换去 `ls -la docs`，收到的
+	// 仍是点名 .pnpm 的旧文案。原因是上一轮那条停机消息，就在模型上下文里。
+	assert.match(latched, /stopped earlier/, "the post-stop call is told the run is stopped");
 	assert.equal(latched.includes("src/a.ts"), false, "it does not blame the current (in-scope) call");
-	assert.match(latched, /outside\.md/, "it carries the historical cause instead");
+	assert.equal(latched.includes("outside.md"), false, "nor does it re-serve the old reason as this call's verdict");
+	assert.match(latched, /contact_supervisor/, "and it points at the channel that still works");
 	assert.equal(run4.consumed, 3, "the run ended at the latched stop, no closing turn");
-	console.log("  ok   停机后对范围内文件的调用拿到的是停机理由（A1 回归）");
+	console.log("  ok   停机后对范围内文件的调用拿到的是「已停」状态说明（A1 回归）");
 }
 
 // 5. 交接单提示（前台）：worktree 单返回 handoff 路径时，提示必须真的进模型上下文，

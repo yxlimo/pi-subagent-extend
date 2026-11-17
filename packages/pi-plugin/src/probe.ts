@@ -32,6 +32,17 @@ export const DEFAULT_PROBE: ProbeConfig = {
 	forbidWritePatterns: [],
 };
 
+/**
+ * 停机之后每个调用收到的话。
+ *
+ * 不能拿停机理由顶：那句话描述的是**触发停机的那一次动作**（「同一条命令重复 3 次：
+ * ls -la …/.pnpm」），而后续调用早就换了事，却收到同一句，模型于是把它读成「这条新命令
+ * 也犯了那个错」。这个 bug 是真的——一个子代理被判定打转后改去 `ls -la docs`，回来的
+ * 仍是那条点名 .pnpm 的旧文案。#stopNotice 与 index.ts 的硬停共用这句。
+ */
+export const STOP_NOTICE =
+	"pi-subagent-extend: this run stops here — it was stopped earlier and nothing further will execute (the stop message above says why). Report to the parent with contact_supervisor.";
+
 export interface ProbeEvent {
 	/** 命中判据时给模型看的文案。 */
 	reason: string;
@@ -158,6 +169,10 @@ export class Probe {
 	#idle: Window = { armed: false, warned: false, message: "", abortAt: 0 };
 	#repeat: Window = { armed: false, warned: false, message: "", abortAt: 0 };
 	#bashCounts = new Map<string, number>();
+	/** 上一条进入的命令，供 noteBashResult 把输出归到它名下。 */
+	#pending: string | undefined;
+	/** 每条命令上一次的输出，条数封顶，避免长会话把内存吃满。 */
+	#lastOutputs = new Map<string, string>();
 	#forbidPatterns: { source: string; re: RegExp }[];
 	#stopped = false;
 	#stopReason = "";
@@ -186,6 +201,7 @@ export class Probe {
 		// warn，中途改了代码，宽限到期照样被停。代价是写类命令自身不再受这条判据约束，
 		// 读类命令（真正的原地打转）不受影响。
 		this.#bashCounts.clear();
+		this.#lastOutputs.clear();
 		this.#repeat = { armed: false, warned: false, message: "", abortAt: 0 };
 		this.#disarmSuccess();
 		this.#startIdleTimer();
@@ -197,6 +213,7 @@ export class Probe {
 		if (access === "write") this.noteWriteActivity();
 		const key = command.trim();
 		if (!key) return undefined;
+		this.#pending = key;
 		const count = (this.#bashCounts.get(key) ?? 0) + 1;
 		this.#bashCounts.set(key, count);
 		if (count === this.#cfg.repeatBash) {
@@ -224,13 +241,38 @@ export class Probe {
 		return undefined;
 	}
 
-	/** bash 输出：判据 3 的成功标记。 */
+	/** bash 输出：判据 3 的成功标记；并判定这一次重复是不是带回了新信息。 */
 	noteBashResult(output: string): void {
-		if (this.#stopped || this.#readOnly) return;
+		// 输出判定与 readOnly 无关：那条开关只关「早可收工」，不关打转。
+		this.#noteOutput(output);
+		if (this.#readOnly || this.#stopped) return;
 		const text = output.length > BASH_TEXT_LIMIT ? output.slice(-BASH_TEXT_LIMIT) : output;
 		const hit = matchesAny(this.#cfg.successPatterns, text);
 		if (!hit) return;
 		this.#startSuccessTimer(hit);
+	}
+
+	/**
+	 * 一条命令的输出回来了：和上一次不同，就说明这次重复拿到了新信息，不算原地打转。
+	 *
+	 * 判据原来的口径是「同一条命令出现 N 次」，不看结果。dogfooding 里一个在量目录布局的
+	 * 子代理因此被杀：它三次 `ls` 同一个目录、每次输出都不一样，可那正是测量任务在做的事。
+	 * 现在计数归零、并撤掉已武装的 warn —— 拿到新输出就是进展，跟写了文件是一回事。
+	 * 真正卡住的孩子输出一字不差，仍然会被数到阈值上。
+	 */
+	#noteOutput(output: string): void {
+		const key = this.#pending;
+		this.#pending = undefined;
+		if (!key) return;
+		const previous = this.#lastOutputs.get(key);
+		if (this.#lastOutputs.size >= 64 && !this.#lastOutputs.has(key)) {
+			const oldest = this.#lastOutputs.keys().next().value as string | undefined;
+			if (oldest !== undefined) this.#lastOutputs.delete(oldest);
+		}
+		this.#lastOutputs.set(key, output);
+		if (previous === undefined || previous === output) return;
+		this.#bashCounts.delete(key);
+		this.#repeat = { armed: false, warned: false, message: "", abortAt: 0 };
 	}
 
 	/** write/edit 目标路径：判据 4。命中返回拒绝事件。 */
@@ -252,8 +294,9 @@ export class Probe {
 	/** tool 边界：把已武装的 warn 抛给模型；宽限走完就停。 */
 	atToolBoundary(): ProbeEvent | undefined {
 		// 停过之后每个边界都要拒绝：没有这条，停机只停在内部状态里，子代理照跑。
+		// 给的是「已停」的状态说明，不是那条触发停机的旧描述（见 #stopNotice）。
 		if (this.#stopped && this.#stopReason) {
-			return { reason: this.#stopReason, stop: true };
+			return { reason: STOP_NOTICE, stop: true };
 		}
 		if (this.#stopped) return undefined;
 		const now = this.#host.now();
