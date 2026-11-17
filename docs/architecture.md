@@ -170,9 +170,15 @@ Usage errors and hard rules never count: a missing path, shell metacharacters, a
 `powershell`/`codemode`, or a command matched by a profile's `bash.deny`. Those cannot be fixed by
 granting more, so charging them against the budget would stop a task for the wrong reason.
 
-The dependency gate is in this class too. Before a bash command runs, every directory in the tree
-(two levels down, same scan as the artefact directories) that has a package-manager
-lockfile (pnpm, npm, yarn, bun) must also have `node_modules/.bin`; otherwise bash is refused and the directory is named. The failure it prevents
+The dependency gate is in this class too. Before a build or a package-manager command runs, every
+directory in the tree (two levels down, same scan as the artefact directories) that has a
+package-manager lockfile (pnpm, npm, yarn, bun) must also have `node_modules/.bin`; otherwise the
+command is refused and the directory is named. Read-only commands and `git` are exempt on purpose:
+`git` needs no dependencies, and committing is what keeps a worktree from being discarded when a run
+ends. The gate reports a missing install, not an install that has drifted from its lockfile — that
+second failure is pnpm's `verify-deps-before-run` trying to fix things from inside the sandbox, and
+detecting it would mean comparing `.modules.yaml` against the lockfile, which is project knowledge
+this extension deliberately does not carry. The failure it prevents
 is worth the check: without it the first build command tries to install inside the sandbox, where
 the package store is usually not writable, so pnpm silently falls back to an empty store or the
 command blocks on a lock — with nothing in the output pointing at the install. Retrying cannot fix

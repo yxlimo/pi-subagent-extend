@@ -802,6 +802,39 @@ function dependencyGateReason(cwd: string): string | undefined {
 	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin, so a build or test would install inside the sandbox. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.`;
 }
 
+/** 命令的第一个词，跳过 `FOO=bar cmd` 这类前置赋值。 */
+function commandHead(command: string): string {
+	for (const token of command.trim().split(/\s+/)) {
+		if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
+		return basename(token);
+	}
+	return "";
+}
+
+const PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn", "bun", "npx", "pnpx", "bunx", "corepack"]);
+
+/**
+ * 闸门只管「会去装依赖」的那几类：写类命令（构建、测试）与包管理器本身。
+ *
+ * `git` 与只读命令不受影响。git 不需要 node_modules，而「先落任务日志再提交」这种保树
+ * 纪律恰恰在依赖缺失时最要用得上 —— 把 git 一起挡掉，拒绝就发生在最不该发生的时刻。
+ */
+function dependencyGateApplies(command: string, access: "read" | "write"): boolean {
+	if (commandHead(command) === "git") return false;
+	return access === "write" || PACKAGE_MANAGERS.has(commandHead(command));
+}
+
+/** 闸门的最终判定：关掉、不适用或依赖齐全时返回 undefined。 */
+function dependencyGateVerdict(
+	rule: { dependencyGate: boolean },
+	command: string,
+	access: "read" | "write",
+	cwd: string,
+): string | undefined {
+	if (!rule.dependencyGate || !dependencyGateApplies(command, access)) return undefined;
+	return dependencyGateReason(cwd);
+}
+
 /**
  * 产物目录：探测结果 + 显式追加。已存在的直接放行；探测到的主产物缺了就创建，
  * 其余缺了不管（空目录本身没有意义）；显式追加的缺了也创建 —— 那是父代理点名的。
@@ -1470,10 +1503,8 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				);
 			}
 			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
-			if (rule.dependencyGate) {
-				const reason = dependencyGateReason(cwd);
-				if (reason) return deny(reason);
-			}
+			const gate = dependencyGateVerdict(rule, command, match.access, cwd);
+			if (gate) return deny(gate);
 			const repeatEvent = probe?.noteBashStart(command, match.access);
 			if (repeatEvent) {
 				return repeatEvent.stop

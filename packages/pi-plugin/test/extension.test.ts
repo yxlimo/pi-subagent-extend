@@ -2220,7 +2220,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   注解只在命令真的失败时出现：输出正文里的 EACCES 不触发")
 }
 
-// 63. 启动前的依赖完整性闸门：有 lockfile 却没有 node_modules/.bin 的目录，bash 直接失败并点名。
+// 63. 启动前的依赖完整性闸门：有 lockfile 却没有 node_modules/.bin 的目录，构建/测试命令直接失败并点名。
 //     代价是每个目录一次 readdir；换来的是第一条构建命令不会在沙箱里自己去装依赖然后卡住。
 //     计数归属：它拒的是环境，不是授权 —— 重试也不会变好，所以不进任何预算。
 {
@@ -2233,28 +2233,52 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const h = await handler({
     cwd: tree,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], maxDenies: 1, bash: { read: ["git status"] } } }),
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": {
+        scope: ["."],
+        maxDenies: 1,
+        bash: { read: ["git status", "rg"], write: ["git commit", "pnpm test", "mise run test"] },
+      },
+    }),
   })
-  const first = await h.call("bash", { command: "git status" })
-  assert.equal(first?.block, true, "bash is refused while a lockfile directory has no node_modules")
+  const first = await h.call("bash", { command: "pnpm test" })
+  assert.equal(first?.block, true, "a build is refused while a lockfile directory has no node_modules")
   assert.match(first.reason, /web/, "the refusal names the directory that is missing")
   assert.match(first.reason, /node_modules\/\.bin/, "and names what is missing in it")
   assert.match(first.reason, /contact_supervisor/, "and the way out")
   assert.equal(first.terminate, undefined, "the first refusal does not stop the run")
 
   // 判别式：授权预算压到 1。若这类拒绝记在预算上，第二次就 warn、第三次就硬停。
-  const second = await h.call("bash", { command: "git status" })
+  const second = await h.call("bash", { command: "pnpm test" })
   assert.doesNotMatch(String(second?.reason), /in a row/, "an uninstalled dependency is not an authorisation refusal")
-  const third = await h.call("bash", { command: "git status" })
+  const third = await h.call("bash", { command: "pnpm test" })
   assert.equal(third?.terminate, undefined, "retrying never reaches a hard stop: retrying cannot install anything")
+
+  // git 不受闸门管：它不需要 node_modules，而「先落任务日志再提交」的保树纪律
+  // 恰恰在依赖缺失时最要用得上。只读命令同理。
+  const gitRead = await h.call("bash", { command: "git status" })
+  assert.notEqual(gitRead?.block, true, "a read-class git command passes the gate")
+  const gitWrite = await h.call("bash", { command: "git commit" })
+  assert.notEqual(gitWrite?.block, true, "even a write-class git command passes it")
+  const readOnly = await h.call("bash", { command: "rg foo" })
+  assert.notEqual(readOnly?.block, true, "a read-class non-git command passes too")
+
+  // 包管理器即使被写在 read 列也拦：那条路就是去装依赖。
+  const pm = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { read: ["pnpm typecheck"] } } }),
+  })
+  const install = await pm.call("bash", { command: "pnpm typecheck" })
+  assert.equal(install?.block, true, "a package manager is gated even when the allowlist calls it read-only")
+  pm.restore()
 
   // 补上 .bin 之后立刻可用（目录清单有缓存，缺的那一项每轮重查）。
   mkdirSync(join(tree, "web", "node_modules", ".bin"), { recursive: true })
-  const allowed = await h.call("bash", { command: "git status" })
+  const allowed = await h.call("bash", { command: "pnpm test" })
   assert.notEqual(allowed?.block, true, "once every lockfile directory has node_modules/.bin the gate opens")
   h.restore()
   rmSync(tree, { recursive: true, force: true })
-  console.log("  ok   依赖闸门：缺 node_modules/.bin 的 lockfile 目录让 bash 直接失败，且不占任何预算")
+  console.log("  ok   依赖闸门：缺 node_modules/.bin 拦构建与包管理器，放行 git 与只读命令，且不占任何预算")
 }
 
 // 64. 闸门可以关掉：任务可能只需要读文件，装依赖本就是另一件事。
