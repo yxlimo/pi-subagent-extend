@@ -170,8 +170,13 @@ were stopped mid-task by the criterion before the reset existed.
 
 `bash.cpuStallSeconds` arms a watchdog in the helper, not in the extension, because only the helper
 can see the whole command tree: it is PID 1 of the private PID namespace, so `/proc` inside it lists
-exactly the subtree, and without a namespace it falls back to walking parent links. Either way the
-measurement is cumulative `utime + stime` across the tree, sampled every quarter of the threshold.
+the subtree plus the supervisor itself, which is excluded from the sum; without a namespace it falls
+back to walking parent links. Either way the measurement is cumulative
+`utime + stime + cutime + cstime` — the `cutime`/`cstime` halves keep the sum from dropping when a
+short-lived child is reaped, which would otherwise read as idleness and kill a working build — sampled
+at `clamp(threshold / 4, 250 ms, 1 s)`. The upper clamp matters: sampling and exit detection share the
+loop, so a period that grew with the threshold would delay every command's completion by up to that
+much (with a 90 s threshold, a `true` took 22.5 s to return before the clamp existed).
 
 A wall-clock timeout cannot distinguish the two failures this targets. A six-minute `cargo build` and
 a six-minute deadlock look identical from outside; CPU time separates them, because a compiling tree
@@ -196,9 +201,10 @@ call after it gets a status line instead: the run was stopped earlier, nothing f
 report to the parent. Re-serving the original reason is the trap — it describes the action that caused
 the stop, and a subagent that has since changed course reads it as a verdict on the new command.
 
-A stop fired by a timer is the exception that has to be handled rather than assumed: the idle,
-done-early and stall paths have no tool call to answer, and their reason goes to the session's UI
-notification, which the model never sees. So the first tool boundary after such a stop delivers the
+A stop fired by a timer is the exception that has to be handled rather than assumed: the idle and
+done-early paths have no tool call to answer, and their reason goes to the session's UI notification,
+which the model never sees. (The stall watchdog is a different mechanism entirely — it is the helper
+killing a command, so its reason arrives in that command's own result.) So the first tool boundary after such a stop delivers the
 reason, and only the ones after that get the status line. Announcing "the stop message above says why"
 when no such message was ever delivered is worse than saying nothing.
 Measured: a child stopped for repeating `ls -la …/.pnpm` moved to `ls -la docs` and was told the
