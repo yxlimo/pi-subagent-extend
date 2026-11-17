@@ -106,6 +106,14 @@ for Node, `Cargo.toml` for Rust, `go.mod` for Go, `pyproject.toml` for Python, `
 `build.gradle` for Java, and the rest of that table in `TOOLCHAINS` — with each directory resolved
 next to its manifest, so a monorepo's `packages/web/coverage` lands in the right place.
 
+The scan stops at two levels and at 200 directories, which is far above any real tree — this
+repository reaches six — and the cap exists only so a pathological one cannot make every sandboxed
+command walk thousands of entries. Its order is fixed by sorting the entries by name, because
+`readdir` order is a property of the filesystem: tmpfs returns sorted names, `ext4` with `dir_index`,
+XFS and NFS return hash order. Without the sort, which directories land inside the cap would differ
+between two machines holding the same repository, and the gate could pass in one and refuse in the
+other with nothing in the output to explain it.
+
 Two tiers keep this quiet. A directory that exists is granted; a directory the toolchain always
 creates (`target`, `__pycache__`, `_build`) is also created when missing, because the first
 `cargo test` in a fresh checkout would otherwise fail; anything merely conventional (`dist`, `.next`,

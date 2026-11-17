@@ -2485,5 +2485,31 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   依赖闸门开关没变：false 全不查，true 查全部")
 }
 
+// 缺陷：两处广度优先扫描（工具链探测、依赖闸门）都按 readdir 的顺序取前
+// DETECT_MAX_ROOTS 个目录，而这个顺序由文件系统决定 —— 这台机器上 tmpfs 给的是排序
+// 结果，ext4 的 dir_index、XFS、NFS 给的是哈希序。同一个仓库在两台机器上因此可能扫到
+// 不同的目录，闸门在一台机器上放行、在另一台上拒绝，而且没有任何日志能看出差别。
+// 磁盘上的顺序在本机造不出来（readdir 已经是有序的），所以这里钉的是比较器本身：
+// 扫描用的排序必须是字典序、且不受 locale 影响。
+{
+  const shuffled = ["mike", "alpha", "zeta", "delta", "Bravo"].map((name) => ({ name }))
+  const sorted = ext.sortByName(shuffled).map((entry) => entry.name)
+  assert.deepEqual(
+    sorted,
+    ["Bravo", "alpha", "delta", "mike", "zeta"],
+    "the scan sorts by code unit, so the same tree yields the same directories on any filesystem",
+  )
+
+  // 排序不能是 localeCompare：在 sv-SE 之类的 locale 下 "zeta" 会排到 "Bravo" 前面，
+  // 那样顺序又变成了环境依赖。
+  const pairs = ["zeta", "Bravo", "ä", "A"].map((name) => ({ name }))
+  assert.deepEqual(
+    ext.sortByName(pairs).map((entry) => entry.name),
+    ["A", "Bravo", "zeta", "ä"],
+    "sorting is not locale-sensitive",
+  )
+  console.log("  ok   扫描顺序是字典序，不随文件系统与 locale 变化")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")
