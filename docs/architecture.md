@@ -114,6 +114,13 @@ XFS and NFS return hash order. Without the sort, which directories land inside t
 between two machines holding the same repository, and the gate could pass in one and refuse in the
 other with nothing in the output to explain it.
 
+Directory symlinks are not followed. A lockfile that is itself a symlink counts as a lockfile, but a
+*package directory* reached only through a symlink is invisible to the scan. Following it would be
+wrong here rather than merely incomplete: this same walk feeds the writable set, so a link pointing
+outside the repository would widen what the sandbox may write instead of narrowing it, and cycles,
+links to enormous trees and network mounts come along for free. Real projects rarely put a lockfile
+behind such a link, and the escape is to name the directory in `bash.scratchPaths`.
+
 Two tiers keep this quiet. A directory that exists is granted; a directory the toolchain always
 creates (`target`, `__pycache__`, `_build`) is also created when missing, because the first
 `cargo test` in a fresh checkout would otherwise fail; anything merely conventional (`dist`, `.next`,
