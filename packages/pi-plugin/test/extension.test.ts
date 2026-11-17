@@ -2237,7 +2237,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "pi-subagent-extend/1": {
         scope: ["."],
         maxDenies: 1,
-        bash: { read: ["git status", "rg"], write: ["git commit", "pnpm test", "mise run test"] },
+        bash: { read: ["git status", "rg"], write: ["git commit", "pnpm test", "mise run test", "mkdir docs"] },
       },
     }),
   })
@@ -2256,6 +2256,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   // git 不受闸门管：它不需要 node_modules，而「先落任务日志再提交」的保树纪律
   // 恰恰在依赖缺失时最要用得上。只读命令同理。
+  // 判据是「写类」还是「包管理器」，不是名字里有没有 pnpm：写类但非包管理器的
+  // 构建入口（mise run test）与写类命令（mkdir）同样会对着没装好的依赖去跑。
+  const mise = await h.call("bash", { command: "mise run test" })
+  assert.equal(mise?.block, true, "a write-classified build entry is gated though it is not a package manager")
+  const mkdir = await h.call("bash", { command: "mkdir docs" })
+  assert.equal(mkdir?.block, true, "so is an ordinary write command")
+
   const gitRead = await h.call("bash", { command: "git status" })
   assert.notEqual(gitRead?.block, true, "a read-class git command passes the gate")
   const gitWrite = await h.call("bash", { command: "git commit" })
@@ -2288,10 +2295,10 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: tree,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { read: ["git status"], dependencyGate: false } },
+      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: false } },
     }),
   })
-  const out = await h.call("bash", { command: "git status" })
+  const out = await h.call("bash", { command: "pnpm test" })
   assert.notEqual(out?.block, true, "dependencyGate: false turns the gate off")
   h.restore()
   rmSync(tree, { recursive: true, force: true })
@@ -2313,7 +2320,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   依赖闸门只认 lockfile：只有 package.json 的目录不触发")
 }
 
-// 67. 包装器不能从侧面跳过闸门：`sh -c "pnpm test"`、`env pnpm test` 的载荷里是包管理器，
+// 66. 包装器不能从侧面跳过闸门：`sh -c "pnpm test"`、`env pnpm test` 的载荷里是包管理器，
 //     只看第一个词会把它们当成阅读类放过去。反过来，`rg pnpm` 是搜这个词，不该被拦。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-wrap-"))
@@ -2325,7 +2332,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-subagent-extend/1": {
         scope: ["."],
-        bash: { read: ["sh", "env", "exec", "rg"], write: ["/usr/bin/pnpm test"] },
+        bash: { read: ["sh", "env", "exec", "rg", "command"], write: ["/usr/bin/pnpm test", "env git commit"] },
       },
     }),
   })
@@ -2336,9 +2343,53 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   }
   const searching = await h.call("bash", { command: "rg pnpm" })
   assert.notEqual(searching?.block, true, "mentioning the word is not invoking it")
+  const wrappedSearch = await h.call("bash", { command: 'sh -c "rg pnpm"' })
+  assert.notEqual(wrappedSearch?.block, true, "a wrapper does not turn a search into an install")
+  const lookup = await h.call("bash", { command: "command -v pnpm" })
+  assert.notEqual(lookup?.block, true, "asking whether a tool exists is not running it")
+  const gitInWrapper = await h.call("bash", { command: "env git commit" })
+  assert.notEqual(gitInWrapper?.block, true, "the git exemption survives a wrapper")
   h.restore()
   rmSync(tree, { recursive: true, force: true })
   console.log("  ok   依赖闸门穿透包装器，但不误伤提到包管理器名字的搜索")
+}
+
+// 67. 深度要与工具链探测一致：lockfile 在第二代子目录（apps/web）里同样算依赖根。
+//     只查一代的话，标准 monorepo 与「lockfile 在 packages/* 里」的仓库完全逃过闸门。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-depth-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  mkdirSync(join(tree, "node_modules", ".bin"), { recursive: true })
+  mkdirSync(join(tree, "apps", "web"), { recursive: true })
+  writeFileSync(join(tree, "apps", "web", "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"] } } }),
+  })
+  const out = await h.call("bash", { command: "pnpm test" })
+  assert.equal(out?.block, true, "a lockfile one generation deeper is still a dependency root")
+  assert.match(String(out?.reason), /apps\/web/, "and the refusal names it")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门看两层：apps/web 这种第二代目录不会漏")
+}
+
+// 68. Yarn 2+ 的 PnP 不建 node_modules，装好的凭据是 .pnp.cjs。
+//     只认 node_modules/.bin 会把整套 PnP 仓库永久判成「没装」，每条写命令都被拒。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-pnp-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  writeFileSync(join(tree, "yarn.lock"), "")
+  writeFileSync(join(tree, ".pnp.cjs"), "// pnp\n")
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { write: ["yarn test"] } } }),
+  })
+  const out = await h.call("bash", { command: "yarn test" })
+  assert.notEqual(out?.block, true, "a PnP install counts as installed")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门认 Yarn PnP：.pnp.cjs 等于装好了")
 }
 
 rmSync(workdir, { recursive: true, force: true })
