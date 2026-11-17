@@ -29,12 +29,26 @@ import type {
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
 
-// The sandbox helper is a Rust binary built by `pnpm run build:helper` (the
-// package's pretest hook).
-const helperBin = join(repo, "bin", "pi-subagent-extend-helper")
-if (!existsSync(helperBin)) {
-  throw new Error(`missing ${helperBin}; run \`pnpm run build:helper\` first`)
+// The sandbox helper is a Rust binary. Tests execute the cargo build output and
+// never the copy in `bin/`: that copy belongs to a loaded extension, so writing to
+// it during a test run would swap the binary out from under a running session —
+// `ETXTBSY` at best, a silent behaviour change between calls at worst. An explicit
+// override wins, so a stub can be substituted; then the build output; a packaged
+// `bin/` copy is the last resort for a checkout with no Rust toolchain.
+function resolveHelperBin(): string {
+  const candidates = [
+    process.env.PI_SUBAGENT_EXTEND_HELPER?.trim(),
+    join(repo, "..", "helper", "target", "release", "pi-subagent-extend-helper"),
+    join(repo, "bin", "pi-subagent-extend-helper"),
+  ].filter((candidate): candidate is string => Boolean(candidate))
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  throw new Error(
+    "no sandbox helper found; run `cargo build --release --manifest-path packages/helper/Cargo.toml`",
+  )
 }
+const helperBin = resolveHelperBin()
 
 // These cases inspect the command the extension rewrites and the spec it writes;
 // none of them executes the helper, so the kernel's Landlock ABI only decides

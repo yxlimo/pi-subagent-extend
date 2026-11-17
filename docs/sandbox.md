@@ -13,8 +13,11 @@ An allowed command is rewritten to:
 The spec carries the resolved paths, the offline flag, the environment and the target directory.
 Two subcommands matter: `--spec` runs a command, `--describe` prints the capabilities as JSON and
 exits 0, or 76 when the kernel is not good enough. `PI_SUBAGENT_EXTEND_HELPER` overrides the
-binary path; the build is `pnpm run build:helper`, and the artifact lands in
-`packages/pi-plugin/bin/`, which is gitignored.
+binary path. `cargo build --release --manifest-path packages/helper/Cargo.toml` writes
+`packages/helper/target/release/pi-subagent-extend-helper`, which is what the tests execute;
+`pnpm run build:helper` additionally installs it as `packages/pi-plugin/bin/`, which is the path a
+loaded extension resolves and is gitignored. The two are kept apart on purpose: `bin/` belongs to
+the running extension, so a test run must not replace it.
 
 Order inside the helper: enter the namespaces → `chdir` → Landlock → drop capabilities → `exec`.
 The command runs under a supervising PID 1 (see below), never as PID 1 itself.

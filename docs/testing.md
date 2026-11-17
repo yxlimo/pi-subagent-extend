@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 50 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 62 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 
@@ -19,8 +19,15 @@ enforce the sandbox. Below Landlock ABI 7 the suite points `PI_SUBAGENT_EXTEND_H
 that answers `--describe` with ABI 7 and runs nothing, says so in its output, and the live blocks
 print `skip` — asserting on the stub's silence would test the stub, not the sandbox.
 
-Verified both ways by swapping a fake ABI 3 helper into `bin/`: three skips and green, and with the
-real helper all of them execute.
+The helper the suite executes is the cargo build output
+(`packages/helper/target/release/pi-subagent-extend-helper`), never the copy in
+`packages/pi-plugin/bin/`: that copy is what a loaded extension resolves, so a test run that wrote
+to it would replace the binary under a live session. `pretest` therefore only builds; installing
+into `bin/` is the separate `pnpm run build:helper`, and `PI_SUBAGENT_EXTEND_HELPER` overrides
+the path when a specific binary is wanted.
+
+Verified both ways through that override: a fake ABI 3 helper gives three skips and a green suite,
+and the real one executes all of them.
 
 The suites are TypeScript and are included in `tsconfig.json`, so `pnpm run typecheck` checks them
 too. That is not cosmetic: `await h.call(...)?.block` reads the property off the promise, which the
@@ -47,8 +54,9 @@ The session is isolated with `PI_CODING_AGENT_DIR` pointing at a temporary agent
 not touched. Fake `contact_supervisor` and `structured_output` tools are registered by a fixture
 (`-e` loads both it and the extension), because in a real session those come from other extensions;
 their executions are recorded as marker files, which is how "the rescue channel really ran" is
-asserted. That needs `allowTools: ["contact_supervisor"]` — the extension fails closed, so it blocks
-tools it does not know, fixture or not.
+asserted. `contact_supervisor` and `structured_output` need no `allowTools` entry: they are in the
+safe set and are always allowed. The handoff cases additionally need `allowTools: ["subagent"]`,
+because the fake `subagent` tool is not in that safe set.
 
 The six cases: a hard stop after two out-of-scope reads with no closing turn; a mixed batch where
 `contact_supervisor` runs while the same batch is refused (the case a real model cannot be relied on
