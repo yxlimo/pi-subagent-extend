@@ -755,15 +755,25 @@ const LOCKFILES = new Set([
 const PNP_MARKERS = [".pnp.cjs", ".pnp.js"];
 
 /**
- * 依赖根：cwd 往下两层里有 lockfile 的目录。
+ * 依赖根：cwd 往下两层里有 lockfile 的目录。`ignored` 里的前缀不参与。
  *
  * 不缓存。会话中途 `git checkout` 一个新增了包的分支是很常见的动作，而闸门的 `git` 豁免
  * 恰好让这个动作畅通无阻 —— 缓存会让闸门停在旧结论上。这个扫描只在闸门真正生效时跑，
  * 代价是几个 readdir。
  */
-function dependencyRoots(cwd: string): string[] {
+function dependencyRoots(cwd: string, ignored: string[]): string[] {
+	return dependencyScope(cwd, ignored).filter(hasLockfile);
+}
+
+/**
+ * 要查的目录：cwd 与它往下两层的子目录（跳过依赖/产物目录与被忽略的目录）。
+ *
+ * 被忽略的目录在遍历时就剪掉，而不是收集完再筛：一棵 fixtures 树能占满
+ * DETECT_MAX_ROOTS 的名额，把真包挤出扫描范围，闸门于是无声失效。
+ */
+function dependencyScope(cwd: string, ignored: string[]): string[] {
 	const key = resolve(cwd);
-	const found: string[] = [];
+	if (gateIgnores(cwd, ignored, key)) return [];
 	const roots = [key];
 	let frontier = [key];
 	// 与工具链探测同一个范围：cwd 往下两层，跳过依赖/产物目录。
@@ -779,6 +789,7 @@ function dependencyRoots(cwd: string): string[] {
 			for (const entry of entries) {
 				if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
 				const child = resolve(dir, entry.name);
+				if (gateIgnores(cwd, ignored, child)) continue;
 				roots.push(child);
 				next.push(child);
 				if (roots.length >= DETECT_MAX_ROOTS) break;
@@ -786,23 +797,18 @@ function dependencyRoots(cwd: string): string[] {
 		}
 		frontier = next;
 	}
+	return roots;
+}
 
-	// 收集完再遍扫：工具链探测也是这个范围（含孙目录），只查 frontier 会漏掉
-	// `apps/web/pnpm-lock.yaml` 这种标准 monorepo 布局，而文档承诺的是两层。
-	for (const dir of roots) {
-		let entries: Dirent[] = [];
-		try {
-			entries = readdirSync(dir, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-		// 软链的 lockfile 也是 lockfile（workspace 常把它链到共享文件）。
-		if (entries.some((entry) => (entry.isFile() || entry.isSymbolicLink()) && LOCKFILES.has(entry.name))) {
-			found.push(dir);
-		}
+/** 目录里有没有 lockfile。软链的也算：workspace 常把它链到共享文件。 */
+function hasLockfile(dir: string): boolean {
+	try {
+		return readdirSync(dir, { withFileTypes: true }).some(
+			(entry) => (entry.isFile() || entry.isSymbolicLink()) && LOCKFILES.has(entry.name),
+		);
+	} catch {
+		return false;
 	}
-
-	return found;
 }
 
 /**
@@ -811,10 +817,25 @@ function dependencyRoots(cwd: string): string[] {
  * 沙箱里 store 多半不可写，pnpm 于是退回一个空 store 去装，那条 WARN 埋在几百行输出里，
  * 构建则可能干脆卡在锁上 —— 与其让第一条命令莫名卡死，不如在它跑起来之前点名缺哪个目录。
  */
-function missingDependencies(cwd: string): string[] {
-	return dependencyRoots(cwd)
+function missingDependencies(cwd: string, ignored: string[]): string[] {
+	return dependencyRoots(cwd, ignored)
 		.filter((dir) => !installed(dir))
 		.map((dir) => relative(cwd, dir) || ".");
+}
+
+/**
+ * `dir` 是否落在某个被忽略的目录前缀里。
+ *
+ * 前缀按 cwd 解析，并且必须对齐目录边界：`fixtures` 忽略 fixtures 本身及其下全部，
+ * 不会连坐 `fixtures-old`。这与 scope 里写一个纯目录路径的含义一致（那也覆盖整棵子树），
+ * 但**不收 glob**：闸门的用途是「这个目录没人装依赖」，那是一处固定位置，
+ * 一条写死的路径就够；允许 `fixtures/*` 这类写法只会让「我明明忽略了它」变成调试题。
+ */
+function gateIgnores(cwd: string, ignored: string[], dir: string): boolean {
+	return ignored.some((prefix) => {
+		const rel = relative(resolve(cwd, prefix), dir);
+		return rel === "" || !(rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel));
+	});
 }
 
 /** 装好的两个凭据：`node_modules/.bin`（普通安装）或 `.pnp.cjs`（Yarn PnP）。 */
@@ -824,8 +845,8 @@ function installed(dir: string): boolean {
 }
 
 /** 闸门的拒绝文案；依赖齐了返回 undefined。 */
-function dependencyGateReason(cwd: string): string | undefined {
-	const missing = missingDependencies(cwd);
+function dependencyGateReason(cwd: string, ignored: string[]): string | undefined {
+	const missing = missingDependencies(cwd, ignored);
 	if (missing.length === 0) return undefined;
 	const shown = missing.slice(0, 3).join(", ");
 	const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : "";
@@ -896,13 +917,13 @@ function dependencyGateApplies(command: string, access: "read" | "write"): boole
 
 /** 闸门的最终判定：关掉、不适用或依赖齐全时返回 undefined。 */
 function dependencyGateVerdict(
-	rule: { dependencyGate: boolean },
+	rule: { dependencyGate: string[] | false },
 	command: string,
 	access: "read" | "write",
 	cwd: string,
 ): string | undefined {
-	if (!rule.dependencyGate || !dependencyGateApplies(command, access)) return undefined;
-	return dependencyGateReason(cwd);
+	if (rule.dependencyGate === false || !dependencyGateApplies(command, access)) return undefined;
+	return dependencyGateReason(cwd, rule.dependencyGate);
 }
 
 /**

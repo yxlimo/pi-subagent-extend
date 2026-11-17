@@ -2392,5 +2392,98 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   依赖闸门认 Yarn PnP：.pnp.cjs 等于装好了")
 }
 
+// 69. 没人安装的 lockfile 目录可以点名忽略。树上常年躺着 fixtures/ 这种样例工程、或者
+//     vendored 了一份样例仓库，一纸没人会去安装的 lockfile 于是把所有写类命令都挡了；
+//     只关整道闸门等于把真包也一起交出去。忽略的是目录前缀：按 cwd 解析、对齐目录边界，
+//     被忽略的那棵树里第一代与第二代目录都不再贡献拒绝，而名字相近的邻居不算被忽略。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-ignore-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  mkdirSync(join(tree, "node_modules", ".bin"), { recursive: true })
+  // 被忽略的样例工程：自己一层和下一代目录都有 lockfile，都没装。
+  mkdirSync(join(tree, "fixtures", "sample"), { recursive: true })
+  writeFileSync(join(tree, "fixtures", "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  writeFileSync(join(tree, "fixtures", "sample", "package-lock.json"), "{}\n")
+  // 真包：没人忽略它，它缺安装就应该继续拦。
+  mkdirSync(join(tree, "apps", "web"), { recursive: true })
+  writeFileSync(join(tree, "apps", "web", "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures"] } },
+    }),
+  })
+  const blocked = await h.call("bash", { command: "pnpm test" })
+  assert.equal(blocked?.block, true, "a directory nobody ignores still blocks the write")
+  assert.match(String(blocked?.reason), /apps\/web/, "and it is still named")
+  assert.doesNotMatch(
+    String(blocked?.reason),
+    /fixtures/,
+    "the ignored tree is not named, neither its first nor its second generation",
+  )
+
+  // 边界对齐：前缀是目录，不是字符串开头。
+  mkdirSync(join(tree, "fixtures-old"), { recursive: true })
+  writeFileSync(join(tree, "fixtures-old", "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+  const neighbour = await h.call("bash", { command: "pnpm test" })
+  assert.equal(neighbour?.block, true, "an ignored prefix does not swallow a directory that merely starts the same")
+  assert.match(String(neighbour?.reason), /fixtures-old/, "the neighbour outside the prefix is named")
+
+  // 装上真包之后，被忽略的那棵树照旧没装，写类命令应当畅通：这就是这条配置的全部意义。
+  mkdirSync(join(tree, "apps", "web", "node_modules", ".bin"), { recursive: true })
+  mkdirSync(join(tree, "fixtures-old", "node_modules", ".bin"), { recursive: true })
+  const allowed = await h.call("bash", { command: "pnpm test" })
+  assert.notEqual(allowed?.block, true, "an uninstalled ignored directory does not block a write once the real ones are installed")
+  h.restore()
+
+  // cwd 自己落在被忽略的前缀里（任务被限制在那个样例目录内）同样不查：
+  // 否则「我明明忽略了它」在别名目录上会失效。
+  const inner = await handler({
+    cwd: join(tree, "fixtures", "sample"),
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["."] } },
+    }),
+  })
+  const atCwd = await inner.call("bash", { command: "pnpm test" })
+  assert.notEqual(atCwd?.block, true, "a cwd inside the ignored prefix is not gated")
+  inner.restore()
+
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门可忽略目录前缀：忽略的树不贡献拒绝，真包照拦，cwd 同样适用")
+}
+
+// 70. 数组写法不能顺手改掉两个老含义：`false` 仍是整道闸门的开关，显式 `true` 仍是「查全部」。
+//     把 false 解析成「空清单」、或把 true 当成清单，闸门都会静默失效或静默全开。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-switch-"))
+  writeFileSync(join(tree, "package.json"), "{}")
+  writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
+
+  const bind = (gate: unknown) =>
+    JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: gate } } })
+
+  const off = await handler({ cwd: tree, bindings: bind(false) })
+  const unchecked = await off.call("bash", { command: "pnpm test" })
+  assert.notEqual(unchecked?.block, true, "false still means check nothing, not an empty ignore list")
+  off.restore()
+
+  const on = await handler({ cwd: tree, bindings: bind(true) })
+  const checked = await on.call("bash", { command: "pnpm test" })
+  assert.equal(checked?.block, true, "explicit true still checks every directory")
+  assert.match(String(checked?.reason), /node_modules\/\.bin/, "and refuses for the documented reason")
+  on.restore()
+
+  // 空清单是「不忽略任何目录」，不是「不查」：两个含义只差一个词，后果却是闸门全关。
+  const empty = await handler({ cwd: tree, bindings: bind([]) })
+  const stillChecked = await empty.call("bash", { command: "pnpm test" })
+  assert.equal(stillChecked?.block, true, "an empty ignore list still checks every directory")
+  empty.restore()
+
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   依赖闸门开关没变：false 全不查，true 查全部")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagent-extend 测试通过")

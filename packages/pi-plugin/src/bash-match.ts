@@ -41,8 +41,12 @@ export interface BashRule {
 	/**
 	 * 启动前的依赖完整性闸门（默认开）：有 lockfile 却没有 node_modules/.bin 的目录，
 	 * 让 bash 直接失败并点名，而不是让第一条构建命令在沙箱里去装依赖、然后挂住。
+	 *
+	 * 数组是「这些目录不必装」的前缀清单：树里常年躺着没人安装的 lockfile
+	 * （fixtures/、vendored 的样例工程）时，只关掉整道闸门等于把真包也一起交出去。
+	 * `false` 才是整道闸门的开关。
 	 */
-	dependencyGate: boolean;
+	dependencyGate: string[] | false;
 	/**
 	 * 是否给沙箱里的 git 注入全局排除规则（node_modules/、.pnpm-store/）。
 	 * 默认开：防止子代理 `git add -A` 把依赖目录吸进索引。
@@ -143,6 +147,6 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 		scratchPaths: cfg.scratchPaths === false ? false : stringList(cfg.scratchPaths),
 		gitExcludes: cfg.gitExcludes !== false,
 		deny: stringList(cfg.deny),
-		dependencyGate: cfg.dependencyGate !== false,
+		dependencyGate: cfg.dependencyGate === false ? false : stringList(cfg.dependencyGate),
 	};
 }
