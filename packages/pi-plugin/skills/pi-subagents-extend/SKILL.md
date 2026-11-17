@@ -1,9 +1,9 @@
 ---
-name: pi-subagent-extend
-description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope — every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). When the project declares the role in `.pi/subagent-bindings.json`, dispatch with `agent`, `model` and `task` only and let the profile carry the scope. Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping are covered by pi-subagent-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagent-extend-context.
+name: pi-subagents-extend
+description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope — every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). When the project declares the role in `.pi/subagent-bindings.json`, dispatch with `agent`, `model` and `task` only and let the profile carry the scope. Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping are covered by pi-subagents-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagents-extend-context.
 ---
 
-# pi-subagent-extend: confine a subagent to the task scope
+# pi-subagents-extend: confine a subagent to the task scope
 
 When delegating a subagent, pass the scope of this task through `extensionBindings` — unless the project declares the role in `.pi/subagent-bindings.json`, in which case the profile carries the scope and the dispatch passes only `agent`, `model` and `task` (see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time)). In the subagent's session, every tool_call outside that scope is refused (fail closed): this keeps the subagent from wandering through the repository aimlessly.
 
@@ -17,12 +17,12 @@ When delegating a subagent, pass the scope of this task through `extensionBindin
 | The subagent has to run typecheck, tests or a build itself | `bash.read` / `bash.write`, plus `writable` when the artefacts land on disk | [The bash field](#the-bash-field) |
 | The subagent runs in `worktree: true` and has to install dependencies | The project commits `.pi/worktree-setup.sh`, together with `writablePaths` / `network` | [bash in a worktree](#bash-in-a-worktree) |
 | You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | agent profile | "Profiles (per-role defaults)" below |
-| The subagent starts idling or going in circles | The other half of this package: probes | skill `pi-subagent-extend-probes` |
-| AGENTS.md mixes in rules only the main agent should see | The other half of this package: context isolation | skill `pi-subagent-extend-context` |
+| The subagent starts idling or going in circles | The other half of this package: probes | skill `pi-subagents-extend-probes` |
+| AGENTS.md mixes in rules only the main agent should see | The other half of this package: context isolation | skill `pi-subagents-extend-context` |
 
-The criteria and the stop (read-only idling, going in circles, finishing early, writing litter, colliding with permissions) are in the other skill, `pi-subagent-extend-probes`.
+The criteria and the stop (read-only idling, going in circles, finishing early, writing litter, colliding with permissions) are in the other skill, `pi-subagents-extend-probes`.
 
-Context isolation (the sections fenced by `<!-- main-agent-only:start -->` in `AGENTS.md`, and `.pi/main-only.md`) is the other half of the same package: see skill `pi-subagent-extend-context`. It is decided by the entry point declared in the agent definition and has nothing to do with bindings — no field needs to be passed for it when delegating.
+Context isolation (the sections fenced by `<!-- main-agent-only:start -->` in `AGENTS.md`, and `.pi/main-only.md`) is the other half of the same package: see skill `pi-subagents-extend-context`. It is decided by the entry point declared in the agent definition and has nothing to do with bindings — no field needs to be passed for it when delegating.
 
 The delegation rules themselves (how to write the brief, how to wait, one cwd, one writer) follow the **skill shipped with pi-subagents**; this skill only adds the layer of "how to bind the scope and the command grants to a single delegation".
 
@@ -30,14 +30,14 @@ The delegation rules themselves (how to write the brief, how to wait, one cwd, o
 
 The delegated agent must be able to load this extension. Choose one:
 
-- declare `subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts` in the agent definition's frontmatter (works for foreground and background subagents; recommended);
-- the extension is installed globally (`~/.pi/agent/extensions/pi-subagent-extend`) and this delegation sets `async: true` (only background subagents use ambient discovery).
+- declare `subagentOnlyExtensions: /path/to/pi-subagents-extend/packages/pi-plugin/src/index.ts` in the agent definition's frontmatter (works for foreground and background subagents; recommended);
+- the extension is installed globally (`~/.pi/agent/extensions/pi-subagents-extend`) and this delegation sets `async: true` (only background subagents use ambient discovery).
 
 Without the extension loaded, passing bindings does nothing: no interception happens.
 
 Under a project profile the role's loader is declared instead of the entry point: it imports the extension itself, so listing `…/src/index.ts` is not needed (see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time)).
 
-If the project uses the `<!-- main-agent-only:start -->` marker, add `, …/src/child-context.ts` to the same line, otherwise the subagent reads the main-agent-only sections (see skill `pi-subagent-extend-context`).
+If the project uses the `<!-- main-agent-only:start -->` marker, add `, …/src/child-context.ts` to the same line, otherwise the subagent reads the main-agent-only sections (see skill `pi-subagents-extend-context`).
 
 The commands in `bash.read` / `bash.write` run under the sandbox helper (the Rust binary in `packages/helper`): the file scope is enforced by Landlock, the network is off by default (all outbound TCP/UDP is cut and DNS resolution fails, but loopback works inside the sandbox, so a local server can be started and reached), and processes and capabilities are isolated as well (the host processes are invisible, the command has no capability at all). The host needs Landlock ABI 7 (Linux 6.15+); when the helper is missing or the kernel is too old, bash stays disabled (the remaining features are unaffected).
 
@@ -62,7 +62,7 @@ Reading or writing files, no commands needed:
 subagent(
   agent: "<agent-name>",
   task: "<task description>",
-  extensionBindings: { "pi-subagent-extend/1": { "scope": ["<file/directory glob>", "..."] } }
+  extensionBindings: { "pi-subagents-extend/1": { "scope": ["<file/directory glob>", "..."] } }
 )
 ```
 
@@ -73,7 +73,7 @@ subagent(
   agent: "<agent-name>",
   task: "<task description>; run typecheck afterwards and report the result",
   extensionBindings: {
-    "pi-subagent-extend/1": {
+    "pi-subagents-extend/1": {
       "scope": ["<file/directory glob>"],
       "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] }
     }
@@ -81,7 +81,7 @@ subagent(
 )
 ```
 
-The namespace is fixed at `pi-subagent-extend/1`. Pass it on every delegation, and narrow the scope to the files and directories this task actually touches; do not default to the whole repository.
+The namespace is fixed at `pi-subagents-extend/1`. Pass it on every delegation, and narrow the scope to the files and directories this task actually touches; do not default to the whole repository.
 
 The subagent runs in a worktree (`worktree: true`) and has to install dependencies or run verification:
 
@@ -91,7 +91,7 @@ subagent(
   task: "<task description>",
   options: { worktree: true },
   extensionBindings: {
-    "pi-subagent-extend/1": {
+    "pi-subagents-extend/1": {
       "scope": ["src/auth/**"],
       "bash": {
         "read": ["pnpm run typecheck"],
@@ -192,7 +192,7 @@ Adding a role takes three pieces. This repository has both of its roles wired up
 
 ```ts
 // .pi/agent-profiles/coder.ts
-import { profile } from "/home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+import { profile } from "/home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/profile.ts";
 
 export default profile("coder");
 ```
@@ -202,7 +202,7 @@ export default profile("coder");
 ```markdown
 ---
 name: coder
-subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 ---
 ```
 
@@ -293,4 +293,4 @@ Skipping silently is the most expensive failure mode here: the declaration exits
 - The sandbox blocks out-of-scope writes and networking, but not reads: running tests has to read the whole tree, so an allowlisted command can still `cat` files outside the scope inside the sandbox. Do not treat the bash allowlist as a means of locking reads down as well.
 - When the subagent reports `command not in the allowlist`, first decide whether that command is really needed for this task: if it is, add it to the matching column and dispatch again; if it is not, change the task description instead of letting it keep trying. The refusal text carries the pnpm store path and the `bash.writablePaths` hint — copy it in when the subagent has to install dependencies, instead of letting it install them itself.
 - Nested subagents do not inherit bindings: when you lock down an agent that may delegate in turn, do not also enable `allowNestedSubagents`.
-- The bindings are capped at 16 KiB in total, so keep the scope globs terse; all fields of this extension share the namespace `pi-subagent-extend/1`, and the cap applies to the whole bindings object.
+- The bindings are capped at 16 KiB in total, so keep the scope globs terse; all fields of this extension share the namespace `pi-subagents-extend/1`, and the cap applies to the whole bindings object.

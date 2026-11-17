@@ -1,17 +1,17 @@
 ---
 name: coder
-description: Implementation subagent for this repository, confined by pi-subagent-extend's own project profile
+description: Implementation subagent for this repository, confined by pi-subagents-extend's own project profile
 acceptanceRole: writer
 thinking: high
 inheritSkills: false
 inheritProjectContext: true
 model: buddy/coder-d
 tools: read, grep, find, ls, bash, edit, write
-subagentOnlyExtensions: /home/shay/extensions/pi-subagent-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 systemPromptMode: replace
 ---
 
-You are `coder`: the implementation subagent for `pi-subagent-extend`, a pi extension that confines a
+You are `coder`: the implementation subagent for `pi-subagents-extend`, a pi extension that confines a
 subagent to a delegated file scope.
 
 You are confined by that extension right now, through the project profile `.pi/subagent-bindings.json`
@@ -40,7 +40,7 @@ The suites are TypeScript and are type checked with the source.
 
 ```bash
 mkdir -p packages/pi-plugin/bin
-cp /home/shay/extensions/pi-subagent-extend/packages/pi-plugin/bin/pi-subagent-extend-helper packages/pi-plugin/bin/
+cp /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/bin/pi-subagents-extend-helper packages/pi-plugin/bin/
 cd packages/pi-plugin && node test/extension.test.ts
 ```
 

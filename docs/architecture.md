@@ -26,7 +26,7 @@ is declared there; background subagents additionally load ambient extensions.
 Two, and either can stand alone:
 
 - **Bindings**, passed by the parent on each dispatch as
-  `extensionBindings: { "pi-subagent-extend/1": { … } }`. pi-subagents encodes them into
+  `extensionBindings: { "pi-subagents-extend/1": { … } }`. pi-subagents encodes them into
   `PI_SUBAGENT_EXTENSION_BINDINGS`; the extension reads that variable once at activation, because
   it exists only until a foreground subagent's session starts and is then restored.
 - **A profile**, a per-role default declared in the project and loaded through a two-line module
@@ -367,7 +367,7 @@ come from the loading path:
 
 ```ts
 // .pi/agent-profiles/writer.ts — the path must be absolute: Node does not expand `~`
-import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+import { profile } from "/path/to/pi-subagents-extend/packages/pi-plugin/src/profile.ts";
 export default profile("writer");
 ```
 
@@ -409,9 +409,9 @@ reach the system prompt of whichever session loads the extension and nothing has
 
 | Skill | Contents |
 | --- | --- |
-| `pi-subagent-extend` | file scope, the two bash columns and `re:` patterns, the sandbox, worktree setup, profiles, a call template |
-| `pi-subagent-extend-probes` | the probe criteria, the denial budget, warn and stop semantics, how to read a report after a stop |
-| `pi-subagent-extend-context` | the markers, `.pi/main-only.md`, the three entry points |
+| `pi-subagents-extend` | file scope, the two bash columns and `re:` patterns, the sandbox, worktree setup, profiles, a call template |
+| `pi-subagents-extend-probes` | the probe criteria, the denial budget, warn and stop semantics, how to read a report after a stop |
+| `pi-subagents-extend-context` | the markers, `.pi/main-only.md`, the three entry points |
 
 pi advertises only a skill's name and description, so each description names the situations it
 covers — the routing decision rests on that line alone. A session that is already scoped does not

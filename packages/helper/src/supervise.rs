@@ -56,7 +56,7 @@ fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<
     // mounting over /proc would fail and hide nothing.
     if fresh_proc {
         if let Err(error) = crate::namespace::mount_proc() {
-            eprintln!("pi-subagent-extend-helper: {error}");
+            eprintln!("pi-subagents-extend-helper: {error}");
             unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
         }
     }
@@ -70,7 +70,7 @@ fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<
     match unsafe { libc::fork() } {
         -1 => {
             eprintln!(
-                "pi-subagent-extend-helper: cannot start the command: {}",
+                "pi-subagents-extend-helper: cannot start the command: {}",
                 std::io::Error::last_os_error()
             );
             unsafe { libc::_exit(crate::EXIT_SANDBOX_FAILED) }
@@ -85,14 +85,14 @@ fn supervisor(child_main: impl FnOnce() -> i32, fresh_proc: bool, stall: Option<
                 Some(seconds) if seconds > 0 => match wait_with_stall(pid, seconds, fresh_proc) {
                     Ok(code) => code,
                     Err(error) => {
-                        eprintln!("pi-subagent-extend-helper: {error}");
+                        eprintln!("pi-subagents-extend-helper: {error}");
                         crate::EXIT_SANDBOX_FAILED
                     }
                 },
                 _ => match wait_for(pid) {
                     Ok(status) => decode(status),
                     Err(error) => {
-                        eprintln!("pi-subagent-extend-helper: {error}");
+                        eprintln!("pi-subagents-extend-helper: {error}");
                         crate::EXIT_SANDBOX_FAILED
                     }
                 },
@@ -152,7 +152,7 @@ fn wait_with_stall(
             continue;
         }
         eprintln!(
-            "pi-subagent-extend-helper: cpu stall: the command tree used no CPU for {} s while still running; killing it (a working build would have used CPU — this is usually a lock, a socket, or an orphaned child, not a slow compile)",
+            "pi-subagents-extend-helper: cpu stall: the command tree used no CPU for {} s while still running; killing it (a working build would have used CPU — this is usually a lock, a socket, or an orphaned child, not a slow compile)",
             stall_seconds
         );
         kill_tree(pid, private_proc); // Reap what we killed so the exit status we report is ours, not a stray SIGCHLD.

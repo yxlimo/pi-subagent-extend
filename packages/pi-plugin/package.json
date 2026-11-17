@@ -1,16 +1,16 @@
 {
-  "name": "pi-subagent-extend",
+  "name": "pi-subagents-extend",
   "version": "0.1.0",
   "description": "Everything a pi session needs around subagents: scope what a delegated subagent may touch, and keep main-agent-only context out of child prompts",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yxlimo/pi-subagent-extend.git",
+    "url": "git+https://github.com/yxlimo/pi-subagents-extend.git",
     "directory": "packages/pi-plugin"
   },
-  "homepage": "https://github.com/yxlimo/pi-subagent-extend#readme",
-  "bugs": "https://github.com/yxlimo/pi-subagent-extend/issues",
+  "homepage": "https://github.com/yxlimo/pi-subagents-extend#readme",
+  "bugs": "https://github.com/yxlimo/pi-subagents-extend/issues",
   "keywords": [
     "pi",
     "pi-extension",
@@ -31,7 +31,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
-    "build:helper": "cargo build --release --manifest-path ../helper/Cargo.toml --locked && mkdir -p bin && cp ../helper/target/release/pi-subagent-extend-helper bin/.helper.new && mv -f bin/.helper.new bin/pi-subagent-extend-helper",
+    "build:helper": "cargo build --release --manifest-path ../helper/Cargo.toml --locked && mkdir -p bin && cp ../helper/target/release/pi-subagents-extend-helper bin/.helper.new && mv -f bin/.helper.new bin/pi-subagents-extend-helper",
     "pretest": "pnpm run build:helper:test",
     "build:helper:test": "cargo build --release --manifest-path ../helper/Cargo.toml --locked",
     "test": "pnpm run lint && node test/extension.test.ts && node test/context.test.ts && node test/mock-session.test.ts",

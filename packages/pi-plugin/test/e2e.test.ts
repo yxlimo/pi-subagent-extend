@@ -85,7 +85,7 @@ function makeProject({ withExtension }: { withExtension: boolean }): string {
 	writeFileSync(join(dir, ".pi", "main-only.md"), MAIN_ONLY_MD);
 	if (withExtension) {
 		mkdirSync(join(dir, ".pi", "extensions"), { recursive: true });
-		symlinkSync(PKG_DIR, join(dir, ".pi", "extensions", "pi-subagent-extend"));
+		symlinkSync(PKG_DIR, join(dir, ".pi", "extensions", "pi-subagents-extend"));
 	}
 	writeFileSync(join(dir, ".pi", "agents", "probe-fg.md"), agentDefinition("probe-fg", "read"));
 	writeFileSync(join(dir, ".pi", "agents", "probe-bg.md"), agentDefinition("probe-bg", "read, write"));
@@ -140,7 +140,7 @@ function ok(label: string): void {
 	console.log(`  ok   ${label}`);
 }
 
-console.log(`pi-subagent-extend e2e（模型 ${MODEL || "pi 默认"}）`);
+console.log(`pi-subagents-extend e2e（模型 ${MODEL || "pi 默认"}）`);
 
 const project = makeProject({ withExtension: true });
 const control = makeProject({ withExtension: false });
@@ -216,4 +216,4 @@ try {
 	}
 }
 
-console.log(`\npi-subagent-extend e2e 通过（${passed} 项）`);
+console.log(`\npi-subagents-extend e2e 通过（${passed} 项）`);

@@ -7,14 +7,14 @@ processes are already fixed.
 An allowed command is rewritten to:
 
 ```text
-<helper> --spec ~/.cache/pi-subagent-extend/spec-<pid>.json -- bash -lc '<command>'
+<helper> --spec ~/.cache/pi-subagents-extend/spec-<pid>.json -- bash -lc '<command>'
 ```
 
 The spec carries the resolved paths, the offline flag, the environment and the target directory.
 Two subcommands matter: `--spec` runs a command, `--describe` prints the capabilities as JSON and
-exits 0, or 76 when the kernel is not good enough. `PI_SUBAGENT_EXTEND_HELPER` overrides the
+exits 0, or 76 when the kernel is not good enough. `PI_SUBAGENTS_EXTEND_HELPER` overrides the
 binary path. `cargo build --release --manifest-path packages/helper/Cargo.toml` writes
-`packages/helper/target/release/pi-subagent-extend-helper`, which is what the tests execute;
+`packages/helper/target/release/pi-subagents-extend-helper`, which is what the tests execute;
 `pnpm run build:helper` additionally installs it as `packages/pi-plugin/bin/`, which is the path a
 loaded extension resolves and is gitignored. The two are kept apart on purpose: `bin/` belongs to
 the running extension, so a test run must not replace it.

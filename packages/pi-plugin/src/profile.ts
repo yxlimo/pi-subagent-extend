@@ -24,7 +24,7 @@
  *
  *      // .pi/agent-profiles/be-core.ts
  *      // The path must be absolute: Node does not expand `~` in an import specifier.
- *      import { profile } from "/path/to/pi-subagent-extend/packages/pi-plugin/src/profile.ts";
+ *      import { profile } from "/path/to/pi-subagents-extend/packages/pi-plugin/src/profile.ts";
  *      export default profile("be-core");
  *
  *   3. Declare that loader in the agent definition:
@@ -64,7 +64,7 @@ export interface ProfileOptions {
 export function profile(name: string, options: ProfileOptions = {}): (pi: ExtensionAPI) => void {
 	const trimmed = name.trim();
 	if (!trimmed) {
-		throw new Error("pi-subagent-extend/profile: profile name must not be empty");
+		throw new Error("pi-subagents-extend/profile: profile name must not be empty");
 	}
 	return (pi: ExtensionAPI) => activate(pi, { profileName: trimmed, profileFile: options.file });
 }

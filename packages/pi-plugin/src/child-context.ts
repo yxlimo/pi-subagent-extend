@@ -8,7 +8,7 @@
  *
  * agent 定义里和权限入口一起声明：
  *
- *   subagentOnlyExtensions: ~/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts, ~/extensions/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
+ *   subagentOnlyExtensions: ~/extensions/pi-subagents-extend/packages/pi-plugin/src/index.ts, ~/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -19,6 +19,6 @@ export default function (pi: ExtensionAPI) {
 		const options = event.systemPromptOptions;
 		if (!options) return;
 		const warning = unbalancedWarning(stripMarkedSections(options.contextFiles));
-		if (warning) ctx.ui?.notify?.(`pi-subagent-extend: ${warning}`, "warning");
+		if (warning) ctx.ui?.notify?.(`pi-subagents-extend: ${warning}`, "warning");
 	});
 }

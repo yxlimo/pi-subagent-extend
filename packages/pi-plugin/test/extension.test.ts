@@ -1,4 +1,4 @@
-// Offline test for the pi-subagent-extend extension.
+// Offline test for the pi-subagents-extend extension.
 //
 // Runs the extension against a fake pi API, so the scope contract can be
 // checked without a live pi session. The policy is captured when the extension
@@ -37,9 +37,9 @@ const repo = join(here, "..")
 // `bin/` copy is the last resort for a checkout with no Rust toolchain.
 function resolveHelperBin(): string {
   const candidates = [
-    process.env.PI_SUBAGENT_EXTEND_HELPER?.trim(),
-    join(repo, "..", "helper", "target", "release", "pi-subagent-extend-helper"),
-    join(repo, "bin", "pi-subagent-extend-helper"),
+    process.env.PI_SUBAGENTS_EXTEND_HELPER?.trim(),
+    join(repo, "..", "helper", "target", "release", "pi-subagents-extend-helper"),
+    join(repo, "bin", "pi-subagents-extend-helper"),
   ].filter((candidate): candidate is string => Boolean(candidate))
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
@@ -76,16 +76,16 @@ const described = helperAbi(helperBin);
 // instead of asserting on the stub's silence.
 const liveSandbox = described?.landlock?.supported === true;
 if (described?.landlock?.supported) {
-  process.env.PI_SUBAGENT_EXTEND_HELPER = helperBin
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = helperBin
 } else {
-  const stubDir = mkdtempSync(join(tmpdir(), "pi-subagent-extend-stub-"))
-  const stub = join(stubDir, "pi-subagent-extend-helper")
+  const stubDir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-stub-"))
+  const stub = join(stubDir, "pi-subagents-extend-helper")
   writeFileSync(
     stub,
     `#!/bin/sh\nprintf '%s\\n' '{"landlock":{"kernel_abi":7,"required_abi":7,"supported":true,"reason":null},"network_namespace":true,"resolver_sockets":[]}'\n`,
   )
   chmodSync(stub, 0o755)
-  process.env.PI_SUBAGENT_EXTEND_HELPER = stub
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = stub
   console.log(
     `  note  kernel Landlock ABI ${described?.landlock?.kernel_abi ?? "unknown"} is below the required 7;` +
       " the suite runs against a stub helper that reports ABI 7",
@@ -197,7 +197,7 @@ const defaultProbe = () => ({
   forbidWritePatterns: [],
 })
 
-const workdir = mkdtempSync(join(tmpdir(), "pi-subagent-extend-test-"))
+const workdir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-test-"))
 mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 1. No bindings: the extension is inert, every call passes.
@@ -214,7 +214,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/auth/**", "src/**", "README.md"], maxDenies: 0 },
+      "pi-subagents-extend/1": { scope: ["src/auth/**", "src/**", "README.md"], maxDenies: 0 },
     }),
   })
   assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "in-scope read passes")
@@ -247,7 +247,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 3. readOnly bindings block edit/write even inside the scope.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], readOnly: true } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read-only read passes")
   const edit = await h.call("edit", { path: "src/a.ts" })
@@ -259,7 +259,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 4. Explicit empty scope denies every file access.
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: [] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: [] } }) })
   const read = await h.call("read", { path: "src/a.ts" })
   assert.equal(read?.block, true, "an explicit empty scope denies reads")
   h.restore()
@@ -287,7 +287,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 7. maxReads caps successful reads.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxReads: 2 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], maxReads: 2 } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read 1 passes")
   assert.equal(await h.call("read", { path: "src/b.ts" }), undefined, "read 2 passes")
@@ -302,7 +302,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 8. allowTools opens holes for named non-executor tools.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], allowTools: ["todo_write"] } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], allowTools: ["todo_write"] } }),
   })
   assert.equal(await h.call("todo_write", { items: [] }), undefined, "allowTools entry passes")
   const executor = await h.call("bash", { command: "ls" })
@@ -313,7 +313,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 9. Search tools without an explicit path default to cwd and get judged on it.
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } }) })
   const grep = await h.call("grep", { pattern: "x" })
   assert.equal(grep?.block, true, "pathless grep (cwd) is out of scope here")
   assert.match(grep.reason, /outside (this task's |the )?(read )?scope/, "block reason teaches the scope")
@@ -346,7 +346,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   assert.deepEqual(
     names.sort(),
-    ["pi-subagent-extend", "pi-subagent-extend-context", "pi-subagent-extend-probes"],
+    ["pi-subagents-extend", "pi-subagents-extend-context", "pi-subagents-extend-probes"],
     "scope, probe and context skills",
   )
   console.log("  ok   三个用法 skill 随扩展经 resources_discover 注册")
@@ -355,7 +355,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 11. A scoped session does not advertise the delegation skill.
 {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
-  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } })
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } })
   const handlers: Record<string, EventHandler> = {}
   const api: FakeExtensionApi = {
     on(event, fn) {
@@ -379,7 +379,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: { read: ["pnpm run typecheck"], write: ["pnpm test"] },
       },
@@ -389,7 +389,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
   assert.match(
     input.command,
-    /^'\/[^']*pi-subagent-extend-helper' '--spec' '\/[^']*spec-[0-9]+\.json' '--' 'bash' '-lc'/,
+    /^'\/[^']*pi-subagents-extend-helper' '--spec' '\/[^']*spec-[0-9]+\.json' '--' 'bash' '-lc'/,
     "command is rewritten to run under the sandbox helper",
   )
   assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
@@ -424,7 +424,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 13. bash without an allowlist stays closed, with a hint about bash.read/bash.write.
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } }) })
   const denied = await h.call("bash", { command: "pnpm test" })
   assert.equal(denied?.block, true, "bash is denied when no allowlist is configured")
   assert.match(denied.reason, /bash\.read/, "denial explains how to open it")
@@ -437,7 +437,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: { write: ["node harness.mjs"], writable: true, network: true },
       },
@@ -453,17 +453,17 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
   h.restore()
 
-  const previous = process.env.PI_SUBAGENT_EXTEND_HELPER
-  process.env.PI_SUBAGENT_EXTEND_HELPER = "/nonexistent/pi-subagent-extend-helper"
+  const previous = process.env.PI_SUBAGENTS_EXTEND_HELPER
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = "/nonexistent/pi-subagents-extend-helper"
   const h2 = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["node harness.mjs"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { write: ["node harness.mjs"] } } }),
   })
   const missing = await h2.call("bash", { command: "node harness.mjs" })
   assert.equal(missing?.block, true, "no helper means no bash, even for a listed command")
   assert.match(missing.reason, /build:helper/, "the denial says how to build the helper")
   h2.restore()
-  if (previous === undefined) delete process.env.PI_SUBAGENT_EXTEND_HELPER
-  else process.env.PI_SUBAGENT_EXTEND_HELPER = previous
+  if (previous === undefined) delete process.env.PI_SUBAGENTS_EXTEND_HELPER
+  else process.env.PI_SUBAGENTS_EXTEND_HELPER = previous
   console.log("  ok   writable/network 选项写进 spec；找不到 helper 时 fail closed")
 }
 
@@ -471,7 +471,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["web/src/**", "lib/**/x.ts", "a?b", "one.ts"] },
+      "pi-subagents-extend/1": { scope: ["web/src/**", "lib/**/x.ts", "a?b", "one.ts"] },
     }),
   })
   const allowed = ["web/src/a.vue", "web/src/x/y/z.vue", "lib/x.ts", "lib/a/b/x.ts", "aXb", "one.ts"]
@@ -486,13 +486,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   h.restore()
 
   // A bare `**` means the whole tree.
-  const all = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["**"] } }) })
+  const all = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"] } }) })
   for (const path of ["README.md", "deep/dir/file.ts", "web/src/x/y.vue"]) {
     assert.equal(await all.call("ls", { path }), undefined, `"**" covers "${path}"`)
   }
   all.restore()
   // A trailing slash is just another way to write the directory.
-  const slash = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/auth/"] } }) })
+  const slash = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/auth/"] } }) })
   for (const path of ["src/auth", "src/auth/login.ts", "src/auth/a/b/c.ts"]) {
     assert.equal(await slash.call("ls", { path }), undefined, `"${path}" is inside "src/auth/"`)
   }
@@ -507,7 +507,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: { read: ["pnpm run typecheck", "re: ^tsc --noEmit$"], write: ["re: ^pnpm -r (test|build)"] },
       },
@@ -611,7 +611,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         maxDenies: 2,
         probe: { forbidWritePatterns: ["_tmp-probe", ".*\\.tmp\\.tsx"] },
@@ -667,7 +667,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } },
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } },
     }),
   })
   const commands: Outcome[] = []
@@ -698,7 +698,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: join(wt, "web"),
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: {
           write: ["pnpm install"],
@@ -738,7 +738,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 23. Missing path must not read as "the child walked to the wrong directory".
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
   })
   const write = await h.call("write", { content: "x" })
   assert.equal(write?.block, true, "write without path is refused")
@@ -764,7 +764,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: { read: ["pnpm run typecheck"], writable: true, writablePaths: ["/tmp"] },
       },
@@ -784,7 +784,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: workdir,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] }, maxDenies: 0 },
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] }, maxDenies: 0 },
     }),
   })
   const denied = await h.call("bash", { command: "pnpm install" })
@@ -801,7 +801,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: { write: ["pnpm install"], writable: true },
       },
@@ -838,17 +838,17 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     `#!/bin/sh\necho '{"landlock":{"kernel_abi":3,"required_abi":7,"supported":false,"reason":"kernel Landlock ABI is 3, but ABI 7 is required"},"network_namespace":true,"resolver_sockets":[]}'\nexit 76\n`,
   )
   chmodSync(fake, 0o755)
-  const previous = process.env.PI_SUBAGENT_EXTEND_HELPER
-  process.env.PI_SUBAGENT_EXTEND_HELPER = fake
+  const previous = process.env.PI_SUBAGENTS_EXTEND_HELPER
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = fake
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"] } } }),
   })
   const denied = await h.call("bash", { command: "pnpm test" })
   assert.equal(denied?.block, true, "an unsupported kernel denies bash")
   assert.match(denied.reason, /ABI 7 is required/, "the denial names the ABI the plugin needs")
   h.restore()
-  if (previous === undefined) delete process.env.PI_SUBAGENT_EXTEND_HELPER
-  else process.env.PI_SUBAGENT_EXTEND_HELPER = previous
+  if (previous === undefined) delete process.env.PI_SUBAGENTS_EXTEND_HELPER
+  else process.env.PI_SUBAGENTS_EXTEND_HELPER = previous
   console.log("  ok   内核 ABI 不足时 bash 被拒绝，文案说清缺的版本")
 }
 
@@ -884,7 +884,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: proj,
     profile: "impl",
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "the call's scope applies")
   const out = await h.call("read", { path: "docs/x.md" })
@@ -904,7 +904,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     cwd: proj,
     profile: "impl",
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0, bash: { read: ["pnpm test"] } },
+      "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, bash: { read: ["pnpm test"] } },
     }),
   })
   const input = { command: "pnpm test" }
@@ -927,7 +927,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     cwd: proj,
     profile: "review",
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         maxDenies: 0,
         bash: { write: ["git stash", "git checkout --"] },
@@ -975,7 +975,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 2, bash: { read: ["pnpm run typecheck"] } },
+      "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 2, bash: { read: ["pnpm run typecheck"] } },
     }),
   })
   const counted = (reason: string): boolean => /in a row|denial budget/.test(reason)
@@ -1017,7 +1017,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 34. 拿仓库根当路径时，文案要说清「这是仓库根」，而不是让人以为 scope 有错。
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } }) })
   const rootish = await h.call("grep", { pattern: "x", path: "." })
   assert.equal(rootish?.block, true, "the repository root is outside a src-only scope")
   assert.match(rootish.reason, /repository root/, "the message names what was given")
@@ -1029,7 +1029,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 35. 撞权限的缺省预算：5 次计数拒绝才 warn，第 6 次才硬停。
 //     缺省值本身就是决策（硬停判早一次就丢整轮任务），所以用行为钉住它。
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"] } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } }) })
   const verdicts: Outcome[] = []
   for (const name of ["a", "b", "c", "d", "e", "f"]) {
     verdicts.push(await h.call("read", { path: `outside/${name}.ts` }))
@@ -1091,7 +1091,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
     const bindings = (writable: boolean): string =>
       JSON.stringify({
-        "pi-subagent-extend/1": { scope: ["**"], bash: { [writable ? "write" : "read"]: ["git status"], writable } },
+        "pi-subagents-extend/1": { scope: ["**"], bash: { [writable ? "write" : "read"]: ["git status"], writable } },
       })
 
     const h = await handler({ cwd: wtDir, bindings: bindings(true) })
@@ -1126,7 +1126,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     const live = await handler({
       cwd: wtDir,
       bindings: JSON.stringify({
-        "pi-subagent-extend/1": { scope: ["**"], bash: { write: ["git add b.txt"], writable: true } },
+        "pi-subagents-extend/1": { scope: ["**"], bash: { write: ["git add b.txt"], writable: true } },
       }),
     })
     const liveInput = { command: "git add b.txt" }
@@ -1278,7 +1278,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
 
   const offlineHandler = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["**"], bash: { read: ["sh netprobe.sh"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { read: ["sh netprobe.sh"] } } }),
   })
   const input = { command: "sh netprobe.sh" }
   assert.equal(await offlineHandler.call("bash", input), undefined, "the probe is allowlisted")
@@ -1319,7 +1319,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   // 开了网络的会话不补：那时网络失败确实是环境问题。
   const onlineHandler = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["**"], bash: { read: ["sh netprobe.sh"], network: true } },
+      "pi-subagents-extend/1": { scope: ["**"], bash: { read: ["sh netprobe.sh"], network: true } },
     }),
   })
   assert.equal(
@@ -1352,7 +1352,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
 
   const bindings = JSON.stringify({
-    "pi-subagent-extend/1": { scope: ["**"], bash: { write: ["sh write.sh"], writable: true } },
+    "pi-subagents-extend/1": { scope: ["**"], bash: { write: ["sh write.sh"], writable: true } },
   })
 
   // 授权外：命令真的被内核拒掉。
@@ -1409,7 +1409,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src", "lib", ".pi/reports"], writeScope: [".pi/reports"], maxDenies: 0, maxWriteDenies: 0 },
+      "pi-subagents-extend/1": { scope: ["src", "lib", ".pi/reports"], writeScope: [".pi/reports"], maxDenies: 0, maxWriteDenies: 0 },
     }),
   })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "reading the source tree still works")
@@ -1429,13 +1429,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 42. No writeScope means write == read; an empty one means read-only writes.
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0 } }),
   })
   assert.equal(await h.call("write", { path: "src/a.ts", content: "x" }), undefined, "without writeScope, in-scope writes pass")
   h.restore()
 
   const empty = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], writeScope: [], maxDenies: 0, maxWriteDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], writeScope: [], maxDenies: 0, maxWriteDenies: 0 } }),
   })
   assert.equal(await empty.call("read", { path: "src/a.ts" }), undefined, "reads are unaffected by an empty writeScope")
   const blocked = await empty.call("write", { path: "src/a.ts", content: "x" })
@@ -1450,7 +1450,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 //     现在显式 writeScope 才是那个文件（见 79），不写才等价于空写范围。
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], readOnly: true } }),
   })
   const edit = await h.call("edit", { path: "src/a.ts", content: "x" })
   assert.equal(edit?.block, true, "readOnly without a writeScope refuses every write")
@@ -1459,7 +1459,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   h.restore()
 
   const empty = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true, writeScope: [] } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], readOnly: true, writeScope: [] } }),
   })
   const same = await empty.call("edit", { path: "src/a.ts", content: "x" })
   assert.equal(same?.block, true, "an explicit empty writeScope is the same situation")
@@ -1471,7 +1471,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], writeScope: [".pi/reports"], maxDenies: 5, maxWriteDenies: 2 },
+      "pi-subagents-extend/1": { scope: ["src/**"], writeScope: [".pi/reports"], maxDenies: 5, maxWriteDenies: 2 },
     }),
   })
   const first = await h.call("write", { path: "src/a.ts", content: "x" })
@@ -1502,7 +1502,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 45. dir/** really covers files directly under dir (the shape a report suspected).
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["lib/router/**"], maxDenies: 0, maxWriteDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["lib/router/**"], maxDenies: 0, maxWriteDenies: 0 } }),
   })
   assert.equal(await h.call("write", { path: "lib/router/stream-limits.ts", content: "x" }), undefined, "a file directly under dir/** is writable")
   assert.equal(await h.call("read", { path: "lib/router" }), undefined, "the directory itself is in scope")
@@ -1521,7 +1521,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: workdir,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**", "lib/**"],
         writeScope: ["src/**"],
         bash: { write: ["pnpm install"], writable: true },
@@ -1541,7 +1541,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 47. Build/test artefact directories are derived from what the project uses.
 {
   const bindings = (extra: Record<string, unknown>): string =>
-    JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"], writable: true, ...extra } } })
+    JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { write: ["pnpm test"], writable: true, ...extra } } })
   const grantedIn = (spec: SandboxSpec, ...parts: string[]): boolean => spec.write.some((d: string) => d.endsWith(`/${join(...parts)}`))
 
   // A Node project: the toolchain is recognised, but its output directory is not
@@ -1618,7 +1618,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: repo,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm test"], writable: true } },
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["pnpm test"], writable: true } },
     }),
   })
   const notified: string[] = []
@@ -1639,7 +1639,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   mkdirSync(outside, { recursive: true })
   symlinkSync(outside, join(dir, "src", "link"))
 
-  const narrow = await handler({ cwd: dir, bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], writeScope: ["src/**"] } }) })
+  const narrow = await handler({ cwd: dir, bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], writeScope: ["src/**"] } }) })
   const writeThrough = await narrow.call("write", { path: "src/link/evil.txt", content: "x" })
   assert.equal(writeThrough?.block, true, "a write through a symlink leaving the scope is refused")
   assert.match(writeThrough.reason, /outside the (read |write )?scope/, "and the reason is the scope, not something else")
@@ -1652,7 +1652,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   narrow.restore()
 
   // 整棵树的范围（"." / "**"）也不能把软链出口放进来。
-  const whole = await handler({ cwd: dir, bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."] } }) })
+  const whole = await handler({ cwd: dir, bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."] } }) })
   const escaped = await whole.call("write", { path: "src/link/evil2.txt", content: "x" })
   assert.equal(escaped?.block, true, "a whole-tree scope still does not follow a symlink out of the tree")
   whole.restore()
@@ -1662,7 +1662,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 52. 撞权限判据是「连续」而不是「累计」：文档、skill 与拒绝文案都这么写。
 //      中间有一次放行的调用就重新计数，否则早期的一次误判会在几十轮之后把任务判死。
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], maxDenies: 2, maxWriteDenies: 2 } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 2, maxWriteDenies: 2 } }) })
   mkdirSync(join(workdir, "src"), { recursive: true })
   writeFileSync(join(workdir, "src", "ok.ts"), "export {}\n")
 
@@ -1687,7 +1687,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 53. 绑定写坏时不能变成「全拒但永不停止」：每个调用都被拒却永远不计满，子代理会磨到超时。
 //      预算改成缺省值之后，拒几次就硬停，真实原因留在拒绝文案里。
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": {} }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": {} }) })
   const first = await h.call("read", { path: "src/a.ts" })
   assert.equal(first?.block, true, "a broken binding refuses everything")
   assert.match(first.reason, /scope is missing/i, "and the reason names what is wrong with the binding")
@@ -1736,7 +1736,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     const out = await runLive(
       dir,
       JSON.stringify({
-        "pi-subagent-extend/1": { scope: ["src/**"], bash: { write: ["cargo test"], writable: true } },
+        "pi-subagents-extend/1": { scope: ["src/**"], bash: { write: ["cargo test"], writable: true } },
       }),
       "cargo test --offline",
     )
@@ -1764,13 +1764,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     const out = await runLive(
       dir,
       JSON.stringify({
-        "pi-subagent-extend/1": { scope: ["*.go"], bash: { write: ["go test"], writable: true } },
+        "pi-subagents-extend/1": { scope: ["*.go"], bash: { write: ["go test"], writable: true } },
       }),
       "go test ./...",
     )
     if (out) {
       assert.equal(out.status, 0, `sandboxed go test failed: ${out.stderr}`)
-      assert.ok(existsSync(join(homedir(), ".cache", "pi-subagent-extend", "xdg-cache")), "the build cache lives in ~/.cache")
+      assert.ok(existsSync(join(homedir(), ".cache", "pi-subagents-extend", "xdg-cache")), "the build cache lives in ~/.cache")
     } else {
       console.log("  skip  live go test: no real sandbox on this kernel")
     }
@@ -1782,7 +1782,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], writeScope: [".pi/reports"], maxDenies: 0, maxWriteDenies: 0 },
+      "pi-subagents-extend/1": { scope: ["."], writeScope: [".pi/reports"], maxDenies: 0, maxWriteDenies: 0 },
     }),
   })
   // 仓库根 + 嵌套文件都要能读：`compile` 曾经把 "." 编译成 ^\.$ / ^\./.*$，
@@ -1800,7 +1800,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   // 同一个坑的另一种写法：带 "./" 前缀的条目曾经也一条都不命中。
   const dotted = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["./src/**"], maxDenies: 0, maxWriteDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["./src/**"], maxDenies: 0, maxWriteDenies: 0 } }),
   })
   assert.equal(await dotted.call("read", { path: "src/auth/login.ts" }), undefined, "a scope written './src/**' covers src/**")
   const outside = await dotted.call("read", { path: "docs/x.md" })
@@ -1815,7 +1815,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["python3", "echo", "node"] } },
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["python3", "echo", "node"] } },
     }),
   })
   const allowed = async (command: string, why: string): Promise<void> => {
@@ -1853,7 +1853,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["src/**"],
         bash: { read: ["node test/x.ts"], write: ["pnpm run fix"] },
       },
@@ -1933,7 +1933,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       const h = await handler({
         cwd: wtDir,
         bindings: JSON.stringify({
-          "pi-subagent-extend/1": {
+          "pi-subagents-extend/1": {
             scope: ["**"],
             writeScope: ["planted"],
             bash: { write: ["git add b.txt", "sh write.sh"], writable: true },
@@ -2005,7 +2005,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
     const bindingsFor = (writeScope: string[]): string =>
       JSON.stringify({
-        "pi-subagent-extend/1": { scope: ["src/**"], writeScope, bash: { write: ["sh write.sh"], writable: true } },
+        "pi-subagents-extend/1": { scope: ["src/**"], writeScope, bash: { write: ["sh write.sh"], writable: true } },
       })
     const sandboxed = async (h: Harness, command: string): Promise<string> => {
       const input = { command }
@@ -2075,7 +2075,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   mkdirSync(scratch, { recursive: true })
   process.env.TMPDIR = scratch
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } } }),
   })
   const input = { command: "pnpm run typecheck" }
   assert.equal(await h.call("bash", input), undefined, "a listed command still passes with a custom TMPDIR")
@@ -2095,7 +2095,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   // 仍能被旧版 helper 解开（它的 spec 解析是 deny_unknown_fields）。
   delete process.env.TMPDIR
   const plain = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["pnpm run typecheck"] } } }),
   })
   const plainInput = { command: "pnpm run typecheck" }
   assert.equal(await plain.call("bash", plainInput), undefined, "listed command passes")
@@ -2114,7 +2114,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 //     而不是去求援。旧实现把它交给 bail（授权预算）：第 5 次才 warn、第 6 次才停，
 //     文案还让子代理 contact_supervisor —— 与 writeScope: [] 的行为和文档里的「等价」不符。
 {
-  const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }) })
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], readOnly: true } }) })
   const first = await h.call("write", { path: "src/a.ts", content: "x" })
   assert.equal(first?.block, true, "a readOnly write is refused")
   assert.match(first.reason, /no write grant/, "the refusal says there is no write grant")
@@ -2144,7 +2144,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   // 判别式：授权预算压到 1。若 readOnly 写拒记在授权预算上，第一次就会 warn、第二次就硬停。
   const narrow = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true, maxDenies: 1 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], readOnly: true, maxDenies: 1 } }),
   })
   const one = await narrow.call("edit", { path: "src/a.ts", content: "x" })
   assert.equal(one?.block, true, "a readOnly edit is refused")
@@ -2163,7 +2163,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git commit"], writable: true } },
+      "pi-subagents-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git commit"], writable: true } },
     }),
   })
   // 授权外的路径不能用 /tmp 下的：spec.write 天然包含 tmpdir()，那里会被判成「授权内」，
@@ -2182,7 +2182,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git commit"], writable: true } },
+      "pi-subagents-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git commit"], writable: true } },
     }),
   })
   const target = `/var/tmp/pi-extend-${process.pid}/hooks/pre-commit`
@@ -2209,7 +2209,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git diff", "cat"], writable: true } },
+      "pi-subagents-extend/1": { scope: ["**"], writeScope: ["src"], bash: { write: ["git diff", "cat"], writable: true } },
     }),
   })
   const outside = `/var/tmp/pi-extend-${process.pid}/outside.txt`
@@ -2241,7 +2241,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 //     代价是每个目录一次 readdir；换来的是第一条构建命令不会在沙箱里自己去装依赖然后卡住。
 //     计数归属：它拒的是环境，不是授权 —— 重试也不会变好，所以不进任何预算。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-"))
   writeFileSync(join(tree, "package.json"), "{}")
   writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
   mkdirSync(join(tree, "web"), { recursive: true })
@@ -2251,7 +2251,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: tree,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["."],
         maxDenies: 1,
         bash: { read: ["git status", "rg"], write: ["git commit", "pnpm test", "mise run test", "mkdir docs"] },
@@ -2290,7 +2290,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   // 包管理器即使被写在 read 列也拦：那条路就是去装依赖。
   const pm = await handler({
     cwd: tree,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { read: ["pnpm typecheck"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm typecheck"] } } }),
   })
   const install = await pm.call("bash", { command: "pnpm typecheck" })
   assert.equal(install?.block, true, "a package manager is gated even when the allowlist calls it read-only")
@@ -2307,12 +2307,12 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 64. 闸门可以关掉：任务可能只需要读文件，装依赖本就是另一件事。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-off-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-off-"))
   writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
   const h = await handler({
     cwd: tree,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: false } },
+      "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: false } },
     }),
   })
   const out = await h.call("bash", { command: "pnpm test" })
@@ -2324,11 +2324,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 65. 只有 package.json 的目录不算依赖根：那可能只是个配置包，永远不会装依赖。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-nolock-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-nolock-"))
   writeFileSync(join(tree, "package.json"), "{}")
   const h = await handler({
     cwd: tree,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { read: ["git status"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["git status"] } } }),
   })
   const out = await h.call("bash", { command: "git status" })
   assert.notEqual(out?.block, true, "no lockfile means no dependency root, so the gate stays out of the way")
@@ -2340,14 +2340,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 66. 包装器不能从侧面跳过闸门：`sh -c "pnpm test"`、`env pnpm test` 的载荷里是包管理器，
 //     只看第一个词会把它们当成阅读类放过去。反过来，`rg pnpm` 是搜这个词，不该被拦。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-wrap-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-wrap-"))
   writeFileSync(join(tree, "package.json"), "{}")
   writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
 
   const h = await handler({
     cwd: tree,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["."],
         bash: { read: ["sh", "env", "exec", "rg", "command"], write: ["/usr/bin/pnpm test", "env git commit"] },
       },
@@ -2374,14 +2374,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 67. 深度要与工具链探测一致：lockfile 在第二代子目录（apps/web）里同样算依赖根。
 //     只查一代的话，标准 monorepo 与「lockfile 在 packages/* 里」的仓库完全逃过闸门。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-depth-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-depth-"))
   writeFileSync(join(tree, "package.json"), "{}")
   mkdirSync(join(tree, "node_modules", ".bin"), { recursive: true })
   mkdirSync(join(tree, "apps", "web"), { recursive: true })
   writeFileSync(join(tree, "apps", "web", "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
   const h = await handler({
     cwd: tree,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"] } } }),
   })
   const out = await h.call("bash", { command: "pnpm test" })
   assert.equal(out?.block, true, "a lockfile one generation deeper is still a dependency root")
@@ -2394,13 +2394,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 68. Yarn 2+ 的 PnP 不建 node_modules，装好的凭据是 .pnp.cjs。
 //     只认 node_modules/.bin 会把整套 PnP 仓库永久判成「没装」，每条写命令都被拒。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-pnp-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-pnp-"))
   writeFileSync(join(tree, "package.json"), "{}")
   writeFileSync(join(tree, "yarn.lock"), "")
   writeFileSync(join(tree, ".pnp.cjs"), "// pnp\n")
   const h = await handler({
     cwd: tree,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { write: ["yarn test"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { write: ["yarn test"] } } }),
   })
   const out = await h.call("bash", { command: "yarn test" })
   assert.notEqual(out?.block, true, "a PnP install counts as installed")
@@ -2414,7 +2414,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 //     只关整道闸门等于把真包也一起交出去。忽略的是目录前缀：按 cwd 解析、对齐目录边界，
 //     被忽略的那棵树里第一代与第二代目录都不再贡献拒绝，而名字相近的邻居不算被忽略。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-ignore-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-ignore-"))
   writeFileSync(join(tree, "package.json"), "{}")
   writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
   mkdirSync(join(tree, "node_modules", ".bin"), { recursive: true })
@@ -2429,7 +2429,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: tree,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures"] } },
+      "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures"] } },
     }),
   })
   const blocked = await h.call("bash", { command: "pnpm test" })
@@ -2460,7 +2460,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const inner = await handler({
     cwd: join(tree, "fixtures", "sample"),
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: [join(tree, "fixtures")] } },
+      "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: [join(tree, "fixtures")] } },
     }),
   })
   const atCwd = await inner.call("bash", { command: "pnpm test" })
@@ -2472,7 +2472,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const relInner = await handler({
     cwd: join(tree, "fixtures", "sample"),
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures"] } },
+      "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures"] } },
     }),
   })
   const relCwd = await relInner.call("bash", { command: "pnpm test" })
@@ -2495,7 +2495,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   // 25 × 10 = 250 个第二代目录，加树根与 25 个第一代目录共 276 个候选名额，上限 200。
   // 直接测扫描结果本身：内层 break 只退出当前目录，外层若不断，frontier 里剩下的每个
   // 第一代目录还会各推一个 b0 进来，总数会变成 207 而不是 200。
-  const wide = mkdtempSync(join(tmpdir(), "pi-subagent-extend-cap-"))
+  const wide = mkdtempSync(join(tmpdir(), "pi-subagents-extend-cap-"))
   for (let a = 0; a < 25; a += 1) {
     for (let b = 0; b < 10; b += 1) mkdirSync(join(wide, `a${String(a).padStart(2, "0")}`, `b${b}`), { recursive: true })
   }
@@ -2507,14 +2507,14 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   // glob 写成忽略项：闸门照旧拒绝，但文案要点名它匹配不到任何目录。
   // 必须是「有 lockfile、没装依赖」的目录，闸门才会真的拒绝并给出提示。
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-glob-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-glob-"))
   mkdirSync(join(tree, "fixtures"), { recursive: true })
   writeFileSync(join(tree, "fixtures", "package.json"), "{}")
   writeFileSync(join(tree, "fixtures", "pnpm-lock.yaml"), "lockfileVersion: 9\n")
   const globH = await handler({
     cwd: tree,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures/*"] } },
+      "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: ["fixtures/*"] } },
     }),
   })
   const globbed = await globH.call("bash", { command: "pnpm test" })
@@ -2529,12 +2529,12 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 70. 数组写法不能顺手改掉两个老含义：`false` 仍是整道闸门的开关，显式 `true` 仍是「查全部」。
 //     把 false 解析成「空清单」、或把 true 当成清单，闸门都会静默失效或静默全开。
 {
-  const tree = mkdtempSync(join(tmpdir(), "pi-subagent-extend-deps-switch-"))
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deps-switch-"))
   writeFileSync(join(tree, "package.json"), "{}")
   writeFileSync(join(tree, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n")
 
   const bind = (gate: unknown) =>
-    JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: gate } } })
+    JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { write: ["pnpm test"], dependencyGate: gate } } })
 
   const off = await handler({ cwd: tree, bindings: bind(false) })
   const unchecked = await off.call("bash", { command: "pnpm test" })
@@ -2676,7 +2676,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const armed = await handler({
     cwd: workdir,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: [workdir], bash: { write: ["node"], cpuStallSeconds: 90 } },
+      "pi-subagents-extend/1": { scope: [workdir], bash: { write: ["node"], cpuStallSeconds: 90 } },
     }),
   })
   const armedInput = { command: "node build.mjs" }
@@ -2686,7 +2686,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const plain = await handler({
     cwd: workdir,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: [workdir], bash: { write: ["node"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: [workdir], bash: { write: ["node"] } } }),
   })
   const plainInput = { command: "node build.mjs" }
   await plain.call("bash", plainInput)
@@ -2698,7 +2698,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   plain.restore()
 
   const { cpuStallNote } = await import(join(repo, "src", "sandbox-note.ts"))
-  const killed = "pi-subagent-extend-helper: cpu stall: the command tree used no CPU for 90 s while still running; killing it"
+  const killed = "pi-subagents-extend-helper: cpu stall: the command tree used no CPU for 90 s while still running; killing it"
   assert.match(String(cpuStallNote(killed)), /no CPU for 90 s/, "the note carries what the helper measured")
   assert.match(String(cpuStallNote(killed)), /Retrying stalls the same way/, "and says a retry will not help")
   assert.equal(cpuStallNote("FAIL src/app.test.ts > adds numbers"), undefined, "an ordinary test failure is left alone")
@@ -2811,7 +2811,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({
     cwd: workdir,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": {
+      "pi-subagents-extend/1": {
         scope: ["."],
         readOnly: true,
         writeScope: [report],
@@ -2842,7 +2842,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
   const rel = await handler({
     cwd: workdir,
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], maxDenies: 0, maxWriteDenies: 0 } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], maxDenies: 0, maxWriteDenies: 0 } }),
   })
   const escaped = await rel.call("write", { path: outside, content: "x" })
   assert.equal(escaped?.block, true, "a relative scope never reaches outside the tree")
@@ -2851,7 +2851,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const abs = await handler({
     cwd: workdir,
     bindings: JSON.stringify({
-      "pi-subagent-extend/1": { scope: ["."], writeScope: [outsideDir], maxDenies: 0, maxWriteDenies: 0 },
+      "pi-subagents-extend/1": { scope: ["."], writeScope: [outsideDir], maxDenies: 0, maxWriteDenies: 0 },
     }),
   })
   assert.equal(await abs.call("write", { path: outside, content: "x" }), undefined, "an absolute grant is honoured")
@@ -2863,4 +2863,4 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 }
 
 rmSync(workdir, { recursive: true, force: true })
-console.log("\npi-subagent-extend 测试通过")
+console.log("\npi-subagents-extend 测试通过")

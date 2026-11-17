@@ -43,7 +43,7 @@ export const DEFAULT_PROBE: ProbeConfig = {
  * 仍是那条点名 .pnpm 的旧文案。#stopNotice 与 index.ts 的硬停共用这句。
  */
 export const STOP_NOTICE =
-	"pi-subagent-extend: this run stops here — it was stopped earlier and nothing further will execute (the stop message above says why). Report to the parent with contact_supervisor.";
+	"pi-subagents-extend: this run stops here — it was stopped earlier and nothing further will execute (the stop message above says why). Report to the parent with contact_supervisor.";
 
 export interface ProbeEvent {
 	/** 命中判据时给模型看的文案。 */
@@ -147,7 +147,7 @@ function matchesAny(patterns: string[], text: string): string | undefined {
 
 export interface ProbeDeps {
 	config: ProbeConfig;
-	/** 只读任务（pi-subagent-extend 的 readOnly）：跳过判据 1 与 3。 */
+	/** 只读任务（pi-subagents-extend 的 readOnly）：跳过判据 1 与 3。 */
 	readOnly: boolean;
 	hooks: ProbeHooks;
 	host?: ProbeHost;
@@ -306,7 +306,7 @@ export class Probe {
 			if (p.re.test(path)) {
 				return {
 					reason:
-						`pi-subagent-extend: refusing to write "${path}" into the repo (criterion: junk files, matched "` +
+						`pi-subagents-extend: refusing to write "${path}" into the repo (criterion: junk files, matched "` +
 						`${p.source}"); put debug and temp files under /tmp.`,
 					stop: false,
 				};

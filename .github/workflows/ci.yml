@@ -132,7 +132,7 @@ jobs:
           spec=$(mktemp)
           printf '%s' '{"read":["/"],"write":["/tmp"],' >"$spec"
           printf '%s' '"offline":true,"env":{}}' >>"$spec"
-          helper=packages/helper/target/release/pi-subagent-extend-helper
+          helper=packages/helper/target/release/pi-subagents-extend-helper
           # Capture the status instead of letting `set -e` abort the step: the
           # helper's own message is the thing worth printing.
           set +e

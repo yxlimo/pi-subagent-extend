@@ -1,5 +1,5 @@
 ---
-name: pi-subagent-extend-context
+name: pi-subagents-extend-context
 description: When delegating a subagent, use it to keep main-agent-only content out of the subagent's prompt — the sections fenced by <!-- main-agent-only:start --> in AGENTS.md are invisible to the subagent, and main-agent-only rules go in .pi/main-only.md, which is injected into the main session only. Use it when AGENTS.md mixes in delegation discipline, waiting policy, reporting conventions or main-agent-only write-permission boundaries that a subagent would read as wasted context and mistake for its own duties. Covers the division of labour of the three entry points, how to write the markers, the fallback when a marker is left unclosed, and the trade-off against the all-or-nothing inheritProjectContext switch.
 ---
 
@@ -9,9 +9,9 @@ description: When delegating a subagent, use it to keep main-agent-only content 
 
 This skill solves that: **the main agent sees everything, a subagent sees the version with the main-agent-only parts removed.**
 
-The file scope and the bash allowlist are in `pi-subagent-extend`, the probe criteria are in `pi-subagent-extend-probes`. The three are independent, so you can use only one of them.
+The file scope and the bash allowlist are in `pi-subagents-extend`, the probe criteria are in `pi-subagents-extend-probes`. The three are independent, so you can use only one of them.
 
-A subagent installing dependencies in a `worktree` is a separate matter (`worktreeSetupHook`), also covered by `pi-subagent-extend`.
+A subagent installing dependencies in a `worktree` is a separate matter (`worktreeSetupHook`), also covered by `pi-subagents-extend`.
 
 ## When to use it: who this content belongs to
 
@@ -77,7 +77,7 @@ Three entry points are wrapped, and they are loaded differently, **so do not dec
 In the agent definition both paths go on one line:
 
 ```yaml
-subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, /path/to/pi-subagent-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /path/to/pi-subagents-extend/packages/pi-plugin/src/index.ts, /path/to/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 ```
 
 Why split into two files instead of one: **a foreground subagent cannot be distinguished from the main session within the process**. A foreground subagent is a session in the same process without `PI_SUBAGENT_CHILD`, with an environment identical to the main session's; a background subagent is a separate process and has that variable. So the "main-agent-only" logic can only determine its audience by the loading path, not by a runtime check. The `PI_SUBAGENT_CHILD === "1"` in `main-context.ts` exists to hold back background subagents — that file is also loaded by ambient loading, otherwise it would leak.
