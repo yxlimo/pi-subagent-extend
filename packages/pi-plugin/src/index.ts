@@ -687,6 +687,33 @@ const DETECT_MAX_ROOTS = 200;
 const scratchDirsCache = new Map<string, { dir: string; primary: boolean }[]>();
 
 /** 探测结果按 cwd 缓存：bash 白名单命令会反复拼 spec。 */
+/**
+ * 按名字排序（纯函数，供 `sortedEntries` 与测试使用）。用字典序而不是 localeCompare：
+ * 后者的结果依赖运行时的 locale，那正好是排序要消除的那类不确定性。
+ */
+export function sortByName<T extends { name: string }>(entries: T[]): T[] {
+	return entries.sort((a, b) => {
+		if (a.name === b.name) return 0;
+		return a.name < b.name ? -1 : 1;
+	});
+}
+
+/**
+ * 目录项按名字排序后返回；读不了就当作空目录。
+ *
+ * readdir 的顺序由文件系统决定：这台机器上 tmpfs 给的是排序结果，而 ext4 的 dir_index、
+ * XFS、NFS 给的是哈希序。扫描有 DETECT_MAX_ROOTS 的名额上限，顺序不定就意味着
+ * 「哪些目录被检查、被授权」随机器而变 —— 闸门可能在一台机器上放行、在另一台上拒绝。
+ * 排序把这个不确定性按死。
+ */
+export function sortedEntries(dir: string): Dirent[] {
+	try {
+		return sortByName(readdirSync(dir, { withFileTypes: true }));
+	} catch {
+		return [];
+	}
+}
+
 function detectScratchDirs(cwd: string): { dir: string; primary: boolean }[] {
 	const key = resolve(cwd);
 	const cached = scratchDirsCache.get(key);
@@ -699,17 +726,14 @@ function detectScratchDirs(cwd: string): { dir: string; primary: boolean }[] {
 	for (let depth = 0; depth < 2 && roots.length < DETECT_MAX_ROOTS; depth += 1) {
 		const next: string[] = [];
 		for (const dir of frontier) {
-			try {
-				for (const entry of readdirSync(dir, { withFileTypes: true })) {
-					if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
-					const child = resolve(dir, entry.name);
-					roots.push(child);
-					next.push(child);
-					if (roots.length >= DETECT_MAX_ROOTS) break;
-				}
-			} catch {
-				// 读不了就跳过这一支。
+			for (const entry of sortedEntries(dir)) {
+				if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
+				const child = resolve(dir, entry.name);
+				roots.push(child);
+				next.push(child);
+				if (roots.length >= DETECT_MAX_ROOTS) break;
 			}
+			if (roots.length >= DETECT_MAX_ROOTS) break;
 		}
 		frontier = next;
 	}
@@ -780,13 +804,7 @@ function dependencyScope(cwd: string, ignored: string[]): string[] {
 	for (let depth = 0; depth < 2 && roots.length < DETECT_MAX_ROOTS; depth += 1) {
 		const next: string[] = [];
 		for (const dir of frontier) {
-			let entries: Dirent[] = [];
-			try {
-				entries = readdirSync(dir, { withFileTypes: true });
-			} catch {
-				continue;
-			}
-			for (const entry of entries) {
+			for (const entry of sortedEntries(dir)) {
 				if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
 				const child = resolve(dir, entry.name);
 				if (gateIgnores(cwd, ignored, child)) continue;
