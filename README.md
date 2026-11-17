@@ -100,6 +100,10 @@ restriction at all. A project can instead declare per-role defaults once, in
 stricter side: a call overrides a profile per key, except `bash.deny`, which no caller can
 relax. See [architecture](docs/architecture.md#agent-profiles).
 
+A dispatch to a role that has a profile passes only `agent`, `model` and `task`; the delegation
+side of that — and the three pieces a new role needs — is in the usage skill
+[`pi-subagent-extend`](packages/pi-plugin/skills/pi-subagent-extend/SKILL.md#call-template).
+
 ## Documentation
 
 | Document | Contents |

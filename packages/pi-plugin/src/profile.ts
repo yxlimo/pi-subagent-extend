@@ -29,7 +29,11 @@
  *
  *   3. Declare that loader in the agent definition:
  *
- *      subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts, <project>/.pi/agent-profiles/be-core.ts
+ *      subagentOnlyExtensions: <project>/.pi/agent-profiles/be-core.ts
+ *
+ *      The loader is also the entry point: it calls `activate()` itself. Listing
+ *      `src/index.ts` beside it works but is redundant — the copy loaded without a
+ *      profile name stays inactive and passes every call through.
  *
  * Merge rules: the call's `extensionBindings` keys override the profile's keys
  * (`bash` is replaced as a whole object), except `bash.deny` which is unioned — a deny
