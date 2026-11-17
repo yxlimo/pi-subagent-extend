@@ -252,7 +252,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "read-only read passes")
   const edit = await h.call("edit", { path: "src/a.ts" })
   assert.equal(edit?.block, true, "read-only edit is blocked")
-  assert.match(edit.reason, /read-only/, "block reason says read-only")
+  assert.match(edit.reason, /no write grant/, "block reason says there is no write grant")
   h.restore()
   console.log("  ok   readOnly 时范围内也禁止 edit/write")
 }
@@ -1445,16 +1445,26 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   writeScope 缺省等于 scope；空数组等于只读")
 }
 
-// 43. readOnly wins over writeScope.
+// 43. readOnly with no writeScope is read-only; writeScope: [] is the same thing.
+//     早先这里钉的是「readOnly 压过 writeScope」，于是「只读会话 + 一份报告文件」无法表达。
+//     现在显式 writeScope 才是那个文件（见 79），不写才等价于空写范围。
 {
   const h = await handler({
-    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], writeScope: ["src/**"], readOnly: true } }),
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }),
   })
   const edit = await h.call("edit", { path: "src/a.ts", content: "x" })
-  assert.equal(edit?.block, true, "readOnly refuses the write even with a matching writeScope")
-  assert.match(edit.reason, /read-only/, "and says the session is read-only")
+  assert.equal(edit?.block, true, "readOnly without a writeScope refuses every write")
+  assert.match(edit.reason, /no write grant/, "and says there is none")
+  assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "reads still work")
   h.restore()
-  console.log("  ok   readOnly 压过 writeScope")
+
+  const empty = await handler({
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true, writeScope: [] } }),
+  })
+  const same = await empty.call("edit", { path: "src/a.ts", content: "x" })
+  assert.equal(same?.block, true, "an explicit empty writeScope is the same situation")
+  empty.restore()
+  console.log("  ok   readOnly 不写 writeScope 就是只读；显式写才放行（见 79）")
 }
 
 // 44. Write refusals have their own budget: misuse must not become a grant error.
@@ -2107,7 +2117,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const h = await handler({ bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["src/**"], readOnly: true } }) })
   const first = await h.call("write", { path: "src/a.ts", content: "x" })
   assert.equal(first?.block, true, "a readOnly write is refused")
-  assert.match(first.reason, /read-only/, "the refusal says the session is read-only")
+  assert.match(first.reason, /no write grant/, "the refusal says there is no write grant")
   assert.equal(first.terminate, undefined, "the first refusal neither warns nor stops")
 
   // 计数归属直接看 /permission：写拒 1 次，读拒仍是 0 次。
@@ -2735,6 +2745,66 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(parseBashRule({ read: ["x"], cpuStallSeconds: "60" })?.cpuStallSeconds, false, "a string is not a number either")
   assert.equal(parseBashRule({ read: ["x"], cpuStallSeconds: 1.9 })?.cpuStallSeconds, 1, "a fraction above 1 floors")
   console.log("  ok   看门狗阈值只接受正数字：0.5 与 true 都是关，不会变成 0 或 1")
+}
+
+// 79. A read-only session can still be granted exactly one file to write.
+//     缺陷：`readOnly` 无条件把写范围清空，于是「只读会话 + 一份报告文件」无法表达，review
+//     子代理只能把报告塞进回复里（会超）。现在显式 writeScope 优先于 readOnly 的默认空集。
+{
+  const reportDir = mkdtempSync(join(tmpdir(), "pisw-"))
+  const report = join(reportDir, "report.md")
+  const h = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": {
+        scope: ["."],
+        readOnly: true,
+        writeScope: [report],
+        maxDenies: 0,
+        maxWriteDenies: 0,
+      },
+    }),
+  })
+  assert.equal(await h.call("write", { path: report, content: "x" }), undefined, "the granted report file is writable")
+  assert.equal(await h.call("edit", { path: report }), undefined, "and so is editing it")
+  const other = await h.call("write", { path: join(reportDir, "other.md"), content: "x" })
+  assert.equal(other?.block, true, "a sibling file in the same directory is not")
+  const inTree = await h.call("write", { path: join(workdir, "src", "a.ts"), content: "x" })
+  assert.equal(inTree?.block, true, "and neither is the task tree — readOnly still means read-only")
+  // 报告仍是交付物，不是修改任务树：读、跑只读命令照常。
+  assert.equal(await h.call("read", { path: join(workdir, "src", "a.ts") }), undefined, "reads are unaffected")
+  h.restore()
+  rmSync(reportDir, { recursive: true, force: true })
+  console.log("  ok   readOnly + writeScope：只放行点名的那一个文件，任务树仍然只读")
+}
+
+// 80. An absolute grant is honoured; a relative one still cannot leave the tree.
+//     相对授权绑在项目树上（`matches` 里「落在工作树之外一律不认」是软链逃逸的唯一防线）。
+//     绝对路径是父代理点名的，子代理无法自己构造，所以单独放行 —— 但相对写法一条都不能出树。
+{
+  const outsideDir = mkdtempSync(join(tmpdir(), "pisw2-"))
+  const outside = join(outsideDir, "note.md")
+
+  const rel = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagent-extend/1": { scope: ["."], maxDenies: 0, maxWriteDenies: 0 } }),
+  })
+  const escaped = await rel.call("write", { path: outside, content: "x" })
+  assert.equal(escaped?.block, true, "a relative scope never reaches outside the tree")
+  rel.restore()
+
+  const abs = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({
+      "pi-subagent-extend/1": { scope: ["."], writeScope: [outsideDir], maxDenies: 0, maxWriteDenies: 0 },
+    }),
+  })
+  assert.equal(await abs.call("write", { path: outside, content: "x" }), undefined, "an absolute grant is honoured")
+  const sibling = await abs.call("write", { path: join(tmpdir(), "elsewhere.md"), content: "x" })
+  assert.equal(sibling?.block, true, "but it covers only what it names")
+  abs.restore()
+  rmSync(outsideDir, { recursive: true, force: true })
+  console.log("  ok   绝对写授权按绝对路径放行，相对授权仍然出不了树")
 }
 
 rmSync(workdir, { recursive: true, force: true })
