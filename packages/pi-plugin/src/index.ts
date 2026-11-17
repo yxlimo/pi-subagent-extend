@@ -739,6 +739,70 @@ function detectScratchDirs(cwd: string): { dir: string; primary: boolean }[] {
 }
 
 /**
+ * 有依赖的项目以 lockfile 为准（只有 package.json 不算：那可能只是个配置包）。
+ * 判据就一条：有 lockfile 的目录必须有 node_modules/.bin。
+ */
+const LOCKFILES = new Set(["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb", "bun.lock"]);
+
+/** 依赖根的清单一轮会话里不会变；缺的 `.bin` 每轮重查，装好了立刻恢复。 */
+const dependencyRootsCache = new Map<string, string[]>();
+
+function dependencyRoots(cwd: string): string[] {
+	const key = resolve(cwd);
+	const cached = dependencyRootsCache.get(key);
+	if (cached) return cached;
+
+	const found: string[] = [];
+	const roots = [key];
+	let frontier = [key];
+	// 与工具链探测同一个范围：cwd 往下两层，跳过依赖/产物目录。
+	for (let depth = 0; depth < 2 && roots.length < DETECT_MAX_ROOTS; depth += 1) {
+		const next: string[] = [];
+		for (const dir of frontier) {
+			let entries: Dirent[] = [];
+			try {
+				entries = readdirSync(dir, { withFileTypes: true });
+			} catch {
+				continue;
+			}
+			if (entries.some((entry) => entry.isFile() && LOCKFILES.has(entry.name))) found.push(dir);
+			for (const entry of entries) {
+				if (!entry.isDirectory() || DETECT_SKIP.has(entry.name) || entry.name.startsWith(".")) continue;
+				const child = resolve(dir, entry.name);
+				roots.push(child);
+				next.push(child);
+				if (roots.length >= DETECT_MAX_ROOTS) break;
+			}
+		}
+		frontier = next;
+	}
+
+	dependencyRootsCache.set(key, found);
+	return found;
+}
+
+/**
+ * 依赖没装好的目录（相对 cwd，`.` 表示就是 cwd）。
+ *
+ * 沙箱里 store 多半不可写，pnpm 于是退回一个空 store 去装，那条 WARN 埋在几百行输出里，
+ * 构建则可能干脆卡在锁上 —— 与其让第一条命令莫名卡死，不如在它跑起来之前点名缺哪个目录。
+ */
+function missingDependencies(cwd: string): string[] {
+	return dependencyRoots(cwd)
+		.filter((dir) => !existsSync(resolve(dir, "node_modules", ".bin")))
+		.map((dir) => relative(cwd, dir) || ".");
+}
+
+/** 闸门的拒绝文案；依赖齐了返回 undefined。 */
+function dependencyGateReason(cwd: string): string | undefined {
+	const missing = missingDependencies(cwd);
+	if (missing.length === 0) return undefined;
+	const shown = missing.slice(0, 3).join(", ");
+	const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : "";
+	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin, so a build or test would install inside the sandbox. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.`;
+}
+
+/**
  * 产物目录：探测结果 + 显式追加。已存在的直接放行；探测到的主产物缺了就创建，
  * 其余缺了不管（空目录本身没有意义）；显式追加的缺了也创建 —— 那是父代理点名的。
  */
@@ -1404,6 +1468,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				return bail(
 					`pi-subagent-extend: command not in the allowlist: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
 				);
+			}
+			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
+			if (rule.dependencyGate) {
+				const reason = dependencyGateReason(cwd);
+				if (reason) return deny(reason);
 			}
 			const repeatEvent = probe?.noteBashStart(command, match.access);
 			if (repeatEvent) {

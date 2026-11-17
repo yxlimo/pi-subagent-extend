@@ -170,6 +170,16 @@ Usage errors and hard rules never count: a missing path, shell metacharacters, a
 `powershell`/`codemode`, or a command matched by a profile's `bash.deny`. Those cannot be fixed by
 granting more, so charging them against the budget would stop a task for the wrong reason.
 
+The dependency gate is in this class too. Before a bash command runs, every directory in the tree
+(two levels down, same scan as the artefact directories) that has a package-manager
+lockfile (pnpm, npm, yarn, bun) must also have `node_modules/.bin`; otherwise bash is refused and the directory is named. The failure it prevents
+is worth the check: without it the first build command tries to install inside the sandbox, where
+the package store is usually not writable, so pnpm silently falls back to an empty store or the
+command blocks on a lock — with nothing in the output pointing at the install. Retrying cannot fix
+an unfinished install, which is why the refusal is uncounted, and why it tells the subagent to use
+`contact_supervisor` instead of trying again. `bash.dependencyGate: false` turns it off for a
+read-only task that never builds.
+
 The budget is **consecutive**, which is what the refusal text and the README promise: any allowed
 working call resets both counters, so a subagent that tries a path, learns, and moves on is never
 stopped for a mistake it already corrected. The rescue channel is the exception — `contact_supervisor`
