@@ -27,7 +27,7 @@ function ok(label: string): void {
 
 /** 一个临时的项目目录，用来放 .pi/main-only.md。 */
 function project(mainOnlyText?: string): string {
-  const dir = join(tmpdir(), `pi-subagent-extend-ctx-${process.pid}-${(Math.random() * 1e6) | 0}`);
+  const dir = join(tmpdir(), `pi-subagents-extend-ctx-${process.pid}-${(Math.random() * 1e6) | 0}`);
   mkdirSync(join(dir, ".pi"), { recursive: true });
   if (mainOnlyText !== undefined) writeFileSync(join(dir, MAIN_ONLY_FILE), mainOnlyText);
   return dir;
@@ -92,7 +92,7 @@ function asBackgroundChild<T>(fn: () => T): T {
   }
 }
 
-console.log("pi-subagent-extend context");
+console.log("pi-subagents-extend context");
 
 // 1. 成对标记整段剥离，其余内容逐字保留。
 {
@@ -206,4 +206,4 @@ console.log("pi-subagent-extend context");
   ok("标记不闭合时给出 warning");
 }
 
-console.log(`\npi-subagent-extend context 测试通过（${passed} 项）`);
+console.log(`\npi-subagents-extend context 测试通过（${passed} 项）`);

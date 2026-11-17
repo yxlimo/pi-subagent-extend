@@ -1,12 +1,12 @@
 /**
- * pi-subagent-extend — 把一个会话（主要是子代理）能碰的文件限制在任务范围内。
+ * pi-subagents-extend — 把一个会话（主要是子代理）能碰的文件限制在任务范围内。
  *
  * 设计目标：父代理委派子代理时指定本次任务的文件/目录范围，子代理会话里
  * 范围之外的 tool_call 一律拒绝（fail closed），防止子代理漫无目的地扫仓库。
  *
  * 配置有两条来源：
  * 1. pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
- *      extensionBindings: { "pi-subagent-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+ *      extensionBindings: { "pi-subagents-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
  *    pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
  *    激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
  *    之后父进程环境被恢复，所以不能在 tool_call 里懒读。
@@ -17,7 +17,7 @@
  *
  * 两条都没有时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
- * 扩展还随包带一个用法 skill（../skills/pi-subagent-extend），经 resources_discover
+ * 扩展还随包带一个用法 skill（../skills/pi-subagents-extend），经 resources_discover
  * 注册给会话：扩展加载到哪个会话，父代理侧就能看到「委派时如何传 bindings」的约定，
  * 不需要往 AGENTS.md 里写。
  *
@@ -50,14 +50,14 @@ import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-no
 import { Probe, STOP_NOTICE, parseProbeConfig } from "./probe.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
-const BINDING_NAMESPACE = "pi-subagent-extend";
+const BINDING_NAMESPACE = "pi-subagents-extend";
 /** agent 角色默认 bindings 的默认位置（相对会话 cwd）。 */
 const PROFILE_FILE = ".pi/subagent-bindings.json";
 /**
  * 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。
  * 三个：范围与 bash 白名单、探针判据与停机语义、上下文隔离（AGENTS.md 标记与主代理专属文件）。
  */
-const SKILL_DIRS = ["pi-subagent-extend", "pi-subagent-extend-probes", "pi-subagent-extend-context"].map((name) =>
+const SKILL_DIRS = ["pi-subagents-extend", "pi-subagents-extend-probes", "pi-subagents-extend-context"].map((name) =>
 	fileURLToPath(new URL(`../skills/${name}`, import.meta.url)),
 );
 
@@ -517,12 +517,12 @@ function gitDirs(cwd: string): { gitDir: string; common: string } | undefined {
 
 /** 找 helper：环境变量优先，其次包内构建产物，最后缓存目录。 */
 function helperPath(): string | undefined {
-	const fromEnv = process.env.PI_SUBAGENT_EXTEND_HELPER?.trim();
+	const fromEnv = process.env.PI_SUBAGENTS_EXTEND_HELPER?.trim();
 	if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
 	const here = dirname(fileURLToPath(import.meta.url));
 	const candidates = [
-		resolve(here, "..", "bin", "pi-subagent-extend-helper"),
-		resolve(homedir(), ".pi", "subagent-permission", "bin", "pi-subagent-extend-helper"),
+		resolve(here, "..", "bin", "pi-subagents-extend-helper"),
+		resolve(homedir(), ".pi", "subagent-permission", "bin", "pi-subagents-extend-helper"),
 	];
 	for (const candidate of candidates) {
 		if (existsSync(candidate)) return candidate;
@@ -909,7 +909,7 @@ function dependencyGateReason(cwd: string, ignored: string[]): string | undefine
 	const hint = globbed.length > 0
 		? ` Ignore entries are literal paths, not globs: ${globbed.join(", ")} matched nothing.`
 		: "";
-	return `pi-subagent-extend: ${shown}${rest} has a lockfile but no node_modules/.bin or .pnp.cjs, so this command would run against an unfinished install. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.${hint}`;
+	return `pi-subagents-extend: ${shown}${rest} has a lockfile but no node_modules/.bin or .pnp.cjs, so this command would run against an unfinished install. File tools still work; use contact_supervisor so the parent finishes the install or grants the store.${hint}`;
 }
 
 /** 命令的第一个词，跳过 `FOO=bar cmd` 这类前置赋值。 */
@@ -1029,7 +1029,7 @@ function toolchainCacheDir(): string | undefined {
 	if (toolchainCacheDirMemo !== null) return toolchainCacheDirMemo;
 	let dir: string | undefined;
 	try {
-		dir = resolve(homedir(), ".cache", "pi-subagent-extend", "xdg-cache");
+		dir = resolve(homedir(), ".cache", "pi-subagents-extend", "xdg-cache");
 		mkdirSync(dir, { recursive: true });
 	} catch {
 		dir = undefined;
@@ -1097,7 +1097,7 @@ const GIT_EXCLUDE_PATTERNS = ["node_modules/", ".pnpm-store/"];
  */
 function gitExcludesFile(): string | undefined {
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-subagent-extend");
+		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 		const file = resolve(dir, "git-excludes");
 		const wanted = `${GIT_EXCLUDE_PATTERNS.join("\n")}\n`;
 		if (!existsSync(file) || readFileSync(file, "utf8") !== wanted) {
@@ -1123,7 +1123,7 @@ function gitExcludesFile(): string | undefined {
  */
 function sandboxEnv(cwd: string, rule: BashRule): Record<string, string> {
 	const env: Record<string, string> = { ...rule.env };
-	const privateDir = `/tmp/.pi-subagent-extend-${process.pid}`;
+	const privateDir = `/tmp/.pi-subagents-extend-${process.pid}`;
 	// git 的全局排除：子代理 `git add -A` 时不把依赖目录吸进索引。
 	// 宿主已经设了 GIT_CONFIG_COUNT 就不插手，免得覆盖别人的配置。
 	if (rule.gitExcludes && !process.env.GIT_CONFIG_COUNT) {
@@ -1300,7 +1300,7 @@ export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
 /** 把 spec 写到 helper 读的位置，返回文件路径。 */
 function writeSpecFile(spec: ReturnType<typeof buildSpec>): string | undefined {
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-subagent-extend");
+		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 		mkdirSync(dir, { recursive: true });
 		const file = resolve(dir, `spec-${process.pid}.json`);
 		writeFileSync(file, JSON.stringify(spec));
@@ -1421,7 +1421,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					hooks: {
 						warn: (text) => {
 							const ui = currentCtx?.ui as { notify?: (m: string, t?: string) => void } | undefined;
-							ui?.notify?.(`pi-subagent-extend: ${text}`, "warning");
+							ui?.notify?.(`pi-subagents-extend: ${text}`, "warning");
 						},
 					},
 				})
@@ -1459,7 +1459,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		const target = raw || ".";
 		const isWrite = WRITE_TOOLS.includes(event.toolName);
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
-			return bail(`pi-subagent-extend: read budget exhausted (${policy.maxReads} reads).`);
+			return bail(`pi-subagents-extend: read budget exhausted (${policy.maxReads} reads).`);
 		}
 		const canWrite = policy.writeGlobs.length > 0 || policy.absoluteWrite.length > 0;
 		// 只对 readOnly 早退：`writeScope: []`（不是 readOnly）走下面那条「readable but not
@@ -1469,14 +1469,14 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			// 处境：放宽读范围解决不了，所以走写预算。出路是改成交报告，而不是去求援——记到授权
 			// 预算上会让子代理连撞 5 次、还被指去 contact_supervisor，而它求不到任何东西。
 			return writeBail(
-				`pi-subagent-extend: this session has no write grant; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+				`pi-subagents-extend: this session has no write grant; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.`,
 			);
 		}
 		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
 		// 这是用法错误不是权限错误，不计入撞权限计数。
 		if (isWrite && !raw) {
 			return deny(
-				`pi-subagent-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
+				`pi-subagents-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
 			);
 		}
 		const readOk = matches(policy.regexps, cwd, target);
@@ -1486,11 +1486,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				// 并给出正解——回报告——而不是「换个路径再试」。
 				if (readOk) {
 					return writeBail(
-						`pi-subagent-extend: "${target}" is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+						`pi-subagents-extend: "${target}" is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
 					);
 				}
 				return bail(
-					`pi-subagent-extend: "${target}" is outside the scope — neither readable nor writable (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}\nWrite scope: ${preview(policy.writeGlobs)}`,
+					`pi-subagents-extend: "${target}" is outside the scope — neither readable nor writable (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}\nWrite scope: ${preview(policy.writeGlobs)}`,
 				);
 			}
 		} else if (!readOk) {
@@ -1498,18 +1498,18 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			if (!raw) {
 				// 缺 path：用法错误，不计入撞权限计数。
 				return deny(
-					`pi-subagent-extend: no path was given; the working directory (${cwd}) was assumed and is outside the read scope (source: ${policy.source}). Pass a path inside the scope.\nRead scope: ${preview(policy.globs)}`,
+					`pi-subagents-extend: no path was given; the working directory (${cwd}) was assumed and is outside the read scope (source: ${policy.source}). Pass a path inside the scope.\nRead scope: ${preview(policy.globs)}`,
 				);
 			}
 			// cwd / 仓库根：读起来像 scope 写错，其实多半是「想要全仓搜索」。计数（这是
 			// 授权问题），但要说清这不是某个文件路径写错。
 			if (isRootish(raw, cwd)) {
 				return bail(
-					`pi-subagent-extend: "${raw}" is the repository root, not a file in the read scope (source: ${policy.source}). Pass the concrete path; if repo-wide access is really needed, say so and the parent can widen the scope.\nRead scope: ${preview(policy.globs)}`,
+					`pi-subagents-extend: "${raw}" is the repository root, not a file in the read scope (source: ${policy.source}). Pass the concrete path; if repo-wide access is really needed, say so and the parent can widen the scope.\nRead scope: ${preview(policy.globs)}`,
 				);
 			}
 			return bail(
-				`pi-subagent-extend: "${target}" is outside the read scope (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}`,
+				`pi-subagents-extend: "${target}" is outside the read scope (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}`,
 			);
 		}
 		if (isWrite) {
@@ -1552,7 +1552,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		const msg = policy.globs.length
 			? `scope active (${policy.source}, ${policy.globs.length} entries${writeNote}, ${mode}${budget}${bash}${probeLine}${storeLine})`
 			: `scope is empty: every file access is refused${budget}${bash}${probeLine}${storeLine}`;
-		ctx.ui.notify(`pi-subagent-extend: ${msg}`, "info");
+		ctx.ui.notify(`pi-subagents-extend: ${msg}`, "info");
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1635,20 +1635,20 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const rule = policy.bash;
 			if (!rule) {
 				return bail(
-					`pi-subagent-extend: bash is not allowed here (source: ${policy.source}). For tests or a typecheck the parent must list the commands in bash.read / bash.write.`,
+					`pi-subagents-extend: bash is not allowed here (source: ${policy.source}). For tests or a typecheck the parent must list the commands in bash.read / bash.write.`,
 				);
 			}
-			if (!command) return deny("pi-subagent-extend: empty bash command");
+			if (!command) return deny("pi-subagents-extend: empty bash command");
 			// 禁止列表先于一切判定：它来自项目 profile，调用方的白名单不能放宽它。
 			const forbidden = deniedEntry(rule, command);
 			if (forbidden) {
 				return deny(
-					`pi-subagent-extend: command blocked by the project profile: "${forbidden}" (source: ${policy.source}); extensionBindings cannot lift it.`,
+					`pi-subagents-extend: command blocked by the project profile: "${forbidden}" (source: ${policy.source}); extensionBindings cannot lift it.`,
 				);
 			}
 			if (hasUnquotedShellControl(command)) {
 				return deny(
-					`pi-subagent-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Allowed: ${preview(allEntries(rule))}`,
+					`pi-subagents-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Allowed: ${preview(allEntries(rule))}`,
 				);
 			}
 			const match = classifyCommand(rule, command);
@@ -1659,7 +1659,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					? ` (pnpm store at ${store.path}, not writable; the parent can add it to bash.writablePaths)`
 					: "";
 				return bail(
-					`pi-subagent-extend: command not in the allowlist: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
+					`pi-subagents-extend: command not in the allowlist: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
 				);
 			}
 			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
@@ -1674,18 +1674,18 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			const helper = helperPath();
 			if (!helper) {
 				return deny(
-					"pi-subagent-extend: the sandbox helper (pi-subagent-extend-helper) was not found; run `pnpm run build:helper` in pi-plugin, or set PI_SUBAGENT_EXTEND_HELPER.",
+					"pi-subagents-extend: the sandbox helper (pi-subagents-extend-helper) was not found; run `pnpm run build:helper` in pi-plugin, or set PI_SUBAGENTS_EXTEND_HELPER.",
 				);
 			}
 			const caps = describeHelper(helper);
 			if (!caps?.landlock.supported) {
 				const reason = caps?.landlock.reason ?? "helper --describe returned no usable information";
-				return deny(`pi-subagent-extend: this kernel cannot enforce the task scope: ${reason}`);
+				return deny(`pi-subagents-extend: this kernel cannot enforce the task scope: ${reason}`);
 			}
 			const spec = buildSpec(cwd, rule, policy);
 			const specFile = writeSpecFile(spec);
 			if (!specFile) {
-				return deny("pi-subagent-extend: cannot write the sandbox spec; check that ~/.cache/pi-subagent-extend is writable");
+				return deny("pi-subagents-extend: cannot write the sandbox spec; check that ~/.cache/pi-subagents-extend is writable");
 			}
 			// 记下这条命令的写权限清单：tool_result 判「写越界」时要用它当事实依据，
 			// 不靠文案猜。挡住条数上限，避免结果永远不回来的调用把表撑大。
@@ -1700,7 +1700,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (EXEC_TOOLS.includes(event.toolName)) {
 			// 从来不可用：给多宽的范围、多长的命令白名单都不会打开，所以不计入撞权限。
 			return deny(
-				`pi-subagent-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
+				`pi-subagents-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
 			);
 		}
 		// SAFE_TOOLS 已经在最前面处理过，这里只管调用方显式放行的工具。
@@ -1711,7 +1711,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		}
 
 		return bail(
-			`pi-subagent-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools).`,
+			`pi-subagents-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools).`,
 		);
 	};
 
@@ -1763,8 +1763,8 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					`Reads: ${allowedReads}${policy.maxReads > 0 ? `/${policy.maxReads}` : ""}`,
 					...(probe ? probe.status() : ["Probe: off"]),
 				].filter((l): l is string => Boolean(l))
-				: ["Inactive (no pi-subagent-extend bindings and no profile declared in this session)"];
-			ctx.ui.notify(`pi-subagent-extend:\n${lines.join("\n")}`, "info");
+				: ["Inactive (no pi-subagents-extend bindings and no profile declared in this session)"];
+			ctx.ui.notify(`pi-subagents-extend:\n${lines.join("\n")}`, "info");
 		},
 	});
 }

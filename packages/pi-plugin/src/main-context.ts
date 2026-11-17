@@ -21,7 +21,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (process.env.PI_SUBAGENT_CHILD === "1") {
 			const warning = unbalancedWarning(stripMarkedSections(options.contextFiles));
-			if (warning) ctx.ui?.notify?.(`pi-subagent-extend: ${warning}`, "warning");
+			if (warning) ctx.ui?.notify?.(`pi-subagents-extend: ${warning}`, "warning");
 			return;
 		}
 

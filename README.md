@@ -1,4 +1,4 @@
-# pi-subagent-extend
+# pi-subagents-extend
 
 A pi extension that confines a subagent to the files its task covers, and keeps main-agent-only
 instructions out of a subagent's prompt.
@@ -19,7 +19,7 @@ into the main session only. Either concern works without the other.
 
 | Package | Directory | What it is |
 | --- | --- | --- |
-| `pi-subagent-extend` | `packages/pi-plugin` | the pi extension: scope, bash, context isolation |
+| `pi-subagents-extend` | `packages/pi-plugin` | the pi extension: scope, bash, context isolation |
 | — | `packages/helper` | the sandbox helper (Rust: Landlock plus network, mount and PID namespaces) |
 | — | `packages/worktree-setup` | a `worktreeSetupHook` for pi-subagents: runs whatever a project declares |
 
@@ -38,7 +38,7 @@ pnpm run build:helper
 ./install.sh
 ```
 
-`install.sh` symlinks `~/.pi/agent/extensions/pi-subagent-extend`, which pi discovers on start.
+`install.sh` symlinks `~/.pi/agent/extensions/pi-subagents-extend`, which pi discovers on start.
 With no bindings the extension is a no-op, so the global link has no effect on a parent session
 or on an unscoped subagent.
 
@@ -49,7 +49,7 @@ agent's frontmatter instead:
 ---
 name: worker
 description: Implements a task within the given scope
-subagentOnlyExtensions: /path/to/pi-subagent-extend/packages/pi-plugin/src/index.ts
+subagentOnlyExtensions: /path/to/pi-subagents-extend/packages/pi-plugin/src/index.ts
 ---
 ```
 
@@ -61,7 +61,7 @@ The parent passes the scope on each dispatch:
 subagent(
   agent: "worker",
   task: "Fix the null pointer in login.ts",
-  extensionBindings: { "pi-subagent-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+  extensionBindings: { "pi-subagents-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
 )
 ```
 
@@ -86,13 +86,13 @@ subagent(
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. When set, the helper samples the CPU time of the whole command tree — it is PID 1 of a private PID namespace, so the tree is what `/proc` shows — and kills it once the tree has used **no** CPU for that many seconds, printing why and exiting `79`. The point is to separate a deadlock from a slow build, which a wall-clock limit cannot: a compiling tree gains CPU in every sample, a tree waiting on a lock, a socket, or an orphaned child gains none. Two limits to know before turning it on: a command that deliberately waits (`sleep 300`, a backoff loop) also uses no CPU and will be killed, and the helper cannot see output because stdio is inherited rather than piped, so "no output" cannot corroborate the reading. That is why nothing is armed by default — pick a number well above your slowest quiet gap between CPU bursts. The kill is annotated with `[sandbox]` in the result, saying a retry will stall the same way. |
 
 `/permission` shows the read scope, the write scope when it differs, the bash allowlist, both
-read and write denial counts, and the probe state. The namespace is `pi-subagent-extend/1`;
+read and write denial counts, and the probe state. The namespace is `pi-subagents-extend/1`;
 bindings reach the subagent through `PI_SUBAGENT_EXTENSION_BINDINGS`, or by hand when there is no
 parent agent:
 
 ```bash
-PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagent-extend/1":{"scope":["src/**"],"readOnly":true}}' \
-pi -e ~/extensions/pi-subagent-extend/packages/pi-plugin/src/index.ts -p "<task>"
+PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagents-extend/1":{"scope":["src/**"],"readOnly":true}}' \
+pi -e ~/extensions/pi-subagents-extend/packages/pi-plugin/src/index.ts -p "<task>"
 ```
 
 **Profiles.** Bindings written per dispatch are easy to forget, and forgetting them means no
@@ -103,7 +103,7 @@ relax. See [architecture](docs/architecture.md#agent-profiles).
 
 A dispatch to a role that has a profile passes only `agent`, `model` and `task`; the delegation
 side of that — and the three pieces a new role needs — is in the usage skill
-[`pi-subagent-extend`](packages/pi-plugin/skills/pi-subagent-extend/SKILL.md#call-template).
+[`pi-subagents-extend`](packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#call-template).
 
 ## Documentation
 

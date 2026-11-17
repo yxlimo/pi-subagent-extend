@@ -1,11 +1,11 @@
 ---
-name: pi-subagent-extend-probes
-description: For configuring probes on restricted subagents — detects read-only idling, repeating a command, finished early, writing litter, and permission refusals; a hit blocks that call, and once a stop condition is reached the turn ends immediately. Use when a subagent keeps re-reading the same spot or re-hitting the same refusal without progress, keeps trying after the task is effectively complete, or starts creating probe litter files. Documents the maxDenies and probe fields of pi-subagent-extend/1 in extensionBindings with their defaults, the difference between warn and stop (stop is a hard stop with no wrap-up turn), and what the parent agent should look at after a subagent is stopped. Scope and the bash allowlist are covered in pi-subagent-extend.
+name: pi-subagents-extend-probes
+description: For configuring probes on restricted subagents — detects read-only idling, repeating a command, finished early, writing litter, and permission refusals; a hit blocks that call, and once a stop condition is reached the turn ends immediately. Use when a subagent keeps re-reading the same spot or re-hitting the same refusal without progress, keeps trying after the task is effectively complete, or starts creating probe litter files. Documents the maxDenies and probe fields of pi-subagents-extend/1 in extensionBindings with their defaults, the difference between warn and stop (stop is a hard stop with no wrap-up turn), and what the parent agent should look at after a subagent is stopped. Scope and the bash allowlist are covered in pi-subagents-extend.
 ---
 
 # Probes: detecting subagent idling and ineffective work
 
-The scope restriction (`scope`) only governs which files a subagent can touch; probes watch whether it is making progress. Both live in the same delegation's `extensionBindings` and share the `pi-subagent-extend/1` namespace.
+The scope restriction (`scope`) only governs which files a subagent can touch; probes watch whether it is making progress. Both live in the same delegation's `extensionBindings` and share the `pi-subagents-extend/1` namespace.
 
 ## When it applies
 
@@ -57,7 +57,7 @@ Corollary: if a task genuinely needs extensive read-only investigation, either l
 ## Configuration template
 
 ```json
-"pi-subagent-extend/1": {
+"pi-subagents-extend/1": {
   "scope": ["src/auth/**"],
   "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
   "maxDenies": 5,

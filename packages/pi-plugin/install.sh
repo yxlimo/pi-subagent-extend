@@ -18,7 +18,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PI_AGENT_DIR="${PI_AGENT_DIR:-$HOME/.pi/agent}"
-INSTALL_DIR="$PI_AGENT_DIR/extensions/pi-subagent-extend"
+INSTALL_DIR="$PI_AGENT_DIR/extensions/pi-subagents-extend"
 UNINSTALL=0
 
 while [ $# -gt 0 ]; do
@@ -43,11 +43,11 @@ build_helper() {
   if ( cd "$REPO_DIR" \
     && mkdir -p bin \
     && cargo build --release --quiet --manifest-path ../helper/Cargo.toml \
-    && cp ../helper/target/release/pi-subagent-extend-helper bin/ ); then
-    log "helper ready: $REPO_DIR/bin/pi-subagent-extend-helper"
+    && cp ../helper/target/release/pi-subagents-extend-helper bin/ ); then
+    log "helper ready: $REPO_DIR/bin/pi-subagents-extend-helper"
     # --describe exits 76 when the kernel cannot enforce the sandbox, so report
     # that now instead of failing on the first bash call.
-    if ! "$REPO_DIR/bin/pi-subagent-extend-helper" --describe; then
+    if ! "$REPO_DIR/bin/pi-subagents-extend-helper" --describe; then
       log "warning: this kernel cannot enforce the sandbox (Landlock ABI 7 needed); bash stays closed"
     fi
   else

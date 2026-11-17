@@ -1,4 +1,4 @@
-//! `pi-subagent-extend-helper` — apply the pi-subagent-extend sandbox to one command.
+//! `pi-subagents-extend-helper` — apply the pi-subagents-extend sandbox to one command.
 //!
 //! The pi extension rewrites a bash tool call into
 //!
@@ -54,8 +54,8 @@ const EXIT_EXEC_FAILED: i32 = 127;
 
 const USAGE: &str = "\
 usage:
-  pi-subagent-extend-helper --describe
-  pi-subagent-extend-helper [--spec <file|->] [--] <command> [args...]
+  pi-subagents-extend-helper --describe
+  pi-subagents-extend-helper [--spec <file|->] [--] <command> [args...]
 
   --describe       print the sandbox capabilities as JSON and exit
   --spec <file>    read the sandbox spec from <file>; '-' reads standard input
@@ -74,12 +74,12 @@ fn run() -> i32 {
         Some("--probe-userns") => match namespace::probe() {
             Ok(()) => 0,
             Err(error) => {
-                eprintln!("pi-subagent-extend-helper: {error}");
+                eprintln!("pi-subagents-extend-helper: {error}");
                 1
             }
         },
         Some("--version") | Some("-V") => {
-            println!("pi-subagent-extend-helper {}", env!("CARGO_PKG_VERSION"));
+            println!("pi-subagents-extend-helper {}", env!("CARGO_PKG_VERSION"));
             0
         }
         Some("--help") | Some("-h") | None => {
@@ -89,12 +89,12 @@ fn run() -> i32 {
         Some("--spec") => match run_with_spec(&args[1..]) {
             Ok(code) => code,
             Err((code, message)) => {
-                eprintln!("pi-subagent-extend-helper: {message}");
+                eprintln!("pi-subagents-extend-helper: {message}");
                 code
             }
         },
         Some(other) => {
-            eprintln!("pi-subagent-extend-helper: unknown option {other}\n\n{USAGE}");
+            eprintln!("pi-subagents-extend-helper: unknown option {other}\n\n{USAGE}");
             EXIT_BAD_SPEC
         }
     }
@@ -155,10 +155,10 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
                     .collect();
                 match shadowed.is_empty() {
                     true => eprintln!(
-                        "pi-subagent-extend-helper: network isolated, no resolver sockets to shadow"
+                        "pi-subagents-extend-helper: network isolated, no resolver sockets to shadow"
                     ),
                     false => eprintln!(
-                        "pi-subagent-extend-helper: network isolated, resolver sockets shadowed: {}",
+                        "pi-subagents-extend-helper: network isolated, resolver sockets shadowed: {}",
                         shadowed.join(", ")
                     ),
                 }
@@ -172,7 +172,7 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
                 // space and the process hiding that the namespaces would have
                 // given it.
                 eprintln!(
-                    "pi-subagent-extend-helper: warning: cannot enter the namespaces ({error}); \
+                    "pi-subagents-extend-helper: warning: cannot enter the namespaces ({error}); \
                      the command runs with Landlock only, TCP still blocked"
                 );
             }
@@ -198,7 +198,7 @@ fn run_command(
     if let Some(cwd) = &spec.cwd {
         if let Err(error) = std::env::set_current_dir(cwd) {
             eprintln!(
-                "pi-subagent-extend-helper: cannot enter {}: {error}",
+                "pi-subagents-extend-helper: cannot enter {}: {error}",
                 cwd.display()
             );
             return EXIT_SANDBOX_FAILED;
@@ -206,13 +206,13 @@ fn run_command(
     }
 
     if let Err(error) = sandbox::apply(spec, namespaces) {
-        eprintln!("pi-subagent-extend-helper: {error}");
+        eprintln!("pi-subagents-extend-helper: {error}");
         return EXIT_UNSUPPORTED;
     }
     // Nothing below needs a capability: the namespaces and mounts are set up,
     // and the sandbox itself is enforced by Landlock.
     if let Err(error) = namespace::drop_capabilities() {
-        eprintln!("pi-subagent-extend-helper: {error}");
+        eprintln!("pi-subagents-extend-helper: {error}");
         return EXIT_SANDBOX_FAILED;
     }
 
@@ -226,7 +226,7 @@ fn run_command(
         None => "the current directory".to_string(),
     };
     eprintln!(
-        "pi-subagent-extend-helper: cannot execute {} in {cwd}: {error}",
+        "pi-subagents-extend-helper: cannot execute {} in {cwd}: {error}",
         program.to_string_lossy()
     );
     EXIT_EXEC_FAILED
@@ -262,7 +262,7 @@ fn report() -> (serde_json::Value, bool) {
         ),
     };
     let report = serde_json::json!({
-        "helper": "pi-subagent-extend-helper",
+        "helper": "pi-subagents-extend-helper",
         "version": env!("CARGO_PKG_VERSION"),
         "landlock": {
             "kernel_abi": abi,
