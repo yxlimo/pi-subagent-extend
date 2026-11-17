@@ -1521,7 +1521,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	pi.on("tool_result", async (event) => {
 		const text = textOf(event.content);
 		const isBash = event.toolName === "bash";
-		if (probe && isBash) probe.noteBashResult(text);
+		if (probe && isBash) probe.noteBashResult(text, event.toolCallId);
 		// bash 没开时命令根本没跑，别去解释它的结果。
 		const offline = policy.bash !== undefined && policy.bash.network !== true;
 		const ran = sandboxSpecs.get(event.toolCallId);
@@ -1619,7 +1619,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
 			const gate = dependencyGateVerdict(rule, command, match.access, cwd);
 			if (gate) return deny(gate);
-			const repeatEvent = probe?.noteBashStart(command, match.access);
+			const repeatEvent = probe?.noteBashStart(command, match.access, event.toolCallId);
 			if (repeatEvent) {
 				return repeatEvent.stop
 					? stop(repeatEvent.reason)

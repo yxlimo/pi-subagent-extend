@@ -163,7 +163,11 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 
 /** `cpuStallSeconds`：未写、写坏、`false`、小于等于 0 一律当关闭。 */
 function stallSeconds(value: unknown): number | false {
-	const n = typeof value === "number" ? value : Number(value);
-	if (!Number.isFinite(n) || n <= 0) return false;
-	return Math.floor(n);
+	// 先 floor 再判断：否则 0.5 会得到 0，而 0 !== false 会把 `stallSeconds: 0` 写进 spec ——
+	// 旧版 helper 的 deny_unknown_fields 会因此整份拒绝（退出码 77），正好是「关掉时不写键」
+	// 想避免的那种失败。也不接受非数字：`true` 经 Number() 会变成 1，即「静默 1 秒就杀」。
+	if (typeof value !== "number" || !Number.isFinite(value)) return false;
+	const n = Math.floor(value);
+	if (n <= 0) return false;
+	return n;
 }

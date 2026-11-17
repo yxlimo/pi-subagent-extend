@@ -14,6 +14,8 @@
  * 探针只负责把「为什么停」写进 stopReason。
  */
 
+import { createHash } from "node:crypto";
+
 export interface ProbeConfig {
 	idleWriteMs: number;
 	abortGraceMs: number;
@@ -169,13 +171,21 @@ export class Probe {
 	#idle: Window = { armed: false, warned: false, message: "", abortAt: 0 };
 	#repeat: Window = { armed: false, warned: false, message: "", abortAt: 0 };
 	#bashCounts = new Map<string, number>();
-	/** 上一条进入的命令，供 noteBashResult 把输出归到它名下。 */
-	#pending: string | undefined;
-	/** 每条命令上一次的输出，条数封顶，避免长会话把内存吃满。 */
+	/**
+	 * 进行中的命令：`toolCallId → 命令原文`。
+	 *
+	 * 不能用单个槽位：pi 默认让一条助手消息里的多个工具调用并行执行，两个 bash 调用会先后
+	 * 进入、结果以任意顺序回来。单槽会把先到的结果记到后一条命令名下，再丢掉另一条 —— 输出
+	 * 比对于是张冠李戴，而这条判据的全部代价就是「记错就误杀」。
+	 */
+	#pending = new Map<string, string>();
+	/** 每条命令上一次输出的摘要，条数封顶。 */
 	#lastOutputs = new Map<string, string>();
 	#forbidPatterns: { source: string; re: RegExp }[];
 	#stopped = false;
 	#stopReason = "";
+	/** 停机原因是不是真的交给了模型（只有交给过才可以说「上面的消息」）。 */
+	#causeSent = false;
 	#successArmed = false;
 
 	constructor(deps: ProbeDeps) {
@@ -208,12 +218,16 @@ export class Probe {
 	}
 
 	/** bash 命令进入：判据 2 计数；命中 write 列时也记为写入活动。 */
-	noteBashStart(command: string, access: "read" | "write" | undefined): ProbeEvent | undefined {
+	noteBashStart(command: string, access: "read" | "write" | undefined, callId?: string): ProbeEvent | undefined {
 		if (this.#stopped) return undefined;
 		if (access === "write") this.noteWriteActivity();
 		const key = command.trim();
 		if (!key) return undefined;
-		this.#pending = key;
+		this.#pending.set(callId ?? "", key);
+		if (this.#pending.size > 64) {
+			const stalest = this.#pending.keys().next().value as string | undefined;
+			if (stalest !== undefined) this.#pending.delete(stalest);
+		}
 		const count = (this.#bashCounts.get(key) ?? 0) + 1;
 		this.#bashCounts.set(key, count);
 		if (count === this.#cfg.repeatBash) {
@@ -242,9 +256,9 @@ export class Probe {
 	}
 
 	/** bash 输出：判据 3 的成功标记；并判定这一次重复是不是带回了新信息。 */
-	noteBashResult(output: string): void {
+	noteBashResult(output: string, callId?: string): void {
 		// 输出判定与 readOnly 无关：那条开关只关「早可收工」，不关打转。
-		this.#noteOutput(output);
+		this.#noteOutput(output, callId);
 		if (this.#readOnly || this.#stopped) return;
 		const text = output.length > BASH_TEXT_LIMIT ? output.slice(-BASH_TEXT_LIMIT) : output;
 		const hit = matchesAny(this.#cfg.successPatterns, text);
@@ -260,17 +274,27 @@ export class Probe {
 	 * 现在计数归零、并撤掉已武装的 warn —— 拿到新输出就是进展，跟写了文件是一回事。
 	 * 真正卡住的孩子输出一字不差，仍然会被数到阈值上。
 	 */
-	#noteOutput(output: string): void {
-		const key = this.#pending;
-		this.#pending = undefined;
+	#noteOutput(output: string, callId?: string): void {
+		const slot = callId ?? "";
+		const key = this.#pending.get(slot);
+		this.#pending.delete(slot);
 		if (!key) return;
+		const digest = digestOf(output);
 		const previous = this.#lastOutputs.get(key);
 		if (this.#lastOutputs.size >= 64 && !this.#lastOutputs.has(key)) {
 			const oldest = this.#lastOutputs.keys().next().value as string | undefined;
-			if (oldest !== undefined) this.#lastOutputs.delete(oldest);
+			if (oldest !== undefined) {
+				this.#lastOutputs.delete(oldest);
+				// 被淘汰的命令失去基线，计数也一并丢掉：下一次从 1 重新开始。
+				// 保留计数就会在“没基线”的情况下继续累加，那是往误杀的方向偏。
+				this.#bashCounts.delete(oldest);
+			}
 		}
-		this.#lastOutputs.set(key, output);
-		if (previous === undefined || previous === output) return;
+		// 先删后插：Map 保留首次插入的位置，不删就成了按首次出现排序的 FIFO，
+		// 而重复最多的那条命令正好坐在队头，会成为第一个被淘汰的对象。
+		this.#lastOutputs.delete(key);
+		this.#lastOutputs.set(key, digest);
+		if (previous === undefined || previous === digest) return;
 		this.#bashCounts.delete(key);
 		this.#repeat = { armed: false, warned: false, message: "", abortAt: 0 };
 	}
@@ -296,6 +320,13 @@ export class Probe {
 		// 停过之后每个边界都要拒绝：没有这条，停机只停在内部状态里，子代理照跑。
 		// 给的是「已停」的状态说明，不是那条触发停机的旧描述（见 #stopNotice）。
 		if (this.#stopped && this.#stopReason) {
+			// 计时器触发的停机（只读空转、早可收工）从没把原因交给过模型：`#hooks.warn` 是 UI
+			// 提示，不进上下文。那种情形的第一次边界必须把原因说完，否则模型收到的是
+			// 「原因见上面的消息」，而上面根本没有那条消息。
+			if (!this.#causeSent) {
+				this.#causeSent = true;
+				return { reason: this.#stopReason, stop: true };
+			}
 			return { reason: STOP_NOTICE, stop: true };
 		}
 		if (this.#stopped) return undefined;
@@ -305,6 +336,7 @@ export class Probe {
 			this.#stopped = true;
 			this.#clearTimers();
 			this.#stopReason = `${expired.message}\nGrace expired; the run stops here. Summarize what changed and what blocks you.`;
+			this.#causeSent = true;
 			return { reason: this.#stopReason, stop: true };
 		}
 		const armed = [this.#repeat, this.#idle].find((w) => w.armed);
@@ -423,9 +455,16 @@ export class Probe {
 	}
 }
 
+/**
+ * 判断两条输出是不是一字不差，只需要一个摘要：存原文会让 64 条命令各自攒着几十 KB
+ * （bash 结果的设计上限就是 24 KB），只为了回答一个相等问题。
+ */
+function digestOf(output: string): string {
+	return createHash("sha1").update(output).digest("hex");
+}
+
 function ms(value: number): string {
-	if (value >= 60_000) {
-		const m = value / 60_000;
+	if (value >= 60_000) {		const m = value / 60_000;
 		return `${Number.isInteger(m) ? m : m.toFixed(1)} min`;
 	}
 	return `${Math.round(value / 1000)} s`;

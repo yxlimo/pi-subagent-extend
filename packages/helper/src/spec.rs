@@ -42,7 +42,11 @@ pub struct Spec {
     /// Absent means no watchdog. The extension omits the field unless a caller asked
     /// for it, which also keeps the document readable by a helper built before this
     /// field existed (`deny_unknown_fields` would reject an unknown key, not ignore it).
-    #[serde(default, rename = "stallSeconds", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "stallSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub stall_seconds: Option<u64>,
 }
 
