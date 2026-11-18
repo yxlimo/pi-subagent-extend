@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 94 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 95 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 | `test/hashline-e2e.test.ts` | 4 | a real pi process loading the real `pi-hashline-edit-pro` |
@@ -45,12 +45,18 @@ allowed, refused by the read scope, or refused by the write scope.
 
 Tool *classification* is declared, not inferred: `DEFAULT_TOOL_ACCESS` maps a name to `read` or
 `write`, `bindings.tools` overrides it, and the path *argument* name is read from the tool's own
-`parameters` schema (`path`, else `file_path`). Cases 86-91 pin that: the anchored-editing family
-(`replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`) is judged by the write
-scope, `allowTools` cannot widen a path tool, a missing target names the argument without charging
-the budget, a custom tool is judged by its declaration, `path: false` means always refused, a
-malformed `tools` entry refuses everything, the schema-derived argument name is honoured, and a tool
-named `constructor` or `__proto__` cannot reach a declaration through the prototype chain.
+`parameters` schema (`path`, else `file_path`). Cases 86-91 pin the declared classification: `replace`
+and `undo_last_change` are judged by the write scope, `allowTools` cannot widen a path tool, a missing
+target names the argument without charging the budget, a custom tool is judged by its declaration,
+`path: false` means always refused, a malformed `tools` entry refuses everything, the schema-derived
+argument name is honoured, and a tool named `constructor` or `__proto__` cannot reach a declaration
+through the prototype chain.
+
+Case 95 covers `replace_match` separately, because it was the one tool whose anchors the list did not
+know: its two ends are called `replace_from` / `replace_to` (the host's own schema), not the
+`remove_from` / `remove_to` that `replace` uses. Missing that pair meant every anchor-only
+`replace_match` — its normal shape on a host with `requirePath` off, i.e. the host this layer targets —
+was refused with "pass the path explicitly", advice the model cannot follow.
 
 Cases 92-93 cover recovering a write target from anchor ownership, which the host records in
 `sessions/<sha256(sessionFile)[0:24]>.registry.jsonl` as `allocate` / `free` / `clear` events. A
@@ -58,7 +64,7 @@ resolver miss must refuse, never allow. Case 93 deliberately uses `scope: ["."]`
 scope the fallback target `.` would be refused for the wrong reason and the case would stop
 discriminating.
 
-Case 93 covers the two-file tools. `copy` and `move` name a source and a destination in one
+Case 94 covers the two-file tools. `copy` and `move` name a source and a destination in one
 call, and the two must be judged separately: resolving them into one list returns whichever anchor
 comes first, and that is the source, so the destination went unchecked — a copy out of the write
 scope was allowed. The case pins both directions (copy's source may be read-only, move's may not),

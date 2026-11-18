@@ -73,9 +73,15 @@ The report is longer than a reply can carry, and a reviewer that cannot write ha
 }
 ```
 
-`write` must be in `allowTools` — the grant is the path, the tool still has to be allowed. Bash
-redirection (`>`, `>>`) is refused by the metacharacter rule regardless, which is deliberate: the
-report goes through the `write` tool, where the path can be judged.
+The grant is the path, not the name: `read` / `write` / the host's edit family are judged by the scopes
+*before* `allowTools` is consulted, so listing `write` there neither authorises nor restricts it — the
+example lists it only because a reader otherwise wonders. Bash redirection (`>`, `>>`) is refused by the
+metacharacter rule regardless, which is deliberate: the report goes through the `write` tool, where the
+path can be judged.
+
+That ordering has one consequence worth knowing: a tool this layer does not recognise is *not* judged by
+the scopes, so allowlisting a **new** write tool (a plugin's own edit tool) allows it unjudged. Declare
+it under `tools` — `{ "access": "write", "path": "<its path argument>" }` — and the scopes apply.
 
 ### A coder in a worktree
 
