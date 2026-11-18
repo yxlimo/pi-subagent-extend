@@ -123,6 +123,7 @@ export interface Harness {
 		toolCallId?: string,
 	): Promise<PatchedResult | undefined>
 	context(messages: unknown[]): Promise<AnnotatedMessages | undefined>
+	shutdown(): Promise<void>
 	aborts: string[]
 	ui: string[]
 	commands: Record<string, CommandSpec>
