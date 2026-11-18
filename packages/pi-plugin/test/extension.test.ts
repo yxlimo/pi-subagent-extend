@@ -3259,7 +3259,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   原型键工具名不污染声明表")
 }
 
-// 91. 锚点编辑工具不带路径时，目标从「锚点归属」解析出来再判。归属由宿主扩展记在会话
+// 92. 锚点编辑工具不带路径时，目标从「锚点归属」解析出来再判。归属由宿主扩展记在会话
 //     sidecar 里（sessions/<sha256(sessionFile) 前 24 位>.registry.jsonl），这里用真的
 //     文件布局去喂它：解析得到的路径必须真的受写范围约束，而不是解析成功就放行。
 {
@@ -3321,7 +3321,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   锚点归属解析：范围内放行、范围外拒绝、释放后拒绝")
 }
 
-// 92. 锚点解析不出来的两条硬边界：sidecar 不存在、以及锚点是未知值。两者都必须拒绝，
+// 93. 锚点解析不出来的两条硬边界：sidecar 不存在、以及锚点是未知值。两者都必须拒绝，
 //     绝不能因为「读不到就不知道」而放行——那是把写范围变成摆设。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-anchor-miss-"))
@@ -3358,7 +3358,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   锚点解析不到时一律拒绝，绝不因读不到而放行")
 }
 
-// 93. copy / move 是双文件工具：`source_*` 属于源文件，`anchor` 属于目标文件。两组锚点必须
+// 94. copy / move 是双文件工具：`source_*` 属于源文件，`anchor` 属于目标文件。两组锚点必须
 //     分别判定 —— 合成一组去查只会拿到先命中的那一侧（源在前），于是目标完全没判，源在写范围
 //     内、目标在范围外时会被放行。这类工具在子进程里直接落盘，没有 Landlock 兜底，那就是真的
 //     写越界。顺带钉住 copy 与 move 的源权限不同：copy 只读源，move 删源里的行。
