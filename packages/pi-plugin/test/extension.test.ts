@@ -3819,6 +3819,19 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     1,
     "并且点名提示了这条软链授权",
   )
+  // 缺失的尾巴必须原样保留、祖先软链必须解析：helper 的 resolve_comparable 就是这个语义，而
+  // buildSpec 能产出的授权都真实存在，所以这一段是直接钉函数本身，补上「缺失尾巴」这条覆盖缺口。
+  assert.equal(
+    ext.resolveComparable(join(toTmp, "not-created-yet")),
+    join(tmpdir(), "not-created-yet"),
+    "缺失尾巴保留、祖先软链解析：与 helper 一致，否则『命令即将创建的目录』会被判成另一条路径",
+  )
+  // `..` 原样保留，不归一化：Rust 那边是 push 进去的，归一化会让两边对同一条授权给出不同结论。
+  assert.equal(
+    ext.resolveComparable(`${tmpdir()}/pi-nx/../x`),
+    `${tmpdir()}/pi-nx/../x`,
+    "缺失段里的 `..` 原样保留，与 helper 逐字节一致",
+  )
   h.restore()
 
   // 正控：软链指向树内目录时，授权照旧保留 —— 否则「看见软链就剔」也能过上面几条。

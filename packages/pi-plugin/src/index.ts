@@ -1437,16 +1437,9 @@ export function privatisedDirs(cwd: string, scratch: string): string[] {
 }
 
 /**
- * 剔掉「拿到手也用不上」的写授权。
- *
- * helper 在私有化的目录上挂 tmpfs 之后，落在其**下**的授权路径从它的视图里消失，于是它拒掉整份
- * spec（exit 77），bash 全灭。授权那个目录**本身**仍然有效（挂载点还在），所以只剔严格在下的。
- *
- * 同时也把剔掉的交回去：静默丢弃会让子代理反复撞「写不进去」而不知道为什么。
- */
-/**
- * 把路径解析到「可比形态」，与 helper 的 `resolve_comparable` 同一语义：对最深的**已存在**祖先做
- * realpath，再把不存在的尾巴原样接回去。
+ * 把路径解析到「可比形态」，与 helper 的 `resolve_comparable` 对齐：对最深的**已存在**祖先做
+ * realpath，再把不存在的尾巴原样接回去。两边都用 OS 的 realpath（Node 用 `.native`）并原样拼尾巴，
+ * 因此对存在的路径与「祖先软链 + 缺失尾巴」两类结果逐字节一致。
  *
  * 整体 realpath 在这里用不了：授权指向的路径可能还不存在（命令本来就要创建它），而挂载之后它更
  * 是不存在。软链必须先解析，否则「经软链指向 /tmp/x 的授权」在插件侧看着不在 /tmp 之下，helper 却
@@ -1457,7 +1450,12 @@ export function resolveComparable(path: string): string {
 	let current = path;
 	for (;;) {
 		try {
-			return resolve(realpathSync(current), ...tail);
+			// `realpathSync.native` 而不是 `realpathSync`：helper 用的是 Rust 的 `fs::canonicalize`，
+			// 它落到 OS 的 realpath(3)，而 Node 的 `realpathSync` 是自实现版本，两者在部分输入上结果不同。
+			// 尾巴用字面拼接而不是 `resolve`：`resolve` 会把 `..` 归一化，Rust 那边是原样 push 进去的，
+			// 归一化会让「授权路径还没创建」这一类判断与 helper 不一致。
+			const base = realpathSync.native(current);
+			return tail.length === 0 ? base : `${base.replace(/\/+$/, "")}/${tail.join("/")}`;
 		} catch {
 			const parent = dirname(current);
 			if (parent === current) return path;
@@ -1514,7 +1512,7 @@ function reportHiddenGrants(dropped: string[]): void {
 	if (fresh.length === 0) return;
 	for (const path of fresh) reportedHiddenGrants.add(path);
 	uiWarning?.(
-		`pi-subagents-extend: write grant(s) dropped as unusable in the sandbox: ${fresh.join(", ")} — the private tmpfs covers that path, so a grant there cannot take effect. Write the file with the write tool, or point bash.env.TMPDIR outside /tmp.`
+		`pi-subagents-extend: write grant(s) dropped: the sandbox mounts a private tmpfs over that path when it can, and a grant below a mount point is hidden inside it: ${fresh.join(", ")}. Write the file with the write tool, or point bash.env.TMPDIR outside /tmp.`
 	);
 }
 
