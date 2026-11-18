@@ -29,6 +29,14 @@ import type {
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
 
+// The suite must not write into the developer's real home. Sandbox spec files,
+// `git-excludes` and the `xdg-cache` tree all resolve through `homedir()`, which reads
+// `$HOME`, so pointing it at a throwaway directory keeps a test run from leaving state
+// behind — it also keeps `-mmin`-based housekeeping from deleting a *live* helper's spec.
+const realHome = process.env.HOME
+const testHome = mkdtempSync(join(repo, ".test-home-"))
+process.env.HOME = testHome
+
 // The sandbox helper is a Rust binary. Tests execute the cargo build output and
 // never the copy in `bin/`: that copy belongs to a loaded extension, so writing to
 // it during a test run would swap the binary out from under a running session —
@@ -3056,4 +3064,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 }
 
 rmSync(workdir, { recursive: true, force: true })
+if (realHome === undefined) delete process.env.HOME
+else process.env.HOME = realHome
+rmSync(testHome, { recursive: true, force: true })
 console.log("\npi-subagents-extend 测试通过")
