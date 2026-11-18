@@ -1708,6 +1708,7 @@ function anchorTargetPath(
 	} catch {
 		return undefined;
 	}
+	const wanted = new Set(anchors);
 	const owned = new Map<string, string>();
 	for (const line of raw.split("\n")) {
 		if (!line) continue;
