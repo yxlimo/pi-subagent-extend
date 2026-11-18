@@ -46,6 +46,13 @@ const restoreHome = (): void => {
   rmSync(testHome, { recursive: true, force: true })
 }
 process.on("exit", restoreHome)
+// `exit` does not run on a signal: Ctrl-C during a run would leave the directory behind.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    restoreHome()
+    process.exit(130)
+  })
+}
 
 // The sandbox helper is a Rust binary. Tests execute the cargo build output and
 // never the copy in `bin/`: that copy belongs to a loaded extension, so writing to
@@ -3013,11 +3020,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   并行调用各用各的 spec 文件，结果回来后清理")
 }
 
-// 85. spec 文件的生命周期：同一 toolCallId 被覆盖时要删旧的，会话结束时清掉陈旧的。
+// 85. spec 文件的生命周期：结果回来删自己的；重复 id 留下的孤儿与陈旧的交给会话结束清扫。
 //     早先只在 tool_result 里删，其余路径全部遗留 —— 实测这台机器上堆了 2993 份，
 //     因为「每次调用一份文件名」把「互相覆盖」换成了「互相累积」。
 {
-  // (a) 同一 toolCallId 又来一次：旧那份必须删掉，否则没人会再认领它。
+  // (a) 同一 toolCallId 又来一次：只覆盖条目，旧文件**不能**删 —— 我们判断不出先那次是否
+  //     已经启动，删掉会让一个在途 helper 以 exit 77 死在「读不到 spec」上；孤儿交给清扫。
+  //     两个方向都断言，否则实现改成「删」或「不删」都能过。
   const h = await handler({
     cwd: workdir,
     bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls"] } } }),
@@ -3030,7 +3039,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   await h.call("bash", second, "dup")
   const secondSpec = specPathOf(second.command)
   assert.notEqual(secondSpec, firstSpec, "the repeat gets its own file")
-  assert.equal(existsSync(firstSpec), false, "the superseded spec is removed instead of orphaned")
+  assert.ok(existsSync(firstSpec), "the superseded spec is left to the sweep instead of deleted under a live helper")
   assert.ok(existsSync(secondSpec), "the live one stays until its result arrives")
   await h.result("bash", "ok", false, "dup")
   assert.equal(existsSync(secondSpec), false, "and is removed when the result arrives")
@@ -3070,7 +3079,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(existsSync(excludes), true, "git-excludes in the same directory is untouched")
   h2.restore()
   rmSync(fakeHome, { recursive: true, force: true })
-  console.log("  ok   spec 生命周期：同 id 覆盖删旧的、会话结束清陈旧的、别的文件不碰")
+  console.log("  ok   spec 生命周期：结果回来删自己的、重复 id 的孤儿留给清扫、别的文件不碰")
 }
 
 rmSync(workdir, { recursive: true, force: true })
