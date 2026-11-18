@@ -1444,16 +1444,51 @@ export function privatisedDirs(cwd: string, scratch: string): string[] {
  *
  * 同时也把剔掉的交回去：静默丢弃会让子代理反复撞「写不进去」而不知道为什么。
  */
+/**
+ * 把路径解析到「可比形态」，与 helper 的 `resolve_comparable` 同一语义：对最深的**已存在**祖先做
+ * realpath，再把不存在的尾巴原样接回去。
+ *
+ * 整体 realpath 在这里用不了：授权指向的路径可能还不存在（命令本来就要创建它），而挂载之后它更
+ * 是不存在。软链必须先解析，否则「经软链指向 /tmp/x 的授权」在插件侧看着不在 /tmp 之下，helper 却
+ * 解析成 /tmp/x 把整份 spec 拒掉 —— 那正是这套逻辑要避免的「一条命令都跑不了」。
+ */
+export function resolveComparable(path: string): string {
+	const tail: string[] = [];
+	let current = path;
+	for (;;) {
+		try {
+			return resolve(realpathSync(current), ...tail);
+		} catch {
+			const parent = dirname(current);
+			if (parent === current) return path;
+			tail.unshift(basename(current));
+			current = parent;
+		}
+	}
+}
+
+/**
+ * 剔掉「拿到手也用不上」的写授权。
+ *
+ * helper 在私有化的目录上挂 tmpfs 之后，落在其**下**的授权路径从它的视图里消失，于是它拒掉整份
+ * spec（exit 77），bash 全灭。授权那个目录**本身**仍然有效（挂载点还在），所以只剔严格在下的。
+ *
+ * 两边都按 `resolveComparable` 解析，否则软链会造成两种错判：插件保留而 helper 拒（bash 全灭），
+ * 或插件剔掉而 helper 本来会接受（白白丢掉一条能用的授权）。
+ *
+ * 同时也把剔掉的交回去：静默丢弃会让子代理反复撞「写不进去」而不知道为什么。
+ */
 export function dropHiddenGrants(
 	write: string[],
 	cwd: string,
 	scratch: string,
 ): { kept: string[]; dropped: string[] } {
-	const dirs = privatisedDirs(cwd, scratch);
+	const dirs = privatisedDirs(cwd, scratch).map(resolveComparable);
 	const kept: string[] = [];
 	const dropped: string[] = [];
 	for (const path of write) {
-		if (dirs.some((dir) => path !== dir && path.startsWith(`${dir}/`))) dropped.push(path);
+		const resolved = resolveComparable(path);
+		if (dirs.some((dir) => resolved !== dir && resolved.startsWith(`${dir}/`))) dropped.push(path);
 		else kept.push(path);
 	}
 	return { kept, dropped };
@@ -1479,7 +1514,7 @@ function reportHiddenGrants(dropped: string[]): void {
 	if (fresh.length === 0) return;
 	for (const path of fresh) reportedHiddenGrants.add(path);
 	uiWarning?.(
-		`pi-subagents-extend: write grant(s) dropped, hidden by the sandbox's private tmpfs: ${fresh.join(", ")} — a path under /tmp (or under the spec's tmp) cannot be granted. Write the file with the write tool, or point bash.env.TMPDIR outside /tmp.`,
+		`pi-subagents-extend: write grant(s) dropped as unusable in the sandbox: ${fresh.join(", ")} — the private tmpfs covers that path, so a grant there cannot take effect. Write the file with the write tool, or point bash.env.TMPDIR outside /tmp.`
 	);
 }
 
@@ -2090,6 +2125,10 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
+		// 提示状态按会话重置：一个进程可能服务多个会话，模块级的 set 留到下一个会话就会把
+		// 本该发出的告警吞掉（那是「lost, not duplicated」的一种，且完全没有痕迹）。
+		reportedHiddenGrants.clear();
+		uiWarning = undefined;
 		const cwd = ctx.cwd ?? process.cwd();
 		// profile 只在声明了它的入口里生效：agent 的 subagentOnlyExtensions 会加载
 		// 那份两行 loader，主会话不会加载，所以主会话不会被项目默认值误锁。

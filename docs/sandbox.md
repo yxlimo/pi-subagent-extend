@@ -89,6 +89,13 @@ The alternative is disproportionate: one unusable grant would fail every bash ca
 including the `git status` a review role needs — and the child would see only an exit code it cannot
 interpret. The helper's refusal stays as the backstop for a spec written by something else.
 
+Both sides of that comparison resolve symlinks before they are compared, on the extension side as well
+as in the helper: a grant spelled through a link that points into `/tmp` looks innocent as a string and
+is not. Resolving only one side would reintroduce the failure in the other direction — the extension
+keeps a grant the helper then refuses, and every bash call dies on a spec the plugin believed was fine.
+The deepest existing ancestor is resolved and the missing tail is kept as typed, because the granted
+path may be a directory the command is about to create.
+
 A write outside them fails with `EACCES`. Landlock rules attach to the resolved inode, so a
 symlink inside a granted directory that points outside stays read-only: the rule follows the
 target. `node_modules` is the one deliberate exception, realpath'd before being granted.

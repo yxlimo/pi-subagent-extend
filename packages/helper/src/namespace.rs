@@ -162,6 +162,13 @@ pub fn hidden_grant(grants: &[PathBuf], privatised: &[PathBuf]) -> Option<(PathB
 
 /// [`hidden_grant`] with both sides resolved through their symlinks, so a grant that
 /// reaches a privatised directory through a link is caught too.
+///
+/// One class escapes it: a link whose *target* is strictly below the mount point and
+/// already gone after the mount (`otherlink -> /tmp/sub`, `/tmp/sub` was on the host).
+/// The link is then dangling, the walk stops above it, and the path is compared as typed —
+/// so such a grant still gets the older `spec path ... does not exist` instead of this one.
+/// Catching it would mean reading link targets textually after the mount; not worth it for
+/// a grant that cannot work either way, but the message is the poorer of the two.
 pub fn resolved_hidden_grant(
     grants: &[PathBuf],
     privatised: &[PathBuf],
