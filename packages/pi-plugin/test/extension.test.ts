@@ -29,27 +29,29 @@ import type {
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
 
-// The suite must not write into the developer's real home. Sandbox spec files,
-// `git-excludes` and the `xdg-cache` tree all resolve through `homedir()`, which reads
-// `$HOME`, so pointing it at a throwaway directory keeps a test run from leaving state
-// behind — it also keeps `-mmin`-based housekeeping from deleting a *live* helper's spec.
-const realHome = process.env.HOME
-const testHome = mkdtempSync(join(repo, ".test-home-"))
-process.env.HOME = testHome
+// The suite must not write into the developer's real home. Spec files, `git-excludes` and the
+// `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
+// the run. Not `tmpdir()`: the helper mounts a private tmpfs over `/tmp`, and a grant underneath
+// it stops existing — a spec naming such a path is refused with "does not exist".
+// Redirecting `HOME` instead is too blunt: on CI `cargo` is rustup's shim and tries to create
+// `$HOME/.rustup`, which the sandbox refuses because the package directory is not a write grant.
+const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
+const testState = mkdtempSync(join(repo, ".test-state-"))
+process.env.PI_SUBAGENTS_EXTEND_STATE = testState
 
 // Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise
-// leave `.test-home-*` behind as an untracked directory, and pi-subagents' own patch capture
+// leave `.test-state-*` behind as an untracked directory, and pi-subagents' own patch capture
 // (`git add -A`) would sweep it into a patch. Both steps are idempotent.
-const restoreHome = (): void => {
-  if (realHome === undefined) delete process.env.HOME
-  else process.env.HOME = realHome
-  rmSync(testHome, { recursive: true, force: true })
+const restoreState = (): void => {
+  if (realState === undefined) delete process.env.PI_SUBAGENTS_EXTEND_STATE
+  else process.env.PI_SUBAGENTS_EXTEND_STATE = realState
+  rmSync(testState, { recursive: true, force: true })
 }
-process.on("exit", restoreHome)
+process.on("exit", restoreState)
 // `exit` does not run on a signal: Ctrl-C during a run would leave the directory behind.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, () => {
-    restoreHome()
+    restoreState()
     process.exit(130)
   })
 }
@@ -1828,7 +1830,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     )
     if (out) {
       assert.equal(out.status, 0, `sandboxed go test failed: ${out.stderr}`)
-      assert.ok(existsSync(join(homedir(), ".cache", "pi-subagents-extend", "xdg-cache")), "the build cache lives in ~/.cache")
+      assert.ok(existsSync(join(testState, "xdg-cache")), "the build cache lives in the state directory")
     } else {
       console.log("  skip  live go test: no real sandbox on this kernel")
     }
@@ -3046,13 +3048,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   h.restore()
 
   // (b) session_shutdown 按年龄清扫：陈旧的清掉，新的留着（别的进程可能正在用），
-  //     同一目录里的 git-excludes 绝不能碰。homedir() 读 $HOME，所以把 HOME 指到临时目录。
+  //     同一目录里的 git-excludes 绝不能碰。清扫读的是状态目录，所以把它指到临时目录。
   const h2 = await handler({
     cwd: workdir,
     bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls"] } } }),
   })
-  const fakeHome = mkdtempSync(join(tmpdir(), "pi-specsweep-"))
-  const cache = join(fakeHome, ".cache", "pi-subagents-extend")
+  const fakeState = mkdtempSync(join(tmpdir(), "pi-specsweep-"))
+  const cache = fakeState
   mkdirSync(cache, { recursive: true })
   const staleSpec = join(cache, "spec-1-1-t1.json")
   const staleTemp = join(cache, "spec-1-3-t3.json.tmp")
@@ -3065,23 +3067,23 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   utimesSync(staleTemp, old, old)
   // git-excludes 也改老：否则「年龄闸门」本身就保住了它，前缀过滤那条守卫就没人钉。
   utimesSync(excludes, old, old)
-  const previousHome = process.env.HOME
-  process.env.HOME = fakeHome
+  const previousState = process.env.PI_SUBAGENTS_EXTEND_STATE
+  process.env.PI_SUBAGENTS_EXTEND_STATE = fakeState
   try {
     await h2.shutdown()
   } finally {
-    if (previousHome === undefined) delete process.env.HOME
-    else process.env.HOME = previousHome
+    if (previousState === undefined) delete process.env.PI_SUBAGENTS_EXTEND_STATE
+    else process.env.PI_SUBAGENTS_EXTEND_STATE = previousState
   }
   assert.equal(existsSync(staleSpec), false, "a stale spec is swept at shutdown")
   assert.equal(existsSync(staleTemp), false, "a stale half-written temp file is swept too")
   assert.equal(existsSync(freshSpec), true, "a fresh spec is left alone for its own process")
   assert.equal(existsSync(excludes), true, "git-excludes in the same directory is untouched")
   h2.restore()
-  rmSync(fakeHome, { recursive: true, force: true })
+  rmSync(fakeState, { recursive: true, force: true })
   console.log("  ok   spec 生命周期：结果回来删自己的、重复 id 的孤儿留给清扫、别的文件不碰")
 }
 
 rmSync(workdir, { recursive: true, force: true })
-restoreHome()
+restoreState()
 console.log("\npi-subagents-extend 测试通过")
