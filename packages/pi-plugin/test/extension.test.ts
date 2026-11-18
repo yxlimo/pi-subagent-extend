@@ -10,7 +10,8 @@ import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
-import { join, dirname } from "node:path"
+import { createHash } from "node:crypto"
+import { join, dirname, basename } from "node:path"
 import { fileURLToPath } from "node:url"
 import type {
   CommandSpec,
@@ -804,7 +805,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const write = await h.call("write", { content: "x" })
   assert.equal(write?.block, true, "write without path is refused")
-  assert.match(write.reason, /needs "path"/, "write names the path argument that is missing")
+  assert.match(write.reason, /has no "path"/, "write names the path argument that is missing")
   assert.ok(!/outside the (read )?scope/.test(write.reason), "write does not blame the scope")
 
   const grep = await h.call("grep", { pattern: "foo" })
@@ -3127,7 +3128,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const missing = await h.call("replace", { remove_from: "x", text: "y" })
   assert.equal(missing?.block, true, "a write tool without its path is refused")
-  assert.match(String(missing?.reason), /needs "path"/, "the message names the missing argument")
+  assert.match(String(missing?.reason), /no target path/, "the message says the target is unknown")
   assert.match(String(missing?.reason), /requirePath/, "and names the switch that fixes it")
   // 预算是 1：如果按撞权限计数，第二次就该 warn、第三次硬停。这里不该有任何停机。
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -3223,7 +3224,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.notEqual(viaSchema?.block, true, "the schema's own argument name is accepted")
   const wrongArg = await h.call("mytool", { path: "src/a.ts" })
   assert.equal(wrongArg?.block, true, "passing a different argument name is a missing path")
-  assert.match(String(wrongArg?.reason), /needs "file_path"/, "and the message names the schema's argument")
+  assert.match(String(wrongArg?.reason), /has no "file_path"/, "and the message names the schema's argument")
   const outlineOutside = await h.call("outline", { path: "../x.ts" })
   assert.equal(outlineOutside?.block, true, "outline is a read tool and obeys the read scope")
   assert.match(String(outlineOutside?.reason), /read scope/, "refused by the read scope")
@@ -3256,6 +3257,105 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(undeclared?.block, true, "__proto__ is not silently treated as a known tool")
   h.restore()
   console.log("  ok   原型键工具名不污染声明表")
+}
+
+// 91. 锚点编辑工具不带路径时，目标从「锚点归属」解析出来再判。归属由宿主扩展记在会话
+//     sidecar 里（sessions/<sha256(sessionFile) 前 24 位>.registry.jsonl），这里用真的
+//     文件布局去喂它：解析得到的路径必须真的受写范围约束，而不是解析成功就放行。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-anchor-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "inside.ts"), "inside\n")
+  mkdirSync(join(tree, "..", `${basename(tree)}-elsewhere`), { recursive: true })
+
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-hldir-"))
+  const sessionFile = join(hl, "session.jsonl")
+  const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const sidecar = join(hl, "sessions", `${key}.registry.jsonl`)
+  const insideAbs = join(tree, "src", "inside.ts")
+  const outsideAbs = join(tree, "..", `${basename(tree)}-elsewhere`, "x.ts")
+  writeFileSync(
+    sidecar,
+    [
+      JSON.stringify({ kind: "session", sessionFile }),
+      JSON.stringify({ kind: "allocate", path: insideAbs, rows: [["aaina", "inside"], ["aainb", "more"]] }),
+      JSON.stringify({ kind: "allocate", path: outsideAbs, rows: [["aainc", "elsewhere"]] }),
+      "",
+    ].join("\n"),
+  )
+
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = sessionFile
+
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: false } }),
+  })
+  const allowed = await h.call("replace", { remove_from: "aaina", remove_to: "aainb", text: "x" })
+  assert.notEqual(allowed?.block, true, "an anchor-only write resolves to its own file and stays allowed")
+  const refused = await h.call("replace", { remove_from: "aainc", remove_to: "aainc", text: "x" })
+  assert.equal(refused?.block, true, "an anchor owned by a file outside the scope is refused")
+  assert.match(String(refused?.reason), /outside the scope|not writable/, "and it is judged by the scope")
+
+  // 释放之后归属没了：不能继续放行，必须退回「拿不到目标」。
+  writeFileSync(
+    sidecar,
+    [
+      JSON.stringify({ kind: "session", sessionFile }),
+      JSON.stringify({ kind: "allocate", path: insideAbs, rows: [["aaina", "inside"]] }),
+      JSON.stringify({ kind: "free", path: insideAbs }),
+      "",
+    ].join("\n"),
+  )
+  const freed = await h.call("replace", { remove_from: "aaina", remove_to: "aaina", text: "x" })
+  assert.equal(freed?.block, true, "a freed anchor no longer resolves, so the write is refused")
+  assert.match(String(freed?.reason), /no target path/, "and the refusal says the target is unknown")
+
+  h.restore()
+  if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+  else process.env.PI_HASHLINE_DIR = previous.dir
+  if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+  else process.env.PI_SESSION_FILE = previous.session
+  console.log("  ok   锚点归属解析：范围内放行、范围外拒绝、释放后拒绝")
+}
+
+// 92. 锚点解析不出来的两条硬边界：sidecar 不存在、以及锚点是未知值。两者都必须拒绝，
+//     绝不能因为「读不到就不知道」而放行——那是把写范围变成摆设。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-anchor-miss-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-hldir-miss-"))
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = join(hl, "session.jsonl")
+
+  // scope 用整棵树：否则「拿不到目标 → 按 . 判定 → 落在范围外 → 拒绝」会替这条拒绝挡着，
+  // 用例就失去了判别力（实测过：把这条拒绝关掉，只有在写范围覆盖根目录时才真的放行）。
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: false } }),
+  })
+  const noSidecar = await h.call("replace", { remove_from: "zzzzz", text: "x" })
+  assert.equal(noSidecar?.block, true, "no sidecar means no target, so the write is refused")
+  assert.match(String(noSidecar?.reason), /requirePath/, "and it names the option that avoids the guesswork")
+
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const key = createHash("sha256").update(String(process.env.PI_SESSION_FILE)).digest("hex").slice(0, 24)
+  writeFileSync(
+    join(hl, "sessions", `${key}.registry.jsonl`),
+    [JSON.stringify({ kind: "session", sessionFile: String(process.env.PI_SESSION_FILE) }), ""].join("\n"),
+  )
+  const unknownAnchor = await h.call("replace", { remove_from: "zzzzz", text: "x" })
+  assert.equal(unknownAnchor?.block, true, "an unknown anchor is refused rather than allowed")
+
+  h.restore()
+  if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+  else process.env.PI_HASHLINE_DIR = previous.dir
+  if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+  else process.env.PI_SESSION_FILE = previous.session
+  console.log("  ok   锚点解析不到时一律拒绝，绝不因读不到而放行")
 }
 
 rmSync(workdir, { recursive: true, force: true })

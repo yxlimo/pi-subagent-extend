@@ -41,6 +41,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
@@ -1651,6 +1652,84 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		return counted.stop ? stop(composed) : deny(composed);
 	};
 
+
+/**
+ * 从锚点解析目标文件。
+ *
+ * 锚点编辑工具（replace / replace_match / insert / copy / move）在入参里可以不带路径：
+ * 目标由「锚点归属」决定，而归属记录在宿主扩展自己的会话 sidecar 里
+ * （`<config>/sessions/<sha256(sessionFile) 前 24 位>.registry.jsonl`，事件为
+ * `allocate {path, rows}` / `free` / `clear`）。
+ *
+ * 我们读它，是为了给这些工具判「目标在不在写范围里」。不读就只能一律拒绝，那样子代理在
+ * 这类宿主上一个字也改不了。代价是依赖一份第三方私有格式，所以证据链是单向的：
+ * 读不到、读不懂、查不到 —— 一律当作**拿不到目标**，然后拒绝。绝不会因为读不到而放行。
+ */
+function anchorTargetPath(
+	sessionFile: string | undefined,
+	anchors: string[],
+): string | undefined {
+	if (!sessionFile || anchors.length === 0) return undefined;
+	const dir = join(
+		process.env.PI_HASHLINE_DIR ??
+			join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "pi-hashline-edit-pro"),
+		"sessions",
+	);
+	const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24);
+	const sidecar = join(dir, `${key}.registry.jsonl`);
+	let raw: string;
+	try {
+		const stamp = `${statSync(sidecar).mtimeMs}:${statSync(sidecar).size}`;
+		const cached = anchorCache.get(sidecar);
+		if (cached?.stamp === stamp) raw = cached.raw;
+		else {
+			raw = readFileSync(sidecar, "utf8");
+			anchorCache.set(sidecar, { stamp, raw });
+		}
+	} catch {
+		return undefined;
+	}
+	const wanted = new Set(anchors);
+	const owned = new Map<string, string>();
+	for (const line of raw.split("\n")) {
+		if (!line) continue;
+		let event: { kind?: string; path?: string; rows?: unknown; anchors?: unknown };
+		try {
+			event = JSON.parse(line) as typeof event;
+		} catch {
+			// 半行（正在追加）或坏行：跳过。宁可判不出来而拒绝，也不猜。
+			continue;
+		}
+		if (event.kind === "clear") owned.clear();
+		else if (event.kind === "free") {
+			if (Array.isArray(event.anchors)) {
+				for (const anchor of event.anchors) if (typeof anchor === "string") owned.delete(anchor);
+			} else if (typeof event.path === "string") {
+				for (const [anchor, path] of owned) if (path === event.path) owned.delete(anchor);
+			}
+		} else if (event.kind === "allocate" && typeof event.path === "string" && Array.isArray(event.rows)) {
+			for (const row of event.rows) {
+				// 只留我们查的那几个锚点：一次 allocate 可能带整份文件的行（实测一份 1998 条），
+				// 全部收进 map 没有意义。
+				if (Array.isArray(row) && typeof row[0] === "string" && wanted.has(row[0])) {
+					owned.set(row[0], event.path);
+				}
+			}
+		}
+	}
+	for (const anchor of anchors) {
+		const found = owned.get(anchor);
+		if (found) return found;
+	}
+	return undefined;
+}
+
+/** sidecar 解析缓存：一次工具调用读一次文件太长，按 mtime+size 失效。 */
+const anchorCache = new Map<string, { stamp: string; raw: string }>();
+
+/** 可能承载锚点的入参名。同一份文件的锚点，工具自己会校验归属一致。 */
+const ANCHOR_ARGS = ["remove_from", "remove_to", "source_from", "source_to", "anchor"];
+
 	/** 工具名 → schema 里的路径入参名；一处缓存，避免每次调用都问一遍注册表。 */
 	const schemaPathArgs = new Map<string, string | undefined>();
 
@@ -1693,6 +1772,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		event: { toolName: string; input?: unknown },
 		cwd: string,
 		kind: { access: "read" | "write"; pathArg: string | false },
+		sessionFile: string | undefined,
 	): { block: true; reason: string; terminate?: boolean } | undefined => {
 		const isWrite = kind.access === "write";
 		// 声明成写工具却没有可判的路径入参：目标拿不到，就没有任何授权能覆盖它。永远拒绝，
@@ -1704,7 +1784,18 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		}
 		const input = (event as { input?: Record<string, unknown> }).input;
 		const pathValue = kind.pathArg === false ? undefined : input?.[kind.pathArg];
-		const raw = typeof pathValue === "string" ? pathValue.trim() : "";
+		let raw = typeof pathValue === "string" ? pathValue.trim() : "";
+		// 写类工具没带路径时，先按「锚点归属」把目标找回来：锚点编辑工具的目标就是锚点所属的
+		// 文件，归属记在宿主扩展的会话 sidecar 里。解析不出来就保持空 → 下面拒绝。
+		let anchorsTried: string[] = [];
+		if (isWrite && !raw) {
+			for (const key of ANCHOR_ARGS) {
+				const value = input?.[key];
+				if (typeof value === "string" && value.trim() !== "") anchorsTried.push(value.trim());
+			}
+			const resolved = anchorTargetPath(sessionFile, anchorsTried);
+			if (resolved) raw = resolved;
+		}
 		const target = raw || ".";
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 			return bail(`pi-subagents-extend: read budget exhausted (${policy.maxReads} reads).`);
@@ -1724,7 +1815,9 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		// 这是用法错误不是权限错误，不计入撞权限计数。
 		if (isWrite && !raw) {
 			return deny(
-				`pi-subagents-extend: ${event.toolName} needs "${kind.pathArg}"; without it the target cannot be checked, so no scope can allow it (source: ${policy.source}). Enable the tool's force-path option (pi-hashline-edit-pro: requirePath) or declare tools.${event.toolName}.path in the bindings.\nWrite scope: ${preview(policy.writeGlobs)}`,
+				anchorsTried.length > 0
+					? `pi-subagents-extend: ${event.toolName} has no target path — no "${kind.pathArg}" was passed, and the anchor it points at is not in this session's anchor registry, so the owning file is unknown. Without a target nothing can be checked, so no scope can allow it (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`
+					: `pi-subagents-extend: ${event.toolName} has no "${kind.pathArg}" — without a target nothing can be checked, so no scope can allow it (source: ${policy.source}). Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
 			);
 		}
 		const readOk = matches(policy.regexps, cwd, target);
@@ -1989,7 +2082,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		// 一旦把名字写进 allowTools，路径判定整个被跳过——写范围在那种宿主上等于失效
 		// （实测：allowTools 里写 replace 时，树外路径照写不误）。
 		const kind = toolKindOf(event.toolName);
-		if (kind) return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd, kind);
+		if (kind) {
+			const sessionFile =
+				ctx?.sessionManager?.getSessionFile?.() ?? process.env.PI_SESSION_FILE ?? undefined;
+			return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd, kind, sessionFile);
+		}
 
 		// SAFE_TOOLS 已经在最前面处理过，这里只管调用方显式放行的工具。
 		if (policy.allowTools.includes(event.toolName)) return undefined;
