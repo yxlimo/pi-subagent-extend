@@ -3358,6 +3358,108 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   锚点解析不到时一律拒绝，绝不因读不到而放行")
 }
 
+// 93. copy / move 是双文件工具：`source_*` 属于源文件，`anchor` 属于目标文件。两组锚点必须
+//     分别判定 —— 合成一组去查只会拿到先命中的那一侧（源在前），于是目标完全没判，源在写范围
+//     内、目标在范围外时会被放行。这类工具在子进程里直接落盘，没有 Landlock 兜底，那就是真的
+//     写越界。顺带钉住 copy 与 move 的源权限不同：copy 只读源，move 删源里的行。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-transfer-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  mkdirSync(join(tree, "docs"), { recursive: true })
+
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-xfer-hl-"))
+  const sessionFile = join(hl, "session.jsonl")
+  const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const srcAbs = join(tree, "src", "a.ts")
+  const docAbs = join(tree, "docs", "b.md")
+  const writeSidecar = (rows: Record<string, string>) =>
+    writeFileSync(
+      join(hl, "sessions", `${key}.registry.jsonl`),
+      [
+        JSON.stringify({ kind: "session", sessionFile }),
+        ...Object.entries(rows).map(([path, anchor]) =>
+          JSON.stringify({ kind: "allocate", path, rows: [[anchor, "line"]] }),
+        ),
+        "",
+      ].join("\n"),
+    )
+  writeSidecar({ [srcAbs]: "srcA", [docAbs]: "docB" })
+
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = sessionFile
+
+  const transferTools = [
+    {
+      name: "copy",
+      parameters: { properties: { anchor: { type: "string" }, source_from: { type: "string" } } },
+    },
+    {
+      name: "move",
+      parameters: { properties: { anchor: { type: "string" }, source_from: { type: "string" } } },
+    },
+  ]
+  const transfer = { source_from: "srcA", source_to: "srcA", anchor: "docB", direction: "after" }
+  const open = async (bindings: Record<string, unknown>) => {
+    const h = await handler({ cwd: tree, piTools: transferTools, bindings: JSON.stringify({ "pi-subagents-extend/1": bindings }) })
+    return h
+  }
+
+  // 源与目标都在读范围里，写范围只有 docs：copy 只读源 → 放行；move 要删源 → 拒绝并点名源。
+  const copyOnly = await open({ scope: ["src/**", "docs/**"], writeScope: ["docs/**"], bash: false })
+  const copyAllowed = await copyOnly.call("copy", transfer)
+  assert.notEqual(copyAllowed?.block, true, "copy 只读源，源只读时仍应放行")
+  const moveRefused = await copyOnly.call("move", transfer)
+  assert.equal(moveRefused?.block, true, "move 会删源里的行，源只读时必须拒绝")
+  assert.match(String(moveRefused?.reason), /source file/, "拒绝文案点名是源那一侧不行")
+  assert.match(String(moveRefused?.reason), /src\/a\.ts/, "并给出源文件路径")
+  copyOnly.restore()
+
+  // 源在写范围内、目标在写范围外：这是修复前会放行的那条。必须拒绝，且点名目标。
+  const destOutside = await open({ scope: ["src/**", "docs/**"], writeScope: ["src/**"], bash: false })
+  for (const tool of ["copy", "move"]) {
+    const refused = await destOutside.call(tool, transfer)
+    assert.equal(refused?.block, true, `${tool} 不能把内容写到写范围之外`)
+    assert.match(String(refused?.reason), /docs\/b\.md/, `${tool} 的拒绝文案点名目标文件`)
+    assert.doesNotMatch(String(refused?.reason), /neither readable nor writable/, `${tool} 不再把源当成写目标去判`)
+  }
+  destOutside.restore()
+
+  // 两侧都可写：都放行（否则上面两条可以靠「一律拒绝」骗过去）。
+  const bothWritable = await open({ scope: ["src/**", "docs/**"], writeScope: ["src/**", "docs/**"], bash: false })
+  for (const tool of ["copy", "move"]) {
+    const allowed = await bothWritable.call(tool, transfer)
+    assert.notEqual(allowed?.block, true, `${tool} 两侧都可写时放行`)
+  }
+  // 声明覆盖：把 copy 的源改成按写判，源只读时就要拒。
+  bothWritable.restore()
+  const override = await open({
+    scope: ["src/**", "docs/**"],
+    writeScope: ["docs/**"],
+    bash: false,
+    tools: { copy: { transferSource: "write" } },
+  })
+  const overridden = await override.call("copy", transfer)
+  assert.equal(overridden?.block, true, "transferSource: write 让 copy 的源也只读不了")
+  assert.match(String(overridden?.reason), /source file/, "并且文案仍然点名源")
+  override.restore()
+
+  // 目标锚点查不到归属：两侧都得知道才能判，所以一律拒绝，绝不因为缺一侧就只判另一侧。
+  writeSidecar({ [srcAbs]: "srcA" })
+  const halfKnown = await open({ scope: ["src/**", "docs/**"], writeScope: ["docs/**"], bash: false })
+  const halfRefused = await halfKnown.call("copy", transfer)
+  assert.equal(halfRefused?.block, true, "目标锚点解析不到时拒绝")
+  assert.match(String(halfRefused?.reason), /destination anchors/, "并说明缺的是目标那一侧")
+  halfKnown.restore()
+
+  if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+  else process.env.PI_HASHLINE_DIR = previous.dir
+  if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+  else process.env.PI_SESSION_FILE = previous.session
+  console.log("  ok   copy/move 的源与目标分别判定：源只读时 copy 放行、move 拒绝，写越界被挡")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")
