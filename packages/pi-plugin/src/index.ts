@@ -90,6 +90,15 @@ const DEFAULT_TOOL_ACCESS: Record<string, "read" | "write"> = {
 	move: "write",
 	undo_last_change: "write",
 };
+/**
+ * 双文件工具的源文件按什么判。`copy` 只读源（源可以只读），`move` 从源里删（源必须可写）。
+ * 没在这张表里的双文件工具按 `write` 判 —— 拿不准就往严里判，这是本层的既有取向。
+ */
+const DEFAULT_TRANSFER_SOURCE: Record<string, "read" | "write"> = {
+	copy: "read",
+	move: "write",
+};
+
 const EXEC_TOOLS = ["bash", "powershell", "codemode"];
 /**
  * 不碰文件系统的会话级运行时工具，范围生效时照常放行。
@@ -153,6 +162,8 @@ export function hasUnquotedShellControl(command: string): boolean {
 interface ToolDeclaration {
 	access?: "read" | "write";
 	path?: string | false;
+	/** 双文件工具（copy/move）的源文件按读还是按写判；缺省见 `DEFAULT_TRANSFER_SOURCE`。 */
+	transferSource?: "read" | "write";
 }
 
 /**
@@ -175,7 +186,7 @@ function parseToolDeclarations(value: unknown): {
 		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
 			return { declarations, error: `tools.${name} must be an object` };
 		}
-		const entry = raw as { access?: unknown; path?: unknown };
+		const entry = raw as { access?: unknown; path?: unknown; transferSource?: unknown };
 		if (entry.access !== undefined && entry.access !== "read" && entry.access !== "write") {
 			return { declarations, error: `tools.${name}.access must be "read" or "write"` };
 		}
@@ -186,12 +197,20 @@ function parseToolDeclarations(value: unknown): {
 		) {
 			return { declarations, error: `tools.${name}.path must be a non-empty string or false` };
 		}
-		declarations[name] = {
-			...(entry.access === undefined ? {} : { access: entry.access }),
-			...(entry.path === undefined
-				? {}
-				: { path: entry.path === false ? false : (entry.path as string).trim() }),
-		};
+		if (
+			entry.transferSource !== undefined &&
+			entry.transferSource !== "read" &&
+			entry.transferSource !== "write"
+		) {
+			return { declarations, error: `tools.${name}.transferSource must be "read" or "write"` };
+		}
+		const declaration: ToolDeclaration = {};
+		if (entry.access !== undefined) declaration.access = entry.access;
+		if (entry.path !== undefined) {
+			declaration.path = entry.path === false ? false : (entry.path as string).trim();
+		}
+		if (entry.transferSource !== undefined) declaration.transferSource = entry.transferSource;
+		declarations[name] = declaration;
 	}
 	return { declarations };
 }
@@ -1625,7 +1644,6 @@ function anchorTargetPath(
 	} catch {
 		return undefined;
 	}
-	const wanted = new Set(anchors);
 	const owned = new Map<string, string>();
 	for (const line of raw.split("\n")) {
 		if (!line) continue;
@@ -1662,6 +1680,14 @@ const anchorCache = new Map<string, { stamp: string; raw: string }>();
 /** 可能承载锚点的入参名。同一份文件的锚点，工具自己会校验归属一致。 */
 const ANCHOR_ARGS = ["remove_from", "remove_to", "source_from", "source_to", "anchor"];
 
+/**
+ * 双文件工具（copy / move）把两份文件写在同一组入参里：`source_from` / `source_to` 属于
+ * 源文件，`anchor`（以及 `remove_from` / `remove_to`）属于目标文件。两组锚点归属不同文件，
+ * 必须分开解析 —— 合成一个列表去查，只会返回先命中的那一个，等于只判了一侧。
+ */
+const TRANSFER_SOURCE_ARGS = ["source_from", "source_to"];
+const TRANSFER_DEST_ARGS = ["remove_from", "remove_to", "anchor"];
+
 	/** 工具名 → schema 里的路径入参名；一处缓存，避免每次调用都问一遍注册表。 */
 	const schemaPathArgs = new Map<string, string | undefined>();
 
@@ -1692,18 +1718,22 @@ const ANCHOR_ARGS = ["remove_from", "remove_to", "source_from", "source_to", "an
 	 */
 	const toolKindOf = (
 		toolName: string,
-	): { access: "read" | "write"; pathArg: string | false } | undefined => {
+	): { access: "read" | "write"; pathArg: string | false; transferSource?: "read" | "write" } | undefined => {
 		const declared = Object.hasOwn(policy.tools, toolName) ? policy.tools[toolName] : undefined;
 		const fallback = Object.hasOwn(DEFAULT_TOOL_ACCESS, toolName) ? DEFAULT_TOOL_ACCESS[toolName] : undefined;
 		const access = declared?.access ?? fallback;
 		if (!access) return undefined;
-		return { access, pathArg: declared?.path ?? pathArgFromSchema(toolName) ?? "path" };
+		return {
+			access,
+			pathArg: declared?.path ?? pathArgFromSchema(toolName) ?? "path",
+			...(declared?.transferSource === undefined ? {} : { transferSource: declared.transferSource }),
+		};
 	};
 
 	const pathToolVerdict = (
 		event: { toolName: string; input?: unknown },
 		cwd: string,
-		kind: { access: "read" | "write"; pathArg: string | false },
+		kind: { access: "read" | "write"; pathArg: string | false; transferSource?: "read" | "write" },
 		sessionFile: string | undefined,
 	): { block: true; reason: string; terminate?: boolean } | undefined => {
 		const isWrite = kind.access === "write";
@@ -1719,15 +1749,70 @@ const ANCHOR_ARGS = ["remove_from", "remove_to", "source_from", "source_to", "an
 		let raw = typeof pathValue === "string" ? pathValue.trim() : "";
 		// 写类工具没带路径时，先按「锚点归属」把目标找回来：锚点编辑工具的目标就是锚点所属的
 		// 文件，归属记在宿主扩展的会话 sidecar 里。解析不出来就保持空 → 下面拒绝。
+		const anchorTextOf = (keys: string[]): string[] =>
+			keys
+				.map((key) => input?.[key])
+				.filter((value): value is string => typeof value === "string")
+				.map((value) => value.trim())
+				.filter((value) => value !== "");
+
 		let anchorsTried: string[] = [];
 		if (isWrite && !raw) {
-			for (const key of ANCHOR_ARGS) {
-				const value = input?.[key];
-				if (typeof value === "string" && value.trim() !== "") anchorsTried.push(value.trim());
-			}
+			anchorsTried = anchorTextOf(ANCHOR_ARGS);
 			const resolved = anchorTargetPath(sessionFile, anchorsTried);
 			if (resolved) raw = resolved;
 		}
+
+		const readable = (path: string): boolean => matches(policy.regexps, cwd, path);
+		const writable = (path: string): boolean =>
+			matches(policy.writeRegexps, cwd, path) || underAny(policy.absoluteWrite, cwd, path);
+
+		// 双文件工具（copy / move）：`source_*` 属于源文件，`anchor`（与 `remove_*`）属于目标
+		// 文件，两份文件必须分别判定。合成一组去查只会拿到先命中的那一侧，另一侧完全没判 ——
+		// 源在写范围内、目标在范围外时会被放行，而这类工具在子进程里直接落盘，没有 Landlock
+		// 兜底，放行就是一次真正的写越界。
+		const sourceAnchors = isWrite ? anchorTextOf(TRANSFER_SOURCE_ARGS) : [];
+		const destAnchors = isWrite ? anchorTextOf(TRANSFER_DEST_ARGS) : [];
+		if (isWrite && sourceAnchors.length > 0 && destAnchors.length > 0) {
+			const sourcePath = anchorTargetPath(sessionFile, sourceAnchors);
+			const destPath = anchorTargetPath(sessionFile, destAnchors);
+			if (!sourcePath || !destPath) {
+				const unknown = sourcePath ? "destination" : "source";
+				return deny(
+					`pi-subagents-extend: ${event.toolName} moves content between two files, and the ${unknown} anchors are not in this session's anchor registry, so that file is unknown. Both sides have to be known before either can be checked (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
+				);
+			}
+			// 宿主开了 requirePath 时显式 path 指向其中一侧；对不上就说明声明与锚点不一致，
+			// 此时不能假定它说的是哪一侧。
+			if (raw && raw !== sourcePath && raw !== destPath) {
+				return deny(
+					`pi-subagents-extend: ${event.toolName} was given path "${raw}", which matches neither file its anchors belong to ("${sourcePath}" and "${destPath}") (source: ${policy.source}). Pass the path of the file the anchors came from, or omit it.`,
+				);
+			}
+			const sourceAccess = kind.transferSource ?? DEFAULT_TRANSFER_SOURCE[event.toolName] ?? "write";
+			if (sourceAccess === "read") {
+				if (!readable(sourcePath)) {
+					return bail(
+						`pi-subagents-extend: ${event.toolName} reads "${sourcePath}", which is outside the read scope — copying content out of it would carry that content past this layer (source: ${policy.source}). Say what you need from it instead.\nRead scope: ${preview(policy.globs)}`,
+					);
+				}
+			} else if (!writable(sourcePath)) {
+				return writeBail(
+					`pi-subagents-extend: ${event.toolName} changes the source file "${sourcePath}" (a move deletes the lines it takes), and that file is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Copy instead of moving if the source may only be read.`,
+				);
+			}
+			if (!writable(destPath)) {
+				return writeBail(
+					`pi-subagents-extend: "${destPath}" is readable but not writable, so ${event.toolName} cannot place the block there — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+				);
+			}
+			const junk = probe?.checkWriteTarget(destPath);
+			if (junk) return { block: true, reason: junk.reason, terminate: false };
+			probe?.noteWriteActivity();
+			// 两侧都过了：不要落回下面的单路径判定（它会把源当成写目标再判一次）。
+			return undefined;
+		}
+
 		const target = raw || ".";
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 			return bail(`pi-subagents-extend: read budget exhausted (${policy.maxReads} reads).`);

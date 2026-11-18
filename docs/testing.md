@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 92 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 93 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 
@@ -56,6 +56,14 @@ Cases 91-92 cover recovering a write target from anchor ownership, which the hos
 resolver miss must refuse, never allow. Case 92 deliberately uses `scope: ["."]`: with a narrower
 scope the fallback target `.` would be refused for the wrong reason and the case would stop
 discriminating.
+
+Case 93 covers the two-file tools. `copy` and `move` name a source and a destination in one
+call, and the two must be judged separately: resolving them into one list returns whichever anchor
+comes first, and that is the source, so the destination went unchecked — a copy out of the write
+scope was allowed. The case pins both directions (copy's source may be read-only, move's may not),
+the escape (destination outside the write scope is refused, naming the destination), the positive
+controls (both sides writable is allowed, so "refuse everything" cannot pass), the
+`transferSource` override, and an unresolved destination.
 
 Every case here was mutation-verified — the implementation was reverted and the suite went red —
 because a case that cannot fail proves nothing.
