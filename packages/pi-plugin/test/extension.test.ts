@@ -7,7 +7,7 @@
 //   node test/extension.test.ts
 
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { homedir, tmpdir } from "node:os"
 import { join, dirname } from "node:path"
@@ -93,10 +93,14 @@ if (described?.landlock?.supported) {
 }
 
 /** The sandbox spec the extension wrote for a rewritten bash command. */
-function specOf(command: string): SandboxSpec {
+/** The spec file the extension wrote for a rewritten bash command (path, not content). */
+function specPathOf(command: string): string {
   const match = /'--spec' '([^']+)'/.exec(command)
   assert.ok(match, `no --spec in: ${command}`)
-  return JSON.parse(readFileSync(match[1], "utf8")) as SandboxSpec
+  return match[1]
+}
+function specOf(command: string): SandboxSpec {
+  return JSON.parse(readFileSync(specPathOf(command), "utf8")) as SandboxSpec
 }
 
 const ext = (await import(join(repo, "src", "index.ts"))) as unknown as ExtensionModule
@@ -129,29 +133,49 @@ async function handler({ bindings, cwd = workdir, profile, profileFile }: Handle
     await handlers.session_start({ type: "session_start" }, ctx)
   }
 
+  // pi 给每次工具调用一个新 id，所以默认 id 也按调用递增：写死 "t1" 会让「两次调用
+  // 各自带 spec」的用例看起来像是靠泄漏才成立。result 不带 id 时配对**最近一次** call，
+  // 这样「call 完紧跟 result」的老写法照旧成立。
+  let callSeq = 0
+  let lastCallId = "t0"
   const call = async (
     toolName: string,
     input?: Record<string, unknown>,
-    toolCallId = "t1",
-  ): Promise<Outcome> =>
-    (await handlers.tool_call({ type: "tool_call", toolCallId, toolName, input }, ctx)) as Outcome
+    toolCallId?: string,
+  ): Promise<Outcome> => {
+    const id = toolCallId ?? `t${++callSeq}`
+    lastCallId = id
+    return (await handlers.tool_call({ type: "tool_call", toolCallId: id, toolName, input }, ctx)) as Outcome
+  }
   const result = async (
     toolName: string,
     content: unknown,
     isError = false,
-    toolCallId = "t1",
+    toolCallId?: string,
   ): Promise<PatchedResult | undefined> =>
     (await handlers.tool_result?.(
-      { type: "tool_result", toolCallId, toolName, input: {}, content, isError },
+      {
+        type: "tool_result",
+        toolCallId: toolCallId ?? lastCallId,
+        toolName,
+        input: {},
+        content,
+        isError,
+      },
       ctx,
     )) as PatchedResult | undefined
   const context = async (messages: unknown[]): Promise<AnnotatedMessages | undefined> =>
     (await handlers.context?.({ type: "context", messages }, ctx)) as AnnotatedMessages | undefined
+  /** Fire session_shutdown, which is where the extension sweeps stale spec files. */
+  const shutdown = async (): Promise<void> => {
+    await handlers.session_shutdown?.({ type: "session_shutdown" }, ctx)
+  }
 
   return {
     call,
     result,
     context,
+    shutdown,
     aborts,
     ui,
     commands,
@@ -1949,16 +1973,17 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
           },
         }),
       })
-      // spec 按 toolCallId 存，所以每条命令都要各自经过一次 tool_call。
-      const sandboxed = async (command: string): Promise<string> => {
+      // spec 按 toolCallId 存，所以每条命令都要各自经过一次 tool_call。id 必须各不相同：
+      // 重复 id 会让前一次调用的 spec 文件在覆盖时被清掉（真 pi 每次调用都是新 id）。
+      const sandboxed = async (command: string, toolCallId: string): Promise<string> => {
         const input = { command }
-        assert.equal(await h.call("bash", input), undefined, `allowlisted: ${command}`)
+        assert.equal(await h.call("bash", input, toolCallId), undefined, `allowlisted: ${command}`)
         return input.command
       }
-      const addCommand = await sandboxed("git add b.txt")
-      const controlCommand = await sandboxed(`sh write.sh ${planted}`)
-      const hookCommand = await sandboxed(`sh write.sh ${hookPath}`)
-      const configCommand = await sandboxed(`sh write.sh ${configPath}`)
+      const addCommand = await sandboxed("git add b.txt", "add")
+      const controlCommand = await sandboxed(`sh write.sh ${planted}`, "control")
+      const hookCommand = await sandboxed(`sh write.sh ${hookPath}`, "hook")
+      const configCommand = await sandboxed(`sh write.sh ${configPath}`, "config")
       h.restore()
 
       // 授权面：hooks 与 config 都不在清单里（否则下面的真实执行只是在验证另一个事实）。
@@ -2932,7 +2957,12 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 84. 并行 bash 必须各用各的 spec 文件。早先文件名是 spec-<pid>.json（一进程一个），
 //     pi 并行发工具调用时会互相覆盖：先起的 helper 可能读到后一条的 spec，拿到错的
-//     写清单和 cwd。这里在同一进程里连续发两次调用、都不等结果，然后比对两份文件。
+//     写清单与 cwd。这里在同一进程里连发两次调用、都不等结果，然后比对两份文件。
+//
+//     说清能钉住什么：文件名与生命周期可以（下面这些断言）；**内容归属**不行 —— rule
+//     来自 policy 而不是来自某一次调用，同一 handler 下两份 spec 的 cwd/offline/write
+//     按构造必然相同，用 deepEqual 比较只会得到「它们一样」，实现退回单文件时那句也
+//     照样通过（早先就是这么写的）。归属靠文件名区分加用例 85 的覆盖/清理行为来钉。
 {
   const h = await handler({
     cwd: workdir,
@@ -2946,20 +2976,16 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(firstOutcome?.block ?? false, false, "first call is allowed")
   const secondOutcome = await h.call("bash", second, "c2")
   assert.equal(secondOutcome?.block ?? false, false, "second call is allowed")
-  const pathOf = (command: string): string => {
-    const match = /'--spec' '([^']+)'/.exec(command)
-    assert.ok(match, `no --spec in: ${command}`)
-    return match[1]
-  }
-  const firstSpec = pathOf(first.command)
-  const secondSpec = pathOf(second.command)
+  const firstSpec = specPathOf(first.command)
+  const secondSpec = specPathOf(second.command)
   assert.notEqual(firstSpec, secondSpec, "concurrent calls get distinct spec files")
-  // 两份都还在（结果还没回来），而且各自是自己那次调用的内容。
+  // 两份都还在（结果还没回来），而且都能整份解析 —— 半截 JSON 会在 specOf 里抛。
   assert.ok(existsSync(firstSpec), "the first spec survives the second call")
-  const a = JSON.parse(readFileSync(firstSpec, "utf8")) as SandboxSpec
-  const b = JSON.parse(readFileSync(secondSpec, "utf8")) as SandboxSpec
-  assert.equal(a.cwd, workdir, "the first spec keeps its own cwd")
-  assert.deepEqual(a, b, "both calls describe the same cwd and grants here")
+  const a = specOf(first.command)
+  const b = specOf(second.command)
+  assert.equal(a.cwd, workdir, "the first spec carries its own cwd")
+  assert.equal(b.cwd, workdir, "the second spec carries its own cwd")
+  assert.ok(a.write.length > 0 && b.write.length > 0, "both specs carry a resolved write list")
   // 结果回来后清掉，避免每个 bash 调用留一份垃圾。
   await h.result("bash", "ok", false, "c1")
   await h.result("bash", "ok", false, "c2")
@@ -2967,6 +2993,66 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(existsSync(secondSpec), false, "the second spec is removed too")
   h.restore()
   console.log("  ok   并行调用各用各的 spec 文件，结果回来后清理")
+}
+
+// 85. spec 文件的生命周期：同一 toolCallId 被覆盖时要删旧的，会话结束时清掉陈旧的。
+//     早先只在 tool_result 里删，其余路径全部遗留 —— 实测这台机器上堆了 2993 份，
+//     因为「每次调用一份文件名」把「互相覆盖」换成了「互相累积」。
+{
+  // (a) 同一 toolCallId 又来一次：旧那份必须删掉，否则没人会再认领它。
+  const h = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls"] } } }),
+  })
+  const first = { command: "ls" }
+  await h.call("bash", first, "dup")
+  const firstSpec = specPathOf(first.command)
+  assert.ok(existsSync(firstSpec), "the first spec is written")
+  const second = { command: "ls" }
+  await h.call("bash", second, "dup")
+  const secondSpec = specPathOf(second.command)
+  assert.notEqual(secondSpec, firstSpec, "the repeat gets its own file")
+  assert.equal(existsSync(firstSpec), false, "the superseded spec is removed instead of orphaned")
+  assert.ok(existsSync(secondSpec), "the live one stays until its result arrives")
+  await h.result("bash", "ok", false, "dup")
+  assert.equal(existsSync(secondSpec), false, "and is removed when the result arrives")
+  h.restore()
+
+  // (b) session_shutdown 按年龄清扫：陈旧的清掉，新的留着（别的进程可能正在用），
+  //     同一目录里的 git-excludes 绝不能碰。homedir() 读 $HOME，所以把 HOME 指到临时目录。
+  const h2 = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls"] } } }),
+  })
+  const fakeHome = mkdtempSync(join(tmpdir(), "pi-specsweep-"))
+  const cache = join(fakeHome, ".cache", "pi-subagents-extend")
+  mkdirSync(cache, { recursive: true })
+  const staleSpec = join(cache, "spec-1-1-t1.json")
+  const staleTemp = join(cache, "spec-1-3-t3.json.tmp")
+  const freshSpec = join(cache, "spec-1-2-t2.json")
+  const excludes = join(cache, "git-excludes")
+  for (const path of [staleSpec, staleTemp, freshSpec]) writeFileSync(path, "{}")
+  writeFileSync(excludes, "*.log\n")
+  const old = new Date(Date.now() - 60 * 60 * 1000)
+  utimesSync(staleSpec, old, old)
+  utimesSync(staleTemp, old, old)
+  // git-excludes 也改老：否则「年龄闸门」本身就保住了它，前缀过滤那条守卫就没人钉。
+  utimesSync(excludes, old, old)
+  const previousHome = process.env.HOME
+  process.env.HOME = fakeHome
+  try {
+    await h2.shutdown()
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+  }
+  assert.equal(existsSync(staleSpec), false, "a stale spec is swept at shutdown")
+  assert.equal(existsSync(staleTemp), false, "a stale half-written temp file is swept too")
+  assert.equal(existsSync(freshSpec), true, "a fresh spec is left alone for its own process")
+  assert.equal(existsSync(excludes), true, "git-excludes in the same directory is untouched")
+  h2.restore()
+  rmSync(fakeHome, { recursive: true, force: true })
+  console.log("  ok   spec 生命周期：同 id 覆盖删旧的、会话结束清陈旧的、别的文件不碰")
 }
 
 rmSync(workdir, { recursive: true, force: true })
