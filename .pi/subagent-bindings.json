@@ -44,7 +44,11 @@
         "echo",
         "node",
         "python3",
-        "sh"
+        "sh",
+        "pnpm test",
+        "pnpm run typecheck",
+        "cargo test",
+        "packages/helper/target/release/pi-subagents-extend-helper"
       ],
       "write": [
         "mkdir",

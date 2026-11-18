@@ -45,6 +45,9 @@ const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
 pub struct Isolated {
     /// Resolver socket directories that were shadowed.
     pub shadowed: Vec<PathBuf>,
+    /// Directories that really got a private tmpfs. A mount that failed is not listed: the
+    /// host directory is still visible there.
+    pub privatised: Vec<PathBuf>,
 }
 
 /// Enter fresh user, mount, network and PID namespaces and set them up.
@@ -67,16 +70,15 @@ pub fn isolate(offline: bool, cwd: Option<&Path>, tmp: Option<&Path>) -> Result<
     // host namespace on a system that mounts `/` shared.
     mount_none("/", libc::MS_REC | libc::MS_PRIVATE)?;
 
-    for dir in private_tmp_dirs(tmp) {
-        // A private scratch space is skipped when the command works inside it:
-        // the tmpfs would hide the working directory. Landlock still limits what
-        // it can write.
-        if !should_private_tmp(&dir, cwd) {
-            continue;
-        }
+    let mut privatised = Vec::new();
+    for dir in privatised_dirs(tmp, cwd) {
         // A failure here is not fatal: the command keeps the host directory and
         // Landlock still limits what it may write.
-        let _ = mount_tmpfs(&dir);
+        if mount_tmpfs(&dir).is_ok() {
+            // 只有挂载真的成立的目录才算被遮住：调用方据这份清单判断写授权是否失效，
+            // 一次失败的挂载并不遮任何东西。
+            privatised.push(dir);
+        }
     }
 
     let mut shadowed = Vec::new();
@@ -87,7 +89,10 @@ pub fn isolate(offline: bool, cwd: Option<&Path>, tmp: Option<&Path>) -> Result<
             shadowed.push(dir);
         }
     }
-    Ok(Isolated { shadowed })
+    Ok(Isolated {
+        shadowed,
+        privatised,
+    })
 }
 
 /// The directories that get a private tmpfs: the conventional `/tmp` always,
@@ -107,6 +112,17 @@ pub fn private_tmp_dirs(tmp: Option<&Path>) -> Vec<PathBuf> {
     }
 }
 
+/// The directories that actually get a private tmpfs: [`private_tmp_dirs`] minus the ones
+/// holding the working directory, where the mount would hide the cwd instead.
+///
+/// `isolate` mounts exactly this list, so "what will be privatised" has one definition.
+pub fn privatised_dirs(tmp: Option<&Path>, cwd: Option<&Path>) -> Vec<PathBuf> {
+    private_tmp_dirs(tmp)
+        .into_iter()
+        .filter(|dir| should_private_tmp(dir, cwd))
+        .collect()
+}
+
 /// Whether to put a fresh tmpfs over `dir`.
 ///
 /// Skipped when the command works inside `dir`, including `dir` itself: the tmpfs
@@ -118,6 +134,84 @@ pub fn should_private_tmp(dir: &Path, cwd: Option<&Path>) -> bool {
         return false;
     }
     !cwd.is_some_and(|cwd| cwd.starts_with(dir))
+}
+
+/// A write grant that a private tmpfs has hidden: the grant, and the directory mounted
+/// over it.
+///
+/// A grant naming the privatised directory *itself* is fine — the mount point survives the
+/// mount, so Landlock can still allow writes to the fresh tmpfs root, which is what the
+/// extension's own `/tmp` entry does on every call. Only a grant strictly below it is
+/// unreachable: the tmpfs starts empty, the path the rule would attach to no longer exists,
+/// and the helper used to refuse the whole spec with "spec path ... does not exist" — a
+/// message that reads like a typo in the spec instead of a grant and a mount cancelling out.
+///
+/// Both sides must already be comparable, i.e. resolved through
+/// [`resolve_comparable`] — [`resolved_hidden_grant`] is the same check with that step
+/// applied. The comparison itself is pure, so a unit test can pin it without a filesystem.
+pub fn hidden_grant(grants: &[PathBuf], privatised: &[PathBuf]) -> Option<(PathBuf, PathBuf)> {
+    for dir in privatised {
+        for grant in grants {
+            if grant != dir && grant.starts_with(dir) {
+                return Some((grant.clone(), dir.clone()));
+            }
+        }
+    }
+    None
+}
+
+/// [`hidden_grant`] with both sides resolved through their symlinks, so a grant that
+/// reaches a privatised directory through a link is caught too.
+///
+/// One class escapes it: a link whose *target* is strictly below the mount point and
+/// already gone after the mount (`otherlink -> /tmp/sub`, `/tmp/sub` was on the host).
+/// The link is then dangling, the walk stops above it, and the path is compared as typed —
+/// so such a grant still gets the older `spec path ... does not exist` instead of this one.
+/// Catching it would mean reading link targets textually after the mount; not worth it for
+/// a grant that cannot work either way, but the message is the poorer of the two.
+pub fn resolved_hidden_grant(
+    grants: &[PathBuf],
+    privatised: &[PathBuf],
+) -> Option<(PathBuf, PathBuf)> {
+    let dirs: Vec<PathBuf> = privatised
+        .iter()
+        .map(|dir| resolve_comparable(dir))
+        .collect();
+    let grants: Vec<PathBuf> = grants
+        .iter()
+        .map(|grant| resolve_comparable(grant))
+        .collect();
+    hidden_grant(&grants, &dirs)
+}
+
+/// `path` with every symlink in its existing prefix resolved.
+///
+/// `fs::canonicalize` alone is not enough: a write grant may name a directory the command
+/// is going to create, and after the tmpfs is mounted the granted path is gone by
+/// definition — the tail that does not exist is therefore kept as typed, and only the part
+/// that does exist is resolved.
+pub fn resolve_comparable(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = path;
+    while let Some(parent) = probe.parent() {
+        match probe.file_name() {
+            Some(name) => tail.push(name.to_os_string()),
+            // A trailing `..`: nothing to resolve, keep the path as it is.
+            None => return path.to_path_buf(),
+        }
+        if let Ok(real) = fs::canonicalize(parent) {
+            let mut resolved = real;
+            for name in tail.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        probe = parent;
+    }
+    path.to_path_buf()
 }
 
 /// Bring `lo` up inside the fresh network namespace.
@@ -437,6 +531,82 @@ mod tests {
         // Nothing sensible to mount on.
         assert!(!should_private_tmp(Path::new("/"), None));
         assert!(!should_private_tmp(Path::new("tmp"), None));
+    }
+
+    /// 挂私有 tmpfs 之后，落在它下面的写授权就没有对应的 inode 了。早先 helper 只会把整份
+    /// spec 报成 `spec path ... does not exist`，看起来像路径写错；真正的原因是那份授权和
+    /// 这次挂载互相抵消。这条用例钉住判定：只报「目录之下」的授权，目录本身照旧可用。
+    #[test]
+    fn a_grant_below_a_privatised_dir_is_hidden_but_the_dir_itself_is_not() {
+        let tmp = PathBuf::from("/tmp");
+        let dirs = std::slice::from_ref(&tmp);
+        assert_eq!(
+            hidden_grant(&[PathBuf::from("/tmp/pi-review-reports")], dirs),
+            Some((PathBuf::from("/tmp/pi-review-reports"), tmp.clone())),
+            "a grant below the mount point has nothing to attach to"
+        );
+        assert_eq!(
+            hidden_grant(&[tmp.clone()], dirs),
+            None,
+            "the mount point survives the mount; the extension grants /tmp on every call"
+        );
+        assert_eq!(
+            hidden_grant(&[PathBuf::from("/tmpfoo/build")], dirs),
+            None,
+            "a sibling that merely shares the prefix is not below it"
+        );
+        assert_eq!(
+            hidden_grant(&[PathBuf::from("/work/src")], dirs),
+            None,
+            "a grant outside the privatised tree is unaffected"
+        );
+    }
+
+    /// cwd 落在临时目录里时那个目录不挂（否则 tmpfs 会把工作目录一起遮住），于是那里的写授权
+    /// 仍然有效。这是既有行为，判定不能把它变成拒绝。
+    #[test]
+    fn a_cwd_under_tmp_leaves_tmp_out_of_the_privatised_set() {
+        assert_eq!(
+            privatised_dirs(None, Some(Path::new("/home/user/project"))),
+            vec![PathBuf::from("/tmp")],
+            "the conventional /tmp is mounted when the cwd is elsewhere"
+        );
+        assert!(
+            privatised_dirs(None, Some(Path::new("/tmp/work"))).is_empty(),
+            "a cwd under /tmp keeps /tmp visible, so a grant below it still works"
+        );
+        assert_eq!(
+            privatised_dirs(
+                Some(Path::new("/var/tmp/pi-scratch")),
+                Some(Path::new("/tmp/work"))
+            ),
+            vec![PathBuf::from("/var/tmp/pi-scratch")],
+            "only the directory holding the cwd is skipped"
+        );
+    }
+
+    /// 授权经符号链接落到被挂载的目录上时同样失效：Landlock 的规则落在解析后的 inode 上，
+    /// 所以判定必须按解析后的路径比较，否则 `link -> /tmp` 这种授权会漏网。
+    #[test]
+    fn a_grant_reaching_the_privatised_dir_through_a_symlink_is_caught() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("hidden-grant-{}", std::process::id()));
+        let link = root.join("link");
+        let created =
+            fs::create_dir_all(&root).is_ok() && std::os::unix::fs::symlink("/tmp", &link).is_ok();
+        if !created {
+            // 建不出链接的宿主上这条断言无从谈起，跳过而不是假装通过。
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        let hidden = resolved_hidden_grant(&[link.join("build")], &[PathBuf::from("/tmp")]);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            hidden,
+            Some((PathBuf::from("/tmp/build"), PathBuf::from("/tmp"))),
+            "the grant reaches /tmp through the link"
+        );
     }
 
     #[test]

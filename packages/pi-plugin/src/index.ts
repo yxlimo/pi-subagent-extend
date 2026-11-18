@@ -1426,16 +1426,102 @@ function scratchDir(cwd: string, rule: BashRule): string {
 }
 
 /** 这次命令的 spec；`writeRefusalNote` 要拿它的 `write` 判断越界写。 */
+/**
+ * 会被私有 tmpfs 盖住的目录，与 helper 的 `privatised_dirs` 同一定义：约定 `/tmp` 恒在内，
+ * 外加 spec 的 `tmp`（scratch）；但 cwd 落在其中时 helper 不挂（否则会盖掉工作目录）。
+ */
+export function privatisedDirs(cwd: string, scratch: string): string[] {
+	return [...new Set([CONVENTIONAL_TMP, scratch])]
+		.map((dir) => dir.replace(/\/+$/, "") || "/")
+		.filter((dir) => dir !== "/" && dir !== "." && !(cwd === dir || cwd.startsWith(`${dir}/`)));
+}
+
+/**
+ * 把路径解析到「可比形态」，与 helper 的 `resolve_comparable` 对齐：对最深的**已存在**祖先做
+ * realpath，再把不存在的尾巴原样接回去。两边都用 OS 的 realpath（Node 用 `.native`）并原样拼尾巴，
+ * 因此对存在的路径与「祖先软链 + 缺失尾巴」两类结果逐字节一致。
+ *
+ * 整体 realpath 在这里用不了：授权指向的路径可能还不存在（命令本来就要创建它），而挂载之后它更
+ * 是不存在。软链必须先解析，否则「经软链指向 /tmp/x 的授权」在插件侧看着不在 /tmp 之下，helper 却
+ * 解析成 /tmp/x 把整份 spec 拒掉 —— 那正是这套逻辑要避免的「一条命令都跑不了」。
+ */
+export function resolveComparable(path: string): string {
+	const tail: string[] = [];
+	let current = path;
+	for (;;) {
+		try {
+			// `realpathSync.native` 而不是 `realpathSync`：helper 用的是 Rust 的 `fs::canonicalize`，
+			// 它落到 OS 的 realpath(3)，而 Node 的 `realpathSync` 是自实现版本，两者在部分输入上结果不同。
+			// 尾巴用字面拼接而不是 `resolve`：`resolve` 会把 `..` 归一化，Rust 那边是原样 push 进去的，
+			// 归一化会让「授权路径还没创建」这一类判断与 helper 不一致。
+			const base = realpathSync.native(current);
+			return tail.length === 0 ? base : `${base.replace(/\/+$/, "")}/${tail.join("/")}`;
+		} catch {
+			const parent = dirname(current);
+			if (parent === current) return path;
+			tail.unshift(basename(current));
+			current = parent;
+		}
+	}
+}
+
+/**
+ * 剔掉「拿到手也用不上」的写授权。
+ *
+ * helper 在私有化的目录上挂 tmpfs 之后，落在其**下**的授权路径从它的视图里消失，于是它拒掉整份
+ * spec（exit 77），bash 全灭。授权那个目录**本身**仍然有效（挂载点还在），所以只剔严格在下的。
+ *
+ * 两边都按 `resolveComparable` 解析，否则软链会造成两种错判：插件保留而 helper 拒（bash 全灭），
+ * 或插件剔掉而 helper 本来会接受（白白丢掉一条能用的授权）。
+ *
+ * 同时也把剔掉的交回去：静默丢弃会让子代理反复撞「写不进去」而不知道为什么。
+ */
+export function dropHiddenGrants(
+	write: string[],
+	cwd: string,
+	scratch: string,
+): { kept: string[]; dropped: string[] } {
+	const dirs = privatisedDirs(cwd, scratch).map(resolveComparable);
+	const kept: string[] = [];
+	const dropped: string[] = [];
+	for (const path of write) {
+		const resolved = resolveComparable(path);
+		if (dirs.some((dir) => resolved !== dir && resolved.startsWith(`${dir}/`))) dropped.push(path);
+		else kept.push(path);
+	}
+	return { kept, dropped };
+}
+
+/** 已提示过的被剔授权：每条命令一份 spec，不记下来就会每调一次重复提示一次。 */
+const reportedHiddenGrants = new Set<string>();
+/**
+ * UI 提示通道，由 `judgeToolCall` 绑定的会话上下文注入：模块级函数拿不到 `ctx`，而这条告警是给
+ * 父代理看的配置问题，不该写进模型上下文，所以只走 UI。
+ */
+let uiWarning: ((message: string) => void) | undefined;
+
+/**
+ * 把「授权落在私有 tmpfs 之下、已被剔掉」这件事告诉父代理一次。
+ *
+ * 不提示的话，子代理只会看到自己的写被 Landlock 拒掉，而真正的原因在配置里：那个目录每次调用都
+ * 被挂上一个空的 tmpfs。提示走 UI，不进模型上下文 —— 这是给父代理看的配置告警，不是给子代理的
+ * 行动指令（子代理那边已经有「拿报告代替写文件」的既定退路）。
+ */
+function reportHiddenGrants(dropped: string[]): void {
+	const fresh = dropped.filter((path) => !reportedHiddenGrants.has(path));
+	if (fresh.length === 0) return;
+	for (const path of fresh) reportedHiddenGrants.add(path);
+	uiWarning?.(
+		`pi-subagents-extend: write grant(s) dropped: the sandbox mounts a private tmpfs over that path when it can, and a grant below a mount point is hidden inside it: ${fresh.join(", ")}. Write the file with the write tool, or point bash.env.TMPDIR outside /tmp.`
+	);
+}
+
 export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
 	const scratch = scratchDir(cwd, rule);
-	return {
-		cwd,
-		read: ["/"],
-		// helper 在这个目录上挂一个私有 tmpfs，所以命令写的临时文件留在沙箱里，不落在宿主上。
-		// 只在它不等于 helper 的默认值（/tmp）时才写进 spec：约定值本来就不言自明，而且不带这个
-		// 字段的 spec 仍能被旧版 helper 解开（它 deny_unknown_fields）。
-		...(scratch === CONVENTIONAL_TMP ? {} : { tmp: scratch }),
-		write: [
+	// 落在私有 tmpfs 之下的授权 helper 一律拒（整份 spec 连带 bash 一起死），所以在这里先剔掉：
+	// 授权与挂载互相抵消是父代理的配置问题，不该让一条命令整个跑不起来。
+	const { kept, dropped } = dropHiddenGrants(
+		[
 			...new Set([
 				...sandboxWritableDirs(policy, cwd, rule),
 				// 两个会被私有化的临时目录都放行：命令自己的那个，和约定俗成的 /tmp。
@@ -1444,6 +1530,18 @@ export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
 				...SANDBOX_DEVICE_PATHS.filter((path) => existsSync(path)),
 			]),
 		],
+		cwd,
+		scratch,
+	);
+	reportHiddenGrants(dropped);
+	return {
+		cwd,
+		read: ["/"],
+		// helper 在这个目录上挂一个私有 tmpfs，所以命令写的临时文件留在沙箱里，不落在宿主上。
+		// 只在它不等于 helper 的默认值（/tmp）时才写进 spec：约定值本来就不言自明，而且不带这个
+		// 字段的 spec 仍能被旧版 helper 解开（它 deny_unknown_fields）。
+		...(scratch === CONVENTIONAL_TMP ? {} : { tmp: scratch }),
+		write: kept,
 		offline: rule.network !== true,
 		// 只在开启时写：spec 是 deny_unknown_fields，旧版 helper 拿到这个键会直接拒掉整份
 		// spec，所以关闭时必须连键都不出现。
@@ -2025,6 +2123,10 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
+		// 提示状态按会话重置：一个进程可能服务多个会话，模块级的 set 留到下一个会话就会把
+		// 本该发出的告警吞掉（那是「lost, not duplicated」的一种，且完全没有痕迹）。
+		reportedHiddenGrants.clear();
+		uiWarning = undefined;
 		const cwd = ctx.cwd ?? process.cwd();
 		// profile 只在声明了它的入口里生效：agent 的 subagentOnlyExtensions 会加载
 		// 那份两行 loader，主会话不会加载，所以主会话不会被项目默认值误锁。
@@ -2126,6 +2228,10 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 
 	const judgeToolCall = async (event: ToolCallEvent, ctx: ExtensionContext): Promise<ToolCallEventResult | undefined | void> => {
 		currentCtx = ctx;
+		uiWarning = (message) => {
+			const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
+			ui?.notify?.(message, "warning");
+		};
 		if (!policy.active) return;
 		const cwd = ctx.cwd ?? process.cwd();
 		// 求援通道不受任何停机影响：被停住的子代理最需要的就是「报告我卡在哪」。

@@ -89,6 +89,8 @@ export interface ExtensionModule {
 	dependencyScope(cwd: string, ignored: string[]): string[]
 	/** helper 的候选路径，暴露出来以便钉住「仓内 cargo 产物也是候选」。 */
 	helperCandidates(here: string): string[]
+	/** 路径归一，暴露出来以便钉住「与 helper 的 resolve_comparable 一致」。 */
+	resolveComparable(path: string): string
 }
 
 export interface HandlerOptions {

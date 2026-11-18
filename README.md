@@ -67,6 +67,10 @@ report file:
 { "scope": ["."], "readOnly": true, "writeScope": ["/tmp/pi-review-reports"] }
 ```
 
+That report path reaches the `write` tool but not `bash`: the helper mounts a private tmpfs over
+`/tmp`, so a spec that grants a path below it is refused with exit 77 — see
+[sandbox](docs/sandbox.md#files).
+
 Recommended shapes for a reviewer, a coder in a worktree, a researcher and a build runner are in
 [usage](docs/usage.md#recommended-scenarios), with the full field reference beside them.
 
@@ -97,7 +101,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and four offline suites: 98 scope cases, 10 context cases, 6 sessions
+`pnpm test` runs a lint pass and four offline suites: 100 scope cases, 10 context cases, 6 sessions
 against a real pi process driven by a scripted mock model, and 5 end-to-end cases against the real
 `pi-hashline-edit-pro` — no model, no network beyond localhost. See [testing](docs/testing.md).
 

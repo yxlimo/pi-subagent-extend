@@ -73,6 +73,29 @@ that directory has to be granted whole:
   described under [Namespaces](#namespaces) — granting a directory that is *not* mounted over would
   be a host write, not a sandbox one, which is why the former is now named in the spec's `tmp`
 
+A grant *below* one of those mounted directories cannot take effect: the tmpfs is mounted empty, so
+the path the rule would attach to is gone, and the write would never reach the host file the grant
+was meant for. The helper refuses that spec before the command starts, with exit 77, naming the grant
+and the directory that hides it — the alternative, and what it used to do, is failing later with
+`spec path ... does not exist`, which reads like a typo in the spec. A grant naming the mounted
+directory *itself* is fine (the mount point survives, which is why the extension's own `/tmp` entry
+works), and a directory holding the working directory is not mounted at all, so grants below it stay
+usable.
+
+The extension drops such a grant from the spec rather than let it take the command with it. A
+`bash.writablePaths` entry below `/tmp` (or below a pinned `TMPDIR`) is removed before the spec is
+written, the command runs with its remaining grants, and the parent gets one warning naming the path.
+The alternative is disproportionate: one unusable grant would fail every bash call in the session —
+including the `git status` a review role needs — and the child would see only an exit code it cannot
+interpret. The helper's refusal stays as the backstop for a spec written by something else.
+
+Both sides of that comparison resolve symlinks before they are compared, on the extension side as well
+as in the helper: a grant spelled through a link that points into `/tmp` looks innocent as a string and
+is not. Resolving only one side would reintroduce the failure in the other direction — the extension
+keeps a grant the helper then refuses, and every bash call dies on a spec the plugin believed was fine.
+The deepest existing ancestor is resolved and the missing tail is kept as typed, because the granted
+path may be a directory the command is about to create.
+
 A write outside them fails with `EACCES`. Landlock rules attach to the resolved inode, so a
 symlink inside a granted directory that points outside stays read-only: the rule follows the
 target. `node_modules` is the one deliberate exception, realpath'd before being granted.
