@@ -22,8 +22,19 @@ export interface ScriptedCall {
 
 export type ScriptedStep = { text: string; calls?: undefined } | { calls: ScriptedCall[]; text?: undefined };
 
+/**
+ * 一步脚本也可以是「看着上下文才决定」的函数。
+ *
+ * 为什么需要：锚点编辑工具的参数里带的是锚点，而锚点只有读过那个文件才知道。写死的脚本
+ * 表达不了「先读、再把读到的锚点填进下一个调用」，于是这类工具在真会话里根本走不到
+ * 第二次调用。函数式步骤拿到的是本次请求的 messages，可以从上一轮的工具结果里把锚点取出来。
+ */
+export type ScriptedStepFn = (messages: unknown[]) => ScriptedStep;
+
+export type Scripted = ScriptedStep | ScriptedStepFn;
+
 export interface MockLlmOptions {
-	steps: ScriptedStep[];
+	steps: Scripted[];
 	model?: string;
 }
 
@@ -64,15 +75,17 @@ export async function startMockLlm({ steps, model = "mock-1" }: MockLlmOptions):
 
 		const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
 		requests.push(body);
-		const step = steps[cursor];
+		const scripted = steps[cursor];
 		cursor += 1;
-		if (!step) {
+		if (!scripted) {
 			// 脚本用完还来要：说明本轮的结束与否和预期不符，直接暴露。
 			res.writeHead(500, { "content-type": "application/json" });
 			res.end(JSON.stringify({ error: { message: `mock script exhausted after ${steps.length} steps` } }));
 			return;
 		}
 
+		const messages = Array.isArray(body.messages) ? (body.messages as unknown[]) : [];
+		const step = typeof scripted === "function" ? scripted(messages) : scripted;
 		if (body.stream === false) {
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end(JSON.stringify(nonStreaming(step, model)));
