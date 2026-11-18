@@ -7,15 +7,16 @@ processes are already fixed.
 An allowed command is rewritten to:
 
 ```text
-<helper> --spec ~/.cache/pi-subagents-extend/spec-<pid>.json -- bash -lc '<command>'
+<helper> --spec ~/.cache/pi-subagents-extend/spec-<pid>-<seq>-<toolCallId>.json -- bash -lc '<command>'
 ```
 
 The spec carries the resolved paths, the offline flag, the environment and the target directory. One
 spec file is written per call: the name carries the pid, a per-process sequence and the tool call id,
 so parallel calls cannot collide; it is renamed into place atomically, so the helper never reads a
-half-written file; and it is removed once the call's result comes back. A sweep at session shutdown
-clears what a crash or an interrupted session left behind — it only touches `spec-*` files older
-than ten minutes, because the same directory also holds `git-excludes` and the `xdg-cache` tree.
+half-written file; and it is removed once the call's result comes back, or when its entry is evicted
+from the cap. A sweep at session shutdown clears what a crash, an interrupted session or a repeated
+tool call id left behind — it only touches `spec-*` files older than ten minutes, because the same
+directory also holds `git-excludes` and the `xdg-cache` tree.
 Two subcommands matter: `--spec` runs a command, `--describe` prints the capabilities as JSON and
 exits 0, or 76 when the kernel is not good enough. `PI_SUBAGENTS_EXTEND_HELPER` overrides the
 binary path. `cargo build --release --manifest-path packages/helper/Cargo.toml` writes

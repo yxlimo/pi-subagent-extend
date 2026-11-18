@@ -2,5 +2,9 @@ node_modules/
 *.log
 *.tsbuildinfo
 
+
+# 测试夹具：有的必须建在包目录里（落在 /tmp 下的写授权会被沙箱的私有 tmpfs 盖掉），
+# 按名忽略，别让它们出现在 git status 或被 `git add -A` 卷进补丁。
+packages/pi-plugin/.test-*
 # 内部文档：开发日志、实测记录，不对外
 docs/internal/

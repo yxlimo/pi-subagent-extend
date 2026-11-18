@@ -1339,11 +1339,13 @@ export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
  */
 let specSeq = 0;
 function writeSpecFile(spec: ReturnType<typeof buildSpec>, toolCallId: string): string | undefined {
-	const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 	const safeId = toolCallId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 48);
 	let temp: string | undefined;
 	let file: string | undefined;
 	try {
+		// homedir() 在 try 里面算：它靠 $HOME 与 passwd，两者都取不到时会抛。抛在这里就让
+		// 调用方走「拿不到 spec 就拒绝」的路，而不是把异常抛出判定层。
+		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 		mkdirSync(dir, { recursive: true });
 		specSeq += 1;
 		file = resolve(dir, `spec-${process.pid}-${specSeq}-${safeId}.json`);
@@ -1368,7 +1370,7 @@ function writeSpecFile(spec: ReturnType<typeof buildSpec>, toolCallId: string): 
 	}
 }
 
-/** 删掉某次调用的 spec 文件。结果不会再回来时（被挤出表、被同 id 覆盖）靠它收尾。 */
+/** 删掉某次调用的 spec 文件。结果不会再回来时（结果回来了、或者被挤出上限）靠它收尾。 */
 function dropSpecFile(entry: { specFile?: string } | undefined): void {
 	if (!entry?.specFile) return;
 	try {
@@ -1387,23 +1389,21 @@ function dropSpecFile(entry: { specFile?: string } | undefined): void {
  * `git-excludes` 文件和 `xdg-cache` 目录。
  */
 function sweepStaleSpecFiles(): void {
-	const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 	const cutoff = Date.now() - 10 * 60 * 1000;
-	let entries: Dirent[];
 	try {
-		entries = readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
-		if (!entry.isFile() || !entry.name.startsWith("spec-") || !/\.json(\.tmp)?$/.test(entry.name)) continue;
-		const path = resolve(dir, entry.name);
-		try {
-			if (statSync(path).mtimeMs > cutoff) continue;
-			rmSync(path, { force: true });
-		} catch {
-			// 单个文件失败不影响其它文件。
+		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (!entry.isFile() || !entry.name.startsWith("spec-") || !/\.json(\.tmp)?$/.test(entry.name)) continue;
+			const path = resolve(dir, entry.name);
+			try {
+				if (statSync(path).mtimeMs > cutoff) continue;
+				rmSync(path, { force: true });
+			} catch {
+				// 单个文件失败不影响其它文件。
+			}
 		}
+	} catch {
+		// 目录不存在或读不了：没有可清扫的东西。
 	}
 }
 
@@ -1818,8 +1818,10 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					sandboxSpecs.delete(oldest);
 				}
 			}
-			// 同一个 toolCallId 又来一次时，旧条目的 spec 文件先删掉再覆盖，否则它没人认领。
-			dropSpecFile(sandboxSpecs.get(event.toolCallId));
+			// 同一个 toolCallId 又来一次（模型输出了重复 id）时，只覆盖条目、**不**删旧文件：
+			// 重复 id 在真 pi 里只可能是畸形响应，我们无法判断先那次是否已经启动，删掉它就会让
+			// 一个还在途的 helper 以 exit 77 死在「读不到 spec」上。留下的孤儿由 shutdown 清扫
+			// 按年龄回收 —— 代价是多一份文件，和打死一条命令完全不对称。
 			sandboxSpecs.set(event.toolCallId, {
 				write: spec.write,
 				cwd,
