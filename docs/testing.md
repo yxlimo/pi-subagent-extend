@@ -1,12 +1,13 @@
 # Testing
 
-`pnpm test` runs three suites, all offline: no model, and no network beyond localhost.
+`pnpm test` runs four suites, all offline: no model, and no network beyond localhost.
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
 | `test/extension.test.ts` | 93 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
+| `test/hashline-e2e.test.ts` | 4 | a real pi process loading the real `pi-hashline-edit-pro` |
 
 `cargo test` in `packages/helper` covers the sandbox itself: the ABI check, the ruleset, the
 namespace decisions, the capability drop and process supervision.
@@ -67,6 +68,35 @@ controls (both sides writable is allowed, so "refuse everything" cannot pass), t
 
 Every case here was mutation-verified — the implementation was reverted and the suite went red —
 because a case that cannot fail proves nothing.
+## End-to-end against the real host extension
+
+`test/hashline-e2e.test.ts` is the only suite that loads a **third-party** extension.
+`pi-hashline-edit-pro` is a pinned devDependency, and the suite drives it in a real pi process:
+scripted model, real tool schemas, real anchor sidecar.
+
+The unit cases above test this layer against a fake pi and a fake sidecar — that is, against *my
+model* of the host. Two things this layer depends on belong to the host, not to me: the shape of its
+tool arguments, and the anchor registry it writes (a JSONL sidecar next to a sqlite hash store).
+Either can change in a release and leave every unit case green while a real subagent either cannot
+edit a file at all or writes outside its scope. So the verdict here is not a message: it is whether
+the file on disk changed.
+
+Anchors cannot be written into a script — the host derives them from file content — so the second
+scripted step is a **function** of the incoming messages: it reads the anchor out of the previous
+`read` result and calls the tool with it. That is why `mock-llm.ts` accepts function steps.
+
+The four cases: an anchor-only edit inside the write scope lands on disk (proves the sidecar
+resolution works against the real format); an anchor owned by an out-of-scope file is refused and
+that file is untouched; a cross-file `copy` whose destination is outside the write scope is refused
+and the destination is untouched; and the reverse control — a `copy` whose source is read-only and
+whose destination is writable — succeeds, so the three refusals cannot be satisfied by refusing
+everything.
+
+The host's config directory is redirected with `PI_HASHLINE_DIR`, which the host honours itself, so
+its sidecar and hash store land in a temporary directory and the user's real configuration is never
+touched. If the package is missing the suite fails rather than skipping: a suite that skips when the
+host is absent is a suite that never runs.
+
 
 ## The mock model
 
