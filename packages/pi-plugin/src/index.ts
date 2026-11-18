@@ -1684,11 +1684,22 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
  * 这类宿主上一个字也改不了。代价是依赖一份第三方私有格式，所以证据链是单向的：
  * 读不到、读不懂、查不到 —— 一律当作**拿不到目标**，然后拒绝。绝不会因为读不到而放行。
  */
+/**
+ * 一次锚点解析的三种结局。
+ *
+ * 把「锚点不认识」和「锚点分属两个文件」分开，是因为两者的出路完全不同：前者要模型重新读文件
+ * （锚点会过期）或者改用显式 path；后者是入参本身自相矛盾，重读一百次也没用，只能拆成两次调用。
+ * 混成一句「不在注册表里」，模型就会去重读，然后拿回同样的拒绝。
+ */
+type AnchorResolution =
+	| { path: string }
+	| { miss: "unknown" }
+	| { miss: "disagree"; files: string[] };
 function anchorTargetPath(
 	sessionFile: string | undefined,
 	anchors: string[],
-): string | undefined {
-	if (!sessionFile || anchors.length === 0) return undefined;
+): AnchorResolution {
+	if (!sessionFile || anchors.length === 0) return { miss: "unknown" };
 	const dir = join(
 		process.env.PI_HASHLINE_DIR ??
 			join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "pi-hashline-edit-pro"),
@@ -1710,7 +1721,7 @@ function anchorTargetPath(
 			anchorCache.set(sidecar, { stamp, raw });
 		}
 	} catch {
-		return undefined;
+		return { miss: "unknown" };
 	}
 	const wanted = new Set(anchors);
 	const owned = new Map<string, string>();
@@ -1758,9 +1769,10 @@ function anchorTargetPath(
 		const found = owned.get(anchor);
 		if (found) resolvedFiles.add(found);
 	}
-	if (resolvedFiles.size !== 1) return undefined;
+	if (resolvedFiles.size === 0) return { miss: "unknown" };
+	if (resolvedFiles.size > 1) return { miss: "disagree", files: [...resolvedFiles].sort() };
 	const [onlyFile] = resolvedFiles;
-	return onlyFile;
+	return { path: onlyFile };
 }
 
 /** sidecar 解析缓存：一次工具调用读一次文件太长，按 mtime+size 失效。 */
@@ -1863,15 +1875,24 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				.filter((value) => value !== "");
 
 		let anchorsTried: string[] = [];
+		// 解析失败要分清是哪一种：模型看到的文案不同，出路也不同（重读一次 vs 拆成两次调用）。
+		let anchorMiss: { miss: "unknown" } | { miss: "disagree"; files: string[] } | undefined;
 		if (isWrite && !raw) {
 			anchorsTried = anchorTextOf(ANCHOR_ARGS);
 			const resolved = anchorTargetPath(sessionFile, anchorsTried);
-			if (resolved) raw = resolved;
+			if ("path" in resolved) raw = resolved.path;
+			else anchorMiss = resolved;
 		}
 
 		const readable = (path: string): boolean => matches(policy.regexps, cwd, path);
 		const writable = (path: string): boolean =>
 			matches(policy.writeRegexps, cwd, path) || underAny(policy.absoluteWrite, cwd, path);
+
+		// 锚点分属两个文件：这不是「读不到」，重读一百次还是同一个入参 —— 只能拆成两次调用。
+		const disagreeText = (files: string[]): string =>
+			`pi-subagents-extend: ${event.toolName} was given anchors that belong to different files (${files.join(", ")}), so there is no single file whose access could be checked (source: ${policy.source}). One call edits one file — split this into one call per file.\nWrite scope: ${preview(policy.writeGlobs)}`;
+		const transferUnknownText = (side: string): string =>
+			`pi-subagents-extend: ${event.toolName} moves content between two files, and the ${side} anchors are not in this session's anchor registry, so that file is unknown. Both sides have to be known before either can be checked (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`;
 
 		// 双文件工具（copy / move）：`source_*` 属于源文件，`anchor`（与 `remove_*`）属于目标
 		// 文件，两份文件必须分别判定。合成一组去查只会拿到先命中的那一侧，另一侧完全没判 ——
@@ -1880,17 +1901,24 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		const sourceAnchors = isWrite ? anchorTextOf(TRANSFER_SOURCE_ARGS) : [];
 		const destAnchors = isWrite ? anchorTextOf(TRANSFER_DEST_ARGS) : [];
 		if (isWrite && sourceAnchors.length > 0 && destAnchors.length > 0) {
-			const sourcePath = anchorTargetPath(sessionFile, sourceAnchors);
-			const destPath = anchorTargetPath(sessionFile, destAnchors);
-			if (!sourcePath || !destPath) {
-				const unknown = sourcePath ? "destination" : "source";
-				return deny(
-					`pi-subagents-extend: ${event.toolName} moves content between two files, and the ${unknown} anchors are not in this session's anchor registry, so that file is unknown. Both sides have to be known before either can be checked (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
-				);
+			const sourceRes = anchorTargetPath(sessionFile, sourceAnchors);
+			const destRes = anchorTargetPath(sessionFile, destAnchors);
+			if (!("path" in sourceRes)) {
+				return deny(sourceRes.miss === "disagree" ? disagreeText(sourceRes.files) : transferUnknownText("source"));
 			}
-			// 宿主开了 requirePath 时显式 path 指向其中一侧；对不上就说明声明与锚点不一致，
-			// 此时不能假定它说的是哪一侧。
-			if (raw && raw !== sourcePath && raw !== destPath) {
+			if (!("path" in destRes)) {
+				return deny(destRes.miss === "disagree" ? disagreeText(destRes.files) : transferUnknownText("destination"));
+			}
+			const sourcePath = sourceRes.path;
+			const destPath = destRes.path;
+			// 宿主开了 requirePath 时显式 path 指向其中一侧；对不上就说明声明与锚点不一致。
+			// 必须按**解析后**的绝对路径比：注册表里存的是 toCwd 之后的绝对路径，宿主自己也是把
+			// providedPath resolve 到 cwd 再与锚点归属比对（fs-write.ts 的 resolveInCwd → toCwd，
+			// paths.ts 里非绝对路径就 resolve(cwd, p)）。早先拿原始字符串直接比，任何相对写法
+			// （`docs/b.md`、`./docs/b.md`）都永远对不上，于是把宿主本来会执行的调用一律拒掉 ——
+			// 而相对写法正是模型最常给的形式，也是宿主 read 输出里的显示形式。
+			const rawAbs = raw ? resolve(cwd, raw) : "";
+			if (rawAbs && rawAbs !== sourcePath && rawAbs !== destPath) {
 				return deny(
 					`pi-subagents-extend: ${event.toolName} was given path "${raw}", which matches neither file its anchors belong to ("${sourcePath}" and "${destPath}") (source: ${policy.source}). Pass the path of the file the anchors came from, or omit it.`,
 				);
@@ -1943,6 +1971,8 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
 		// 这是用法错误不是权限错误，不计入撞权限计数。
 		if (isWrite && !raw) {
+			// 锚点分属两个文件是入参自相矛盾，不是「读不到」：文案要指出去拆调用，别让模型去重读。
+			if (anchorMiss?.miss === "disagree") return deny(disagreeText(anchorMiss.files));
 			return deny(
 				anchorsTried.length > 0
 					? `pi-subagents-extend: ${event.toolName} has no target path — no "${kind.pathArg}" was passed, and the anchor it points at is not in this session's anchor registry, so the owning file is unknown. Without a target nothing can be checked, so no scope can allow it (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`

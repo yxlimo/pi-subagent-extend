@@ -3087,7 +3087,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   spec 生命周期：结果回来删自己的、重复 id 的孤儿留给清扫、别的文件不碰")
 }
 
-// 86. hashline 那一套（replace / replace_match / insert / copy / move）必须按写工具判。
+// 86. 锚点编辑族按写工具判：本条只用 `replace` 验证「进了 allowTools 也绕不开写范围」，
+//     其余成员在 87（缺目标）、88（undo_last_change）、94（copy/move 两侧）、97（显式 path）分别钉。
 //     宿主上 pi-hashline-edit-pro 会把内置 edit 从活动工具集里删掉，只认 edit 的名字表在
 //     那里等于「整套编辑能力都是未知工具」。同时钉住顺序：allowTools 不能成为绕过路径判定的
 //     后门——把 replace 写进 allowTools 之后仍必须受写范围约束。
@@ -3567,7 +3568,8 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   // 本层（没有别名参与，prepareArguments 不会动它）。目标不唯一 → 拒绝，不去挑先命中的那个。
   const split = await h.call("replace", { remove_from: "aanaa", remove_to: "aanac", text: "x" })
   assert.equal(split?.block, true, "两个锚点分属不同文件时拒绝，不挑一个算数")
-  assert.match(String(split?.reason), /no target path/, "拒绝文案说明目标不唯一/拿不到")
+  assert.match(String(split?.reason), /different files/, "文案点明锚点分属两个文件")
+  assert.match(String(split?.reason), /split this into one call per file/, "并给出唯一出路：拆成两次调用")
   // 附带场景：两种拼写并存、各指一处。这种形状到不了真实管线（宿主在 prepareArguments 里
   // 就把别名删了，pi 的钩子收到的是归一化后的入参），这里只是把同一条规则再钉一次。
   const mixed = await h.call("replace_match", {
@@ -3586,6 +3588,68 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   if (previous.session === undefined) delete process.env.PI_SESSION_FILE
   else process.env.PI_SESSION_FILE = previous.session
   console.log("  ok   锚点跨两个文件时拒绝：别名与规范名并存也不猜")
+}
+
+// 97. copy / move 显式给的 `path` 必须按**解析后的绝对路径**和锚点归属比对。
+//     注册表里存的是 toCwd 之后的绝对路径，宿主也是把 providedPath resolve 到 cwd 再比
+//     （fs-write.ts 的 resolveInCwd → toCwd）。早先拿原始字符串直比，任何相对写法都对不上，
+//     于是把宿主本来会执行的调用一律拒掉 —— 而相对写法正是模型最常给的形式。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-relpath-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  mkdirSync(join(tree, "docs"), { recursive: true })
+  writeFileSync(join(tree, "src", "a.ts"), "alpha\n")
+  writeFileSync(join(tree, "docs", "b.md"), "beta\n")
+
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-hldir-"))
+  const sessionFile = join(hl, "session.jsonl")
+  const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const sourceAbs = join(tree, "src", "a.ts")
+  const destAbs = join(tree, "docs", "b.md")
+  writeFileSync(
+    join(hl, "sessions", `${key}.registry.jsonl`),
+    [
+      JSON.stringify({ kind: "session", sessionFile }),
+      JSON.stringify({ kind: "allocate", path: sourceAbs, rows: [["relaa", "alpha"], ["relab", "more"]] }),
+      JSON.stringify({ kind: "allocate", path: destAbs, rows: [["relac", "beta"]] }),
+      "",
+    ].join("\n"),
+  )
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = sessionFile
+  const tools = [
+    { name: "copy", parameters: { properties: { path: { type: "string" }, anchor: { type: "string" } } } },
+    { name: "move", parameters: { properties: { path: { type: "string" }, anchor: { type: "string" } } } },
+  ]
+  const h = await handler({
+    cwd: tree,
+    piTools: tools,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**", "docs/**"], writeScope: ["src/**", "docs/**"], bash: false } }),
+  })
+  const payload = { source_from: "relaa", source_to: "relaa", anchor: "relac", direction: "after" }
+
+  // 相对写法指向目标侧：修复前因 `"docs/b.md" !== "/abs/docs/b.md"` 被拒，宿主却会照做。
+  const relDest = await h.call("copy", { ...payload, path: "docs/b.md" })
+  assert.notEqual(relDest?.block, true, "相对 path 指向目标文件时放行（按解析后的绝对路径比）")
+  // 带 ./ 前缀同样算同一个文件。
+  const dotted = await h.call("copy", { ...payload, path: "./docs/b.md" })
+  assert.notEqual(dotted?.block, true, "./ 前缀不影响判定")
+  // 指向源侧也放行（宿主允许 path 指任一侧）。
+  const relSource = await h.call("move", { ...payload, path: "src/a.ts" })
+  assert.notEqual(relSource?.block, true, "相对 path 指向源文件时同样放行")
+  // 指到第三处：仍然要拒，且说清对不上两侧 —— 否则「一律放行」也能过上面三条。
+  const stray = await h.call("copy", { ...payload, path: "docs/other.md" })
+  assert.equal(stray?.block, true, "path 既不是源也不是目标时拒绝")
+  assert.match(String(stray?.reason), /matches neither file/, "文案说明对不上两侧的哪一侧")
+
+  h.restore()
+  if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+  else process.env.PI_HASHLINE_DIR = previous.dir
+  if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+  else process.env.PI_SESSION_FILE = previous.session
+  console.log("  ok   copy/move 的显式 path 按解析后的绝对路径比对")
 }
 
 rmSync(workdir, { recursive: true, force: true })

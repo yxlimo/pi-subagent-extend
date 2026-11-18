@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 96 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 97 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 | `test/hashline-e2e.test.ts` | 4 | a real pi process loading the real `pi-hashline-edit-pro` |
@@ -73,6 +73,20 @@ only the first is reachable:
 
 Mutation-verified on the reachable shape: restoring first-match-wins makes the case *allow* the split
 payload. The test asserts refusal and the note the model gets, not a claim about the escape.
+
+The two failure modes are reported differently, because their exits differ. An anchor that cannot be
+resolved at all means "re-read the file, the anchors may have expired"; anchors that disagree mean the
+payload itself is invalid, so the note names both files and says to split the call — re-reading would
+hand back the same refusal. `anchorTargetPath` therefore returns `{path}` / `{miss: "unknown"}` /
+`{miss: "disagree", files}`, and case 96 pins the disagree wording.
+
+Case 97 covers the explicit `path` that `copy` / `move` accept. The anchors' owning file comes from the
+registry as an absolute path (`toCwd`), and the host compares the *resolved* form of `providedPath`
+against it (`resolveInCwd` → `toCwd`). This layer must compare the same way: comparing the raw input
+string rejected every relative spelling — `docs/b.md`, `./docs/b.md` — which is the form the model
+usually gives and the form the host's own `read` output displays, so legitimate transfers were refused
+with advice ("pass the path") the model had already followed. Mutation-verified: restoring the raw
+comparison turns the relative-source assertion red.
 
 Cases 92-93 cover recovering a write target from anchor ownership, which the host records in
 `sessions/<sha256(sessionFile)[0:24]>.registry.jsonl` as `allocate` / `free` / `clear` events. A
