@@ -32,8 +32,9 @@ const repo = join(here, "..")
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
-// the run. Not `tmpdir()`: the helper mounts a private tmpfs over `/tmp`, and a grant underneath
-// it stops existing — a spec naming such a path is refused with "does not exist".
+// the run. Not `tmpdir()`: the helper mounts a private tmpfs over `/tmp`, so a grant underneath
+// it cannot take effect — the helper refuses such a spec (exit 77) and names the tmpfs as the
+// cause.
 // Redirecting `HOME` instead is too blunt: on CI `cargo` is rustup's shim and tries to create
 // `$HOME/.rustup`, which the sandbox refuses because the package directory is not a write grant.
 const realState = process.env.PI_SUBAGENTS_EXTEND_STATE

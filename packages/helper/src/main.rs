@@ -143,6 +143,23 @@ fn apply(program: &OsString, program_args: &[OsString], spec: &Spec) -> Result<i
     let cwd = spec.cwd.clone();
     let namespaces = match namespace::isolate(spec.offline, cwd.as_deref(), spec.tmp.as_deref()) {
         Ok(isolated) => {
+            // 私有 tmpfs 挂上之后，落在它下面的写授权就不存在了：那里只有 tmpfs 的空根。
+            // 早先这表现为 Landlock 报 "spec path ... does not exist" —— 读起来像 spec 里写错了
+            // 路径，实际原因是那份授权和这次挂载互相抵消。在命令跑起来之前点名原因，
+            // 退出码沿用「spec 不可用」，调用方才不会把它当成可以重试的沙箱故障。
+            if let Some((grant, dir)) =
+                namespace::resolved_hidden_grant(&spec.write, &isolated.privatised)
+            {
+                return Err((
+                    EXIT_BAD_SPEC,
+                    format!(
+                        "spec write grant {} is hidden by the private tmpfs mounted over {}; \
+                         a grant under a privately mounted tmpfs cannot take effect",
+                        grant.display(),
+                        dir.display()
+                    ),
+                ));
+            }
             // Say it once, and always for an offline command: whether the
             // namespaces are real is the difference between a structural "no
             // route out" and Landlock's coarse port rules, and a run that says

@@ -67,6 +67,10 @@ report file:
 { "scope": ["."], "readOnly": true, "writeScope": ["/tmp/pi-review-reports"] }
 ```
 
+That report path reaches the `write` tool but not `bash`: the helper mounts a private tmpfs over
+`/tmp`, so a spec that grants a path below it is refused with exit 77 — see
+[sandbox](docs/sandbox.md#files).
+
 Recommended shapes for a reviewer, a coder in a worktree, a researcher and a build runner are in
 [usage](docs/usage.md#recommended-scenarios), with the full field reference beside them.
 
