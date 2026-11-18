@@ -43,7 +43,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameS
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, deniedEntry, parseBashRule, type BashRule } from "./bash-match.ts";
+import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, parseBashRule, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1779,6 +1779,15 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			if (hasUnquotedShellControl(command)) {
 				return deny(
 					`pi-subagents-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Refused: ${preview([command])} — allowed: ${preview(allEntries(rule))}`,
+				);
+			}
+			// 前置赋值能把「被允许的命令」变成「跑我自己的代码」：`NODE_OPTIONS=--require=/tmp/x.js node`
+			// 实测直接执行 /tmp/x.js，`GIT_EXTERNAL_DIFF` 对 git 同理。已知入口一律拒并点名；
+			// 其余名字照常剥离放行（这一层是辅助上轨道，不是严格沙箱 —— 放行多了可以事后补）。
+			const deniedEnv = deniedEnvAssignment(command);
+			if (deniedEnv) {
+				return deny(
+					`pi-subagents-extend: bash refused: the leading assignment "${deniedEnv}=…" can change which program runs or load code into it, which would let an allowlisted command run arbitrary code. Drop it, or have the parent set it in bash.env. Refused: ${preview([command])}`,
 				);
 			}
 			const match = classifyCommand(rule, command);

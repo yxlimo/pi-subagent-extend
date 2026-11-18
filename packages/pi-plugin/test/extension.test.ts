@@ -3084,6 +3084,59 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   spec 生命周期：结果回来删自己的、重复 id 的孤儿留给清扫、别的文件不碰")
 }
 
+// 86. 前置环境变量赋值不该让白名单失效：`HOME=/tmp/x node a.ts` 跑的就是 `node a.ts`。
+//     实测撞到过——同一个被允许的 `node` 被拒成「command not in the allowlist」，而那行文案里
+//     恰好列着 node，看起来像自相矛盾。三个方向都要钉住，否则「剥太多」也能全绿：
+//       (a) 只剥最前面连续的赋值，命令中间的 `A=1` 不动；
+//       (b) 带引号的值、`+=` 追加赋值同样算赋值（按空白切词会把它们切坏、误拒）；
+//       (c) 能改变「跑哪个程序 / 加载哪段代码」的名字必须拒 —— 带上它，被允许的命令
+//           就等于跑任意代码（`NODE_OPTIONS=--require=/tmp/x.js node` 实测会执行 /tmp/x.js）。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-assign-"))
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["."],
+        bash: { read: ["git status", "node", "re:^ls -la$"] },
+      },
+    }),
+  })
+  const assigned = await h.call("bash", { command: "HOME=/tmp/pi-home node script.mjs" })
+  assert.notEqual(assigned?.block, true, "an assignment prefix does not defeat a plain entry")
+  const twoAssignments = await h.call("bash", { command: "A=1 B=2 git status" })
+  assert.notEqual(twoAssignments?.block, true, "several assignments are stripped too")
+  const stillRefused = await h.call("bash", { command: "HOME=/tmp/pi-home rm -rf src" })
+  assert.equal(stillRefused?.block, true, "stripping the prefix does not allow a command that is not listed")
+  // (a) 命令中间的赋值不是前缀：`git A=1 status` 的真实 argv 是 [git, A=1, status]，不是 git status。
+  //     换成「剥掉所有赋值形状的 token」时这条会变成允许 —— 正是这里要挡的过度剥离。
+  const midCommandAssignment = await h.call("bash", { command: "git A=1 status" })
+  assert.equal(midCommandAssignment?.block, true, "only leading assignments are stripped")
+  // (b) 带引号的空格值、`+=` 追加赋值：bash 都当赋值，按空白切词会切坏。
+  const quotedValue = await h.call("bash", { command: 'HOME="/tmp/my home" node script.mjs' })
+  assert.notEqual(quotedValue?.block, true, "a quoted value with spaces is still one assignment")
+  const appendAssignment = await h.call("bash", { command: "A+=1 node script.mjs" })
+  assert.notEqual(appendAssignment?.block, true, "an append assignment (+=) is an assignment")
+  // (c) 注入入口：这些名字一旦放行，白名单就形同虚设，所以命中即拒并点名。
+  const nodeOptions = await h.call("bash", { command: "NODE_OPTIONS=--require=/tmp/evil.js node -e ''" })
+  assert.equal(nodeOptions?.block, true, "NODE_OPTIONS is refused: it preloads code into an allowed node")
+  assert.match(String(nodeOptions?.reason), /NODE_OPTIONS/, "the note names the offending variable")
+  const gitExternalDiff = await h.call("bash", { command: "GIT_EXTERNAL_DIFF=/tmp/evil git status" })
+  assert.equal(gitExternalDiff?.block, true, "GIT_* is refused: git runs it as a subcommand")
+  const pathSwap = await h.call("bash", { command: "PATH=/tmp/evil git status" })
+  assert.equal(pathSwap?.block, true, "PATH is refused: it swaps which program runs")
+  // 正向控制：同样的命令去掉注入名字后仍然放行，否则上面三条可以靠「一律拒绝」骗过去。
+  const benignAgain = await h.call("bash", { command: "HOME=/tmp/x node script.mjs" })
+  assert.notEqual(benignAgain?.block, true, "a benign name is still allowed after the denied ones are refused")
+  // 正则条目仍是整串匹配：作者写的是真实命令行，赋值前缀该由作者自己决定要不要认。
+  const regexStillSeesAssignment = await h.call("bash", { command: "HOME=/tmp/x ls -la" })
+  assert.equal(regexStillSeesAssignment?.block, true, "re: entries keep matching the command as written")
+  const regexPlain = await h.call("bash", { command: "ls -la" })
+  assert.notEqual(regexPlain?.block, true, "the same re: entry still matches the bare command")
+  h.restore()
+  console.log("  ok   前置赋值：只剥前缀、引号与 += 也算、注入名字拒绝，正则条目仍按原文匹配")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")
