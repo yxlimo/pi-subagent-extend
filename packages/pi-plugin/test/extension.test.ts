@@ -3706,6 +3706,68 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   copy/move 的显式 path 按解析后的绝对路径比对")
 }
 
+// 98. 写授权落在私有 tmpfs 之下时剔掉，而不是让 helper 拒掉整份 spec。
+//     helper 在 /tmp（和 spec 的 tmp）上挂私有 tmpfs，挂载之后落在其下的授权路径从它的视图里
+//     消失，于是整份 spec 被拒（exit 77）—— 一条命令都跑不了。授权那个目录本身仍有效（挂载点还在），
+//     所以只剔严格在下的，并且把这件事告诉父代理一次（静默丢弃会让子代理反复撞「写不进去」）。
+//     真实触发面不是 writeScope 的绝对授权（它走 absoluteWrite，不进 bash 的可写面），而是
+//     bash.writablePaths，以及 HOME 落在 /tmp 下的 toolchainCacheDir()（容器与 CI 就是这样）。
+{
+  const grant = join(tmpdir(), `pi-hidden-grant-${process.pid}`)
+  // cwd 必须不在 /tmp 下：helper 只在 cwd 不落在该目录时才挂私有 tmpfs（否则会盖住工作目录），
+  // 而测试的 workdir 本身就在 tmpdir() 里。`.test-*` 已在 .gitignore 里，不会污染工作树。
+  const outsideTmp = mkdtempSync(join(repo, ".test-cwd-"))
+  mkdirSync(grant, { recursive: true })
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { read: ["git status"], writablePaths: [grant] },
+      },
+    }),
+    cwd: outsideTmp,
+  })
+  const input = { command: "git status" }
+  assert.equal(await h.call("bash", input), undefined, "命令本身照旧放行：配置问题不该让 bash 全灭")
+  const spec = specOf(input.command)
+  assert.ok(!spec.write.includes(grant), "落在私有 tmpfs 之下的授权被剔掉")
+  assert.ok(spec.write.includes(tmpdir()), "被私有化的目录本身仍可写，否则 /tmp 上的任何写入都用不了")
+  assert.equal(
+    h.ui.filter((m) => m.includes(grant)).length,
+    1,
+    "剔掉这件事告诉父代理一次：不说的话，子代理只看到写被拒",
+  )
+  // 同一条命令再来一次不该重复提示 —— 每条命令一份 spec，否则警告会淹没整个会话。
+  await h.call("bash", { command: "git status" })
+  assert.equal(
+    h.ui.filter((m) => m.includes(grant)).length,
+    1,
+    "第二次调用不重复提示",
+  )
+  h.restore()
+
+  // 正控：树内的授权照旧写进 spec —— 否则「一律剔掉」也能过上面几条。
+  const inside = join(outsideTmp, "inside-grant")
+  mkdirSync(inside, { recursive: true })
+  const tree = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { read: ["git status"], writablePaths: [inside] },
+      },
+    }),
+    cwd: outsideTmp,
+  })
+  const command = { command: "git status" }
+  assert.equal(await tree.call("bash", command), undefined, "树内授权的命令放行")
+  assert.ok(specOf(command.command).write.includes(inside), "树内的写授权仍然进 spec")
+  assert.equal(tree.ui.filter((m) => m.includes("write grant(s) dropped")).length, 0, "树内授权不触发丢弃提示")
+  tree.restore()
+  rmSync(grant, { recursive: true, force: true })
+  rmSync(outsideTmp, { recursive: true, force: true })
+  console.log("  ok   落在私有 tmpfs 之下的写授权被剔掉，并提示父代理一次")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")

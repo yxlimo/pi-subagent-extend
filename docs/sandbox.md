@@ -82,6 +82,13 @@ directory *itself* is fine (the mount point survives, which is why the extension
 works), and a directory holding the working directory is not mounted at all, so grants below it stay
 usable.
 
+The extension drops such a grant from the spec rather than let it take the command with it. A
+`bash.writablePaths` entry below `/tmp` (or below a pinned `TMPDIR`) is removed before the spec is
+written, the command runs with its remaining grants, and the parent gets one warning naming the path.
+The alternative is disproportionate: one unusable grant would fail every bash call in the session —
+including the `git status` a review role needs — and the child would see only an exit code it cannot
+interpret. The helper's refusal stays as the backstop for a spec written by something else.
+
 A write outside them fails with `EACCES`. Landlock rules attach to the resolved inode, so a
 symlink inside a granted directory that points outside stays read-only: the rule follows the
 target. `node_modules` is the one deliberate exception, realpath'd before being granted.
