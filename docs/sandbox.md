@@ -16,7 +16,9 @@ so parallel calls cannot collide; it is renamed into place atomically, so the he
 half-written file; and it is removed once the call's result comes back, or when its entry is evicted
 from the cap. A sweep at session shutdown clears what a crash, an interrupted session or a repeated
 tool call id left behind — it only touches `spec-*` files older than ten minutes, because the same
-directory also holds `git-excludes` and the `xdg-cache` tree.
+directory also holds `git-excludes` and the `xdg-cache` tree. `PI_SUBAGENTS_EXTEND_STATE` overrides that
+directory; it defaults to `~/.cache/pi-subagents-extend`, and the tests point it at a throwaway one
+rather than redirecting `HOME`, which would also move every toolchain's own state.
 Two subcommands matter: `--spec` runs a command, `--describe` prints the capabilities as JSON and
 exits 0, or 76 when the kernel is not good enough. `PI_SUBAGENTS_EXTEND_HELPER` overrides the
 binary path. `cargo build --release --manifest-path packages/helper/Cargo.toml` writes

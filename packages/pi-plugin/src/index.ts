@@ -1050,6 +1050,19 @@ function scratchDirs(cwd: string, rule: BashRule, options: { create: boolean }):
 }
 
 /**
+ * 状态目录：spec 文件、`git-excludes` 与工具链缓存都放这里，默认 `~/.cache/pi-subagents-extend`。
+ *
+ * `PI_SUBAGENTS_EXTEND_STATE` 覆盖它，测试用它把套件的写入挪出真实 home。不给覆盖时改 HOME 也能达到
+ * 同样效果，但那太粗暴：CI 上的 cargo 是 rustup 的 shim，会去建 `$HOME/.rustup`，而包目录不在沙箱
+ * 写授权里，整条工具链用例就被 Landlock 拒掉。
+ */
+function stateDir(): string {
+	const override = process.env.PI_SUBAGENTS_EXTEND_STATE;
+	if (override) return resolve(override);
+	return resolve(homedir(), ".cache", "pi-subagents-extend");
+}
+
+/**
  * 工具链缓存目录。放 ~/.cache 下持久保存：沙箱里的 /tmp 是每次调用私有的 tmpfs，
  * 把 GOCACHE 放那里会让 `go test` 每次都全量重编译。
  * 只设一条 XDG_CACHE_HOME，而不是逐个数 GOCACHE / MYPY_CACHE_DIR / RUFF_CACHE_DIR：
@@ -1061,7 +1074,7 @@ function toolchainCacheDir(): string | undefined {
 	if (toolchainCacheDirMemo !== null) return toolchainCacheDirMemo;
 	let dir: string | undefined;
 	try {
-		dir = resolve(homedir(), ".cache", "pi-subagents-extend", "xdg-cache");
+		dir = resolve(stateDir(), "xdg-cache");
 		mkdirSync(dir, { recursive: true });
 	} catch {
 		dir = undefined;
@@ -1129,7 +1142,7 @@ const GIT_EXCLUDE_PATTERNS = ["node_modules/", ".pnpm-store/"];
  */
 function gitExcludesFile(): string | undefined {
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
+		const dir = stateDir();
 		const file = resolve(dir, "git-excludes");
 		const wanted = `${GIT_EXCLUDE_PATTERNS.join("\n")}\n`;
 		if (!existsSync(file) || readFileSync(file, "utf8") !== wanted) {
@@ -1345,7 +1358,7 @@ function writeSpecFile(spec: ReturnType<typeof buildSpec>, toolCallId: string): 
 	try {
 		// homedir() 在 try 里面算：它靠 $HOME 与 passwd，两者都取不到时会抛。抛在这里就让
 		// 调用方走「拿不到 spec 就拒绝」的路，而不是把异常抛出判定层。
-		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
+		const dir = stateDir();
 		mkdirSync(dir, { recursive: true });
 		specSeq += 1;
 		file = resolve(dir, `spec-${process.pid}-${specSeq}-${safeId}.json`);
@@ -1391,7 +1404,7 @@ function dropSpecFile(entry: { specFile?: string } | undefined): void {
 function sweepStaleSpecFiles(): void {
 	const cutoff = Date.now() - 10 * 60 * 1000;
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
+		const dir = stateDir();
 		for (const entry of readdirSync(dir, { withFileTypes: true })) {
 			if (!entry.isFile() || !entry.name.startsWith("spec-") || !/\.json(\.tmp)?$/.test(entry.name)) continue;
 			const path = resolve(dir, entry.name);
