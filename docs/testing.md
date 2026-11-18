@@ -58,12 +58,21 @@ know: its two ends are called `replace_from` / `replace_to` (the host's own sche
 `replace_match` — its normal shape on a host with `requirePath` off, i.e. the host this layer targets —
 was refused with "pass the path explicitly", advice the model cannot follow.
 
-Case 96 covers what happens once both spellings are known: the host treats them as aliases and keeps its
-own canonical one (`replace` keeps `remove_from`, `replace_match` keeps `replace_from`), deleting the
-other. So a payload that carries both, pointing at different files, is written to the canonical one —
-while "take the first anchor that resolves" would judge the other. No fixed order fixes that, because
-the two tools want opposite orders; the rule is that every anchor must resolve to the same file, and a
-disagreement refuses. Verified by mutation: restoring first-match-wins makes the case allow the write.
+Case 96 covers anchors that do not agree on one file. Two shapes reach or could be imagined here, and
+only the first is reachable:
+
+- `remove_from` in one file and `remove_to` in another. This arrives at this layer untouched, and the
+  rule refuses it rather than judging whichever anchor happened to resolve first. The host's own
+  `resolveEditTarget` refuses it too (`paths.size > 1`), so the point is that this layer's decision does
+  not *depend* on the host getting there first: a target that is not unique has no answer, and picking
+  one is how a judgement silently covers the wrong file.
+- both spellings at once, pointing at different files. This one cannot reach the layer: the host
+  normalizes aliases in `prepareArguments` before schema validation, and pi's `tool_call` hook receives
+  the post-normalization arguments (`agent-loop`: `prepareToolCallArguments` → `validateToolArguments` →
+  `beforeToolCall({args})`). The case pins it anyway as the same rule, and says so.
+
+Mutation-verified on the reachable shape: restoring first-match-wins makes the case *allow* the split
+payload. The test asserts refusal and the note the model gets, not a claim about the escape.
 
 Cases 92-93 cover recovering a write target from anchor ownership, which the host records in
 `sessions/<sha256(sessionFile)[0:24]>.registry.jsonl` as `allocate` / `free` / `clear` events. A

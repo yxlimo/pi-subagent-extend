@@ -1740,11 +1740,19 @@ function anchorTargetPath(
 			}
 		}
 	}
-	// 所有锚点必须指向同一个文件。宿主的两种拼写互为别名，它会保留自己的规范名、把别名删掉
-	// （utils.ts 的 normalizeAnchorAliases），所以入参里同时出现 `remove_from` 与
-	// `replace_from`、各指向不同文件时，宿主写的是规范名那一个 —— 而「取第一个能解析的」
-	// 会取到另一个，于是判了 B 文件、真正写的是 A 文件。任何固定顺序都不对：`replace` 的规范名
-	// 是 remove_*，`replace_match` 的是 replace_*，两种工具要的顺序相反。拿不到唯一目标就拒绝。
+	// 所有锚点必须指向同一个文件，拿不到唯一目标就拒绝。
+	//
+	// 宿主自己也有一条同义规则：两个锚点归属不同文件时它抛
+	// `[E_BAD_SHAPE] The anchors are owned by different files … edit one file per call`
+	// （edit-common.ts 的 resolveEditTarget，paths.size > 1）。这里跟着拒，是为了让本层的
+	// 判断不依赖宿主先把它拦下来 —— 我们判的是「将要被写的文件在不在写范围里」，目标都不唯一
+	// 就没有答案，不能挑一个算数。
+	//
+	// 关于两种拼写（`remove_from` / `replace_from` 互为别名）：宿主在 `prepareArguments` 里
+	// 就按自己的规范名归一化、把另一个删掉，而 pi 的 `tool_call` 钩子拿到的是归一化并校验
+	// 之后的入参（agent-loop: prepareToolCallArguments → validateToolArguments →
+	// beforeToolCall({args})），所以同时带两种拼写、各指一处的入参到不了这里。这条规则防的
+	// 是「锚点确实分属两个文件」的入参，不是别名。
 	const resolvedFiles = new Set<string>();
 	for (const anchor of anchors) {
 		const found = owned.get(anchor);

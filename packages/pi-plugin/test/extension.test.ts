@@ -3522,10 +3522,11 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   replace_match 的锚点入参：只给 replace_from/replace_to 也能判，越界照样拒绝")
 }
 
-// 96. 锚点入参里两种拼写同时出现、各指向不同文件时，拒绝。
-//     宿主会把别名删掉、只留规范名，所以真正被写的是规范名那一个；我们按「第一个能解析的」
-//     取，就会判到另一个文件上 —— 判了 B、写的是 A。任何固定顺序都救不了（replace 与
-//     replace_match 的规范名相反），只能要求所有锚点解析到同一个文件。
+// 96. 锚点分属两个文件时拒绝：拿不到唯一目标就不判，也不猜宿主会写哪一个。
+//     主场景用规范名（remove_from 指 A 文件、remove_to 指 B 文件）—— 这种入参能真正递到本层，
+//     宿主自己的 resolveEditTarget 也以 `paths.size > 1` 拒绝它（E_BAD_SHAPE）。
+//     附带场景是两种拼写并存：宿主在 prepareArguments 里就把别名删掉了，pi 的 tool_call 钩子
+//     拿到的是归一化后的入参，所以那种形状到不了这里 —— 留着只是把同一条规则多钉一次。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-mixed-"))
   mkdirSync(join(tree, "src"), { recursive: true })
@@ -3562,8 +3563,13 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   const agree = await h.call("replace", { remove_from: "aanaa", remove_to: "aanab", text: "x" })
   assert.notEqual(agree?.block, true, "同一份文件的锚点照旧放行")
 
-  // 两种拼写各指一处：宿主只会用规范名那个（replace_match 用 replace_from），所以真正被写的
-  // 是树外文件；我们解析出两个不同文件 → 拿不到唯一目标 → 必须拒绝。
+  // 主场景：两个规范名锚点分属两个文件（一个在写范围内、一个在树外）。这种入参能真正递到
+  // 本层（没有别名参与，prepareArguments 不会动它）。目标不唯一 → 拒绝，不去挑先命中的那个。
+  const split = await h.call("replace", { remove_from: "aanaa", remove_to: "aanac", text: "x" })
+  assert.equal(split?.block, true, "两个锚点分属不同文件时拒绝，不挑一个算数")
+  assert.match(String(split?.reason), /no target path/, "拒绝文案说明目标不唯一/拿不到")
+  // 附带场景：两种拼写并存、各指一处。这种形状到不了真实管线（宿主在 prepareArguments 里
+  // 就把别名删了，pi 的钩子收到的是归一化后的入参），这里只是把同一条规则再钉一次。
   const mixed = await h.call("replace_match", {
     replace_from: "aanac",
     replace_to: "aanac",
