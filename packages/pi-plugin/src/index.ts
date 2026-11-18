@@ -1698,7 +1698,11 @@ function anchorTargetPath(
 	const sidecar = join(dir, `${key}.registry.jsonl`);
 	let raw: string;
 	try {
-		const stamp = `${statSync(sidecar).mtimeMs}:${statSync(sidecar).size}`;
+		// 一次 stat 取全（mtimeNs + size + ino）：分两次取的话文件可能在两次之间被改写，
+		// 拼出来的 stamp 谁都不对应。用纳秒而不是毫秒 —— 宿主重写（压缩）sidecar 时字节数
+		// 可能刚好不变，毫秒粒度也可能落在同一刻，那样就会拿旧解析结果判新文件。
+		const info = statSync(sidecar, { bigint: true });
+		const stamp = `${info.mtimeNs}:${info.size}:${info.ino}`;
 		const cached = anchorCache.get(sidecar);
 		if (cached?.stamp === stamp) raw = cached.raw;
 		else {
@@ -1747,15 +1751,28 @@ function anchorTargetPath(
 const anchorCache = new Map<string, { stamp: string; raw: string }>();
 
 /** 可能承载锚点的入参名。同一份文件的锚点，工具自己会校验归属一致。 */
-const ANCHOR_ARGS = ["remove_from", "remove_to", "source_from", "source_to", "anchor"];
+const ANCHOR_ARGS = [
+	"remove_from",
+	"remove_to",
+	"replace_from",
+	"replace_to",
+	"source_from",
+	"source_to",
+	"anchor",
+];
 
 /**
  * 双文件工具（copy / move）把两份文件写在同一组入参里：`source_from` / `source_to` 属于
- * 源文件，`anchor`（以及 `remove_from` / `remove_to`）属于目标文件。两组锚点归属不同文件，
- * 必须分开解析 —— 合成一个列表去查，只会返回先命中的那一个，等于只判了一侧。
+ * 源文件，`anchor` 属于目标文件。两组锚点归属不同文件，必须分开解析 —— 合成一个列表去查，
+ * 只会返回先命中的那一个，等于只判了一侧。
+ *
+ * 目标侧只有 `anchor`：宿主的 copy/move 契约只认 path / source_from / source_to / anchor /
+ * direction，传 `remove_from` 会被它以未知字段拒掉（payload-contract.ts 的 TRANSFER_KEYS）。
+ * 早先这里把 `remove_from` / `remove_to` 也算进目标侧，今天造不成问题（宿主先拒），但排序是
+ * 隐患：多锚点取值取第一个能命中的，那样返回的是源文件，真正的目标反而没判。
  */
 const TRANSFER_SOURCE_ARGS = ["source_from", "source_to"];
-const TRANSFER_DEST_ARGS = ["remove_from", "remove_to", "anchor"];
+const TRANSFER_DEST_ARGS = ["anchor"];
 
 	/** 工具名 → schema 里的路径入参名；一处缓存，避免每次调用都问一遍注册表。 */
 	const schemaPathArgs = new Map<string, string | undefined>();
@@ -1858,7 +1875,13 @@ const TRANSFER_DEST_ARGS = ["remove_from", "remove_to", "anchor"];
 					`pi-subagents-extend: ${event.toolName} was given path "${raw}", which matches neither file its anchors belong to ("${sourcePath}" and "${destPath}") (source: ${policy.source}). Pass the path of the file the anchors came from, or omit it.`,
 				);
 			}
-			const sourceAccess = kind.transferSource ?? DEFAULT_TRANSFER_SOURCE[event.toolName] ?? "write";
+			// 表按 Object.hasOwn 读：工具名是外部输入，`__proto__` / `constructor` 这类名字
+			// 走普通下标会取到原型链上的对象。表里现在只有 copy / move，撞不到，但这是本文件里
+			// 最后一处没设防的表读取，别留着。
+			const defaultSource = Object.hasOwn(DEFAULT_TRANSFER_SOURCE, event.toolName)
+				? DEFAULT_TRANSFER_SOURCE[event.toolName]
+				: undefined;
+			const sourceAccess = kind.transferSource ?? defaultSource ?? "write";
 			if (sourceAccess === "read") {
 				if (!readable(sourcePath)) {
 					return bail(

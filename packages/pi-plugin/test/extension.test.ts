@@ -3460,6 +3460,68 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   copy/move 的源与目标分别判定：源只读时 copy 放行、move 拒绝，写越界被挡")
 }
 
+// 95. replace_match 的锚点叫 replace_from / replace_to（宿主 schema 就是这两个名字），
+//     不带 path 时同样必须能解析出目标 —— 漏了这一对，等于在目标宿主上把「改一行的一部分」
+//     这个动作整个废掉，而拒绝文案还会让模型去「显式传 path」，它做不到。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-rmatch-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "inside.ts"), "inside\n")
+  const elsewhere = join(tree, "..", `${basename(tree)}-elsewhere`)
+  mkdirSync(elsewhere, { recursive: true })
+
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-hldir-"))
+  const sessionFile = join(hl, "session.jsonl")
+  const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const insideAbs = join(tree, "src", "inside.ts")
+  const outsideAbs = join(elsewhere, "x.ts")
+  writeFileSync(
+    join(hl, "sessions", `${key}.registry.jsonl`),
+    [
+      JSON.stringify({ kind: "session", sessionFile }),
+      JSON.stringify({ kind: "allocate", path: insideAbs, rows: [["aamaa", "inside"], ["aamab", "more"]] }),
+      JSON.stringify({ kind: "allocate", path: outsideAbs, rows: [["aamac", "elsewhere"]] }),
+      "",
+    ].join("\n"),
+  )
+
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = sessionFile
+
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: false } }),
+  })
+  const payload = (from: string, to: string) => ({
+    replace_from: from,
+    replace_to: to,
+    match: "ins",
+    replacement: "INS",
+  })
+
+  const allowed = await h.call("replace_match", payload("aamaa", "aamab"))
+  assert.notEqual(
+    allowed?.block,
+    true,
+    "replace_match 只给 replace_from/replace_to 时也要解析出目标并放行",
+  )
+  const refused = await h.call("replace_match", payload("aamac", "aamac"))
+  assert.equal(refused?.block, true, "锚点属于写范围外的文件时必须拒绝")
+  assert.match(String(refused?.reason), /outside the scope|not writable/, "并且是按写范围判的")
+  // 显式给 path 时照旧判 path：这条不是新行为，只是别在改 ANCHOR_ARGS 时弄坏。
+  const withPath = await h.call("replace_match", { ...payload("aamaa", "aamab"), path: insideAbs })
+  assert.notEqual(withPath?.block, true, "带 path 的 replace_match 仍然放行")
+
+  h.restore()
+  if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+  else process.env.PI_HASHLINE_DIR = previous.dir
+  if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+  else process.env.PI_SESSION_FILE = previous.session
+  console.log("  ok   replace_match 的锚点入参：只给 replace_from/replace_to 也能判，越界照样拒绝")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")
