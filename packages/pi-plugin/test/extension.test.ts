@@ -37,6 +37,16 @@ const realHome = process.env.HOME
 const testHome = mkdtempSync(join(repo, ".test-home-"))
 process.env.HOME = testHome
 
+// Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise
+// leave `.test-home-*` behind as an untracked directory, and pi-subagents' own patch capture
+// (`git add -A`) would sweep it into a patch. Both steps are idempotent.
+const restoreHome = (): void => {
+  if (realHome === undefined) delete process.env.HOME
+  else process.env.HOME = realHome
+  rmSync(testHome, { recursive: true, force: true })
+}
+process.on("exit", restoreHome)
+
 // The sandbox helper is a Rust binary. Tests execute the cargo build output and
 // never the copy in `bin/`: that copy belongs to a loaded extension, so writing to
 // it during a test run would swap the binary out from under a running session —
@@ -3064,7 +3074,5 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 }
 
 rmSync(workdir, { recursive: true, force: true })
-if (realHome === undefined) delete process.env.HOME
-else process.env.HOME = realHome
-rmSync(testHome, { recursive: true, force: true })
+restoreHome()
 console.log("\npi-subagents-extend 测试通过")
