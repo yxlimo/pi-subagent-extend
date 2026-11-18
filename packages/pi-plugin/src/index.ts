@@ -1339,20 +1339,71 @@ export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
  */
 let specSeq = 0;
 function writeSpecFile(spec: ReturnType<typeof buildSpec>, toolCallId: string): string | undefined {
+	const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
+	const safeId = toolCallId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 48);
+	let temp: string | undefined;
+	let file: string | undefined;
 	try {
-		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 		mkdirSync(dir, { recursive: true });
-		const safeId = toolCallId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 48);
 		specSeq += 1;
-		const file = resolve(dir, `spec-${process.pid}-${specSeq}-${safeId}.json`);
+		file = resolve(dir, `spec-${process.pid}-${specSeq}-${safeId}.json`);
 		// 先写临时文件再改名：helper 只会看到完整内容，不会读到半截 JSON（半截会被
 		// deny_unknown_fields / 解析失败拒掉，表现为莫名其妙的 exit 77）。
-		const temp = `${file}.tmp`;
+		temp = `${file}.tmp`;
 		writeFileSync(temp, JSON.stringify(spec));
 		renameSync(temp, file);
 		return file;
 	} catch {
+		// 写成功、改名失败时暂存文件会留下来。我们不知道失败发生在哪一步，所以两个路径
+		// 都试一遍（force 让多删一次无害），别让一次失败变成一份永久垃圾。
+		for (const path of [temp, file]) {
+			if (path === undefined) continue;
+			try {
+				rmSync(path, { force: true });
+			} catch {
+				// 清不掉也不影响本次判定。
+			}
+		}
 		return undefined;
+	}
+}
+
+/** 删掉某次调用的 spec 文件。结果不会再回来时（被挤出表、被同 id 覆盖）靠它收尾。 */
+function dropSpecFile(entry: { specFile?: string } | undefined): void {
+	if (!entry?.specFile) return;
+	try {
+		rmSync(entry.specFile, { force: true });
+	} catch {
+		// 删不掉不影响判定，session_shutdown 的清扫会兜底。
+	}
+}
+
+/**
+ * 清掉遗留的 spec 文件。
+ *
+ * 正常路径（tool_result）删自己那份，但会话被中断、进程被杀、或者一次 bash 调用的结果
+ * 永不回来时，文件就留在 ~/.cache/pi-subagents-extend 里。这里按**年龄**清：只删 10 分钟
+ * 以前的，别的 pi 进程正在用的新文件不会被碰。只认 `spec-` 前缀，因为同一个目录里还放着
+ * `git-excludes` 文件和 `xdg-cache` 目录。
+ */
+function sweepStaleSpecFiles(): void {
+	const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
+	const cutoff = Date.now() - 10 * 60 * 1000;
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.isFile() || !entry.name.startsWith("spec-") || !/\.json(\.tmp)?$/.test(entry.name)) continue;
+		const path = resolve(dir, entry.name);
+		try {
+			if (statSync(path).mtimeMs > cutoff) continue;
+			rmSync(path, { force: true });
+		} catch {
+			// 单个文件失败不影响其它文件。
+		}
 	}
 }
 
@@ -1611,6 +1662,8 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 
 	pi.on("session_shutdown", async () => {
 		probe?.dispose();
+		// 兜底：清掉本次会话（以及之前被中断的会话）遗留的 spec 文件。
+		sweepStaleSpecFiles();
 	});
 
 	// tool_result 干三件事：
@@ -1712,7 +1765,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			}
 			if (hasUnquotedShellControl(command)) {
 				return deny(
-					`pi-subagents-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Allowed: ${preview(allEntries(rule))}`,
+					`pi-subagents-extend: shell metacharacters are not allowed (; & | < > \` $ …): run one allowlisted command. Refused: ${preview([command])} — allowed: ${preview(allEntries(rule))}`,
 				);
 			}
 			const match = classifyCommand(rule, command);
@@ -1754,11 +1807,19 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				return deny("pi-subagents-extend: cannot write the sandbox spec; check that ~/.cache/pi-subagents-extend is writable");
 			}
 			// 记下这条命令的写权限清单：tool_result 判「写越界」时要用它当事实依据，
-			// 不靠文案猜。挡住条数上限，避免结果永远不回来的调用把表撑大。
+			// 不靠文案猜。
+			// 挡住条数上限，避免结果永远不回来的调用把表撑大。被挤出表的条目，结果按定义
+			// 不会再回来，所以它的 spec 文件也得删 —— 只 delete 不删文件，「一次调用一份
+			// 文件」就会变成永远堆在 ~/.cache 里的垃圾。
 			if (sandboxSpecs.size >= 64) {
 				const oldest = sandboxSpecs.keys().next().value as string | undefined;
-				if (oldest !== undefined) sandboxSpecs.delete(oldest);
+				if (oldest !== undefined) {
+					dropSpecFile(sandboxSpecs.get(oldest));
+					sandboxSpecs.delete(oldest);
+				}
 			}
+			// 同一个 toolCallId 又来一次时，旧条目的 spec 文件先删掉再覆盖，否则它没人认领。
+			dropSpecFile(sandboxSpecs.get(event.toolCallId));
 			sandboxSpecs.set(event.toolCallId, {
 				write: spec.write,
 				cwd,
