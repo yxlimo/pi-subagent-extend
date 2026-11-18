@@ -9,7 +9,7 @@
 import assert from "node:assert/strict"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
-import { homedir, tmpdir } from "node:os"
+import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import type {
@@ -136,7 +136,7 @@ const ext = (await import(join(repo, "src", "index.ts"))) as unknown as Extensio
  * Activate the extension with the given bindings env and return its tool_call handler.
  * Pass `profile` to activate through the profile loader (per-role defaults).
  */
-async function handler({ bindings, cwd = workdir, profile, profileFile }: HandlerOptions = {}): Promise<Harness> {
+async function handler({ bindings, cwd = workdir, profile, profileFile, piTools }: HandlerOptions = {}): Promise<Harness> {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
@@ -144,14 +144,16 @@ async function handler({ bindings, cwd = workdir, profile, profileFile }: Handle
   const handlers: Record<string, EventHandler> = {}
   const commands: Record<string, CommandSpec> = {}
   const ui: string[] = []
-  ext.activate({
+  const api: FakeExtensionApi = {
     on(event, fn) {
       handlers[event] = fn
     },
     registerCommand(name, spec) {
       commands[name] = spec
     },
-  }, profile ? { profileName: profile, profileFile } : {})
+  }
+  if (piTools) api.getAllTools = () => piTools
+  ext.activate(api, profile ? { profileName: profile, profileFile } : {})
 
   const aborts: string[] = []
   const ctx: SessionContext = { cwd, ui: { notify: (message: string) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
@@ -802,7 +804,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   })
   const write = await h.call("write", { content: "x" })
   assert.equal(write?.block, true, "write without path is refused")
-  assert.match(write.reason, /needs a path/, "write says the path argument is missing")
+  assert.match(write.reason, /needs "path"/, "write names the path argument that is missing")
   assert.ok(!/outside the (read )?scope/.test(write.reason), "write does not blame the scope")
 
   const grep = await h.call("grep", { pattern: "foo" })
@@ -3082,6 +3084,178 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   h2.restore()
   rmSync(fakeState, { recursive: true, force: true })
   console.log("  ok   spec 生命周期：结果回来删自己的、重复 id 的孤儿留给清扫、别的文件不碰")
+}
+
+// 86. hashline 那一套（replace / replace_match / insert / copy / move）必须按写工具判。
+//     宿主上 pi-hashline-edit-pro 会把内置 edit 从活动工具集里删掉，只认 edit 的名字表在
+//     那里等于「整套编辑能力都是未知工具」。同时钉住顺序：allowTools 不能成为绕过路径判定的
+//     后门——把 replace 写进 allowTools 之后仍必须受写范围约束。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-hashline-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "a.ts"), "a\n")
+
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], allowTools: ["replace"], bash: false },
+    }),
+  })
+  const inside = await h.call("replace", { path: "src/a.ts", remove_from: "x", text: "y" })
+  assert.notEqual(inside?.block, true, "replace inside the scope is allowed")
+  const outside = await h.call("replace", { path: "outside/b.ts", remove_from: "x", text: "y" })
+  assert.equal(outside?.block, true, "replace outside the scope is refused")
+  assert.match(
+    String(outside?.reason),
+    /outside the scope|not writable/,
+    "refused by the scope, not waved through by allowTools",
+  )
+  h.restore()
+  console.log("  ok   hashline 编辑族按写工具判，allowTools 不能绕过写范围")
+}
+
+// 87. 写工具拿不到目标路径：必须点名缺的是哪个入参并给出解法（hashline 的 requirePath，
+//     或 bindings.tools.<name>.path），而且这是用法错、不计入撞权限预算。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-nopath-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], maxWriteDenies: 1, bash: false },
+    }),
+  })
+  const missing = await h.call("replace", { remove_from: "x", text: "y" })
+  assert.equal(missing?.block, true, "a write tool without its path is refused")
+  assert.match(String(missing?.reason), /needs "path"/, "the message names the missing argument")
+  assert.match(String(missing?.reason), /requirePath/, "and names the switch that fixes it")
+  // 预算是 1：如果按撞权限计数，第二次就该 warn、第三次硬停。这里不该有任何停机。
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const again = await h.call("replace", { remove_from: "x", text: "y" })
+    assert.notEqual(again?.terminate, true, "a usage error never consumes the grant-widening budget")
+  }
+  h.restore()
+  console.log("  ok   写工具缺路径：点名入参与解法，且不计入撞权限预算")
+}
+
+// 88. undo_last_change 的 path 是必填入参，所以它永远可判：按写范围判，而不是被当成未知工具。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-undo-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "a.ts"), "a\n")
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: false } }),
+  })
+  const inside = await h.call("undo_last_change", { path: "src/a.ts" })
+  assert.notEqual(inside?.block, true, "undo inside the scope is allowed")
+  const outside = await h.call("undo_last_change", { path: "../elsewhere.ts" })
+  assert.equal(outside?.block, true, "undo outside the scope is refused")
+  assert.match(String(outside?.reason), /outside the scope|not writable/, "and it is judged by scope")
+  h.restore()
+  console.log("  ok   undo_last_change 按写工具判范围")
+}
+
+// 89. bindings.tools 的两种用法：给自建工具声明类别与路径入参名；把路径入参声明成 false
+//     等于「永远拒绝」，因为拿不到目标就没有授权能覆盖它。声明写坏则整份绑定作废。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-decl-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "a.ts"), "a\n")
+
+  const declared = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: false,
+        tools: { my_edit: { access: "write", path: "file" } },
+      },
+    }),
+  })
+  const okWrite = await declared.call("my_edit", { file: "src/a.ts" })
+  assert.notEqual(okWrite?.block, true, "a declared tool is judged by its declared path argument")
+  const badWrite = await declared.call("my_edit", { file: "../x.ts" })
+  assert.equal(badWrite?.block, true, "and outside the scope it is refused")
+  declared.restore()
+
+  const noPath = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: false, tools: { replace: { path: false } } },
+    }),
+  })
+  const refused = await noPath.call("replace", { path: "src/a.ts", remove_from: "x", text: "y" })
+  assert.equal(refused?.block, true, "a write tool declared without a path argument is always refused")
+  assert.match(String(refused?.reason), /no path argument/, "and the message says why")
+  noPath.restore()
+
+  const broken = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: false, tools: { replace: { access: "banana" } } },
+    }),
+  })
+  const dead = await broken.call("read", { path: "src/a.ts" })
+  assert.equal(dead?.block, true, "a broken declaration refuses everything (fail closed)")
+  assert.match(String(dead?.reason), /access must be/, "and says what was wrong")
+  broken.restore()
+  console.log("  ok   tools 声明：自定义类别与路径入参、path: false 永久拒绝、写坏就整份作废")
+}
+
+// 90. 路径入参名从工具自己的 schema 里取，不靠我们猜：注册表里写 file_path 的工具，
+//     传 path 就是不传，必须被当成缺参数拒绝；读类工具（outline）按读范围判。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-schema-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "a.ts"), "a\n")
+  const h = await handler({
+    cwd: tree,
+    piTools: [
+      { name: "mytool", parameters: { type: "object", properties: { file_path: { type: "string" } } } },
+      { name: "outline", parameters: { type: "object", properties: { path: { type: "string" } } } },
+    ],
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: false, tools: { mytool: { access: "write" } } },
+    }),
+  })
+  const viaSchema = await h.call("mytool", { file_path: "src/a.ts" })
+  assert.notEqual(viaSchema?.block, true, "the schema's own argument name is accepted")
+  const wrongArg = await h.call("mytool", { path: "src/a.ts" })
+  assert.equal(wrongArg?.block, true, "passing a different argument name is a missing path")
+  assert.match(String(wrongArg?.reason), /needs "file_path"/, "and the message names the schema's argument")
+  const outlineOutside = await h.call("outline", { path: "../x.ts" })
+  assert.equal(outlineOutside?.block, true, "outline is a read tool and obeys the read scope")
+  assert.match(String(outlineOutside?.reason), /read scope/, "refused by the read scope")
+  h.restore()
+  console.log("  ok   路径入参名取自工具 schema；读类工具按读范围判")
+}
+
+// 91. 工具名是外部输入，撞上 `__proto__` / `constructor` 这类键时不能把原型链当成声明：
+//     否则 `policy.tools["constructor"]` 会读到 Object 的构造器，`{}.access` 虽为 undefined
+//     也会让「是否有声明」的判断失真。这里钉住的是「当成未声明」，以及不崩。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-proto-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: false,
+        tools: { constructor: { access: "write", path: "file" } },
+      },
+    }),
+  })
+  // 声明生效：给了 file 就走写判定（树外 → 拒），而不是「未知工具」或崩溃。
+  const declared = await h.call("constructor", { file: "../x.ts" })
+  assert.equal(declared?.block, true, "a tool literally named constructor is still judged")
+  assert.match(String(declared?.reason), /outside the scope|not writable|tool constructor/, "and not via the prototype chain")
+  // 未声明的原型键工具名：按未声明处理（未知工具拒绝），不崩。
+  const undeclared = await h.call("__proto__", { path: "src/a.ts" })
+  assert.equal(undeclared?.block, true, "__proto__ is not silently treated as a known tool")
+  h.restore()
+  console.log("  ok   原型键工具名不污染声明表")
 }
 
 rmSync(workdir, { recursive: true, force: true })

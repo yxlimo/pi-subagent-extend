@@ -62,8 +62,33 @@ const SKILL_DIRS = ["pi-subagents-extend", "pi-subagents-extend-probes", "pi-sub
 );
 
 const READ_TOOL = "read";
-const PATH_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
-const WRITE_TOOLS = ["edit", "write"];
+/**
+ * 已知路径类工具的访问类别：读认读范围，写认写范围。
+ *
+ * 名字只是**默认值**，不是判据的全部。目标路径从工具自己的入参 schema 里取（见
+ * `pathArgOf`），父代理还能用 bindings.tools 覆盖。名字表之所以省不掉，是因为
+ * 「这个工具会不会改文件」推不出来，必须有人声明。
+ *
+ * 为什么必须收录 hashline 那一套：pi-hashline-edit-pro 把内置 `edit` 从活动工具集里
+ * 删掉（它自己 `setActiveTools(active.filter(t => t !== "edit"))`），换上一组以行锚点
+ * 定位的编辑工具。只认 `edit` / `write` 的名单在这种宿主上会把整套编辑能力判成
+ * 「未知工具」而拒绝——子代理一个改文件的工具都拿不到。
+ */
+const DEFAULT_TOOL_ACCESS: Record<string, "read" | "write"> = {
+	read: "read",
+	grep: "read",
+	find: "read",
+	ls: "read",
+	outline: "read",
+	edit: "write",
+	write: "write",
+	replace: "write",
+	replace_match: "write",
+	insert: "write",
+	copy: "write",
+	move: "write",
+	undo_last_change: "write",
+};
 const EXEC_TOOLS = ["bash", "powershell", "codemode"];
 /**
  * 不碰文件系统的会话级运行时工具，范围生效时照常放行。
@@ -118,6 +143,58 @@ export function hasUnquotedShellControl(command: string): boolean {
 	return quote !== undefined;
 }
 
+/**
+ * 一个工具的类别声明。
+ *
+ * `access` 缺省时沿用 `DEFAULT_TOOL_ACCESS` 里按名字给的值；`path` 缺省时从工具自己的
+ * 入参 schema 里找（`pathArgFromSchema`），找不到就当 `path`。
+ */
+interface ToolDeclaration {
+	access?: "read" | "write";
+	path?: string | false;
+}
+
+/**
+ * 解析 bindings.tools：名字 → 类别覆盖。
+ *
+ * 写坏就整份绑定作废（fail closed），与 scope / writeScope 的处理一致：一个说不清工具
+ * 类别的会话没办法安全地放行任何工具。
+ */
+function parseToolDeclarations(value: unknown): {
+	declarations: Record<string, ToolDeclaration>;
+	error?: string;
+} {
+	// 工具名来自外部输入：用无原型对象，避免 "__proto__" 这类键改写原型链。
+	const declarations: Record<string, ToolDeclaration> = Object.create(null);
+	if (value === undefined) return { declarations };
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return { declarations, error: "tools must be an object of { toolName: { access, path } }" };
+	}
+	for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			return { declarations, error: `tools.${name} must be an object` };
+		}
+		const entry = raw as { access?: unknown; path?: unknown };
+		if (entry.access !== undefined && entry.access !== "read" && entry.access !== "write") {
+			return { declarations, error: `tools.${name}.access must be "read" or "write"` };
+		}
+		if (
+			entry.path !== undefined &&
+			entry.path !== false &&
+			(typeof entry.path !== "string" || entry.path.trim() === "")
+		) {
+			return { declarations, error: `tools.${name}.path must be a non-empty string or false` };
+		}
+		declarations[name] = {
+			...(entry.access === undefined ? {} : { access: entry.access }),
+			...(entry.path === undefined
+				? {}
+				: { path: entry.path === false ? false : (entry.path as string).trim() }),
+		};
+	}
+	return { declarations };
+}
+
 interface Policy {
 	globs: string[];
 	regexps: RegExp[];
@@ -136,6 +213,13 @@ interface Policy {
 	readOnly: boolean;
 	maxReads: number;
 	allowTools: string[];
+	/**
+	 * 父代理对工具类别的显式声明，覆盖 `DEFAULT_TOOL_ACCESS`。
+	 *
+	 * `path: false` 表示这个工具没有可判的路径入参——写类工具这样声明等于「永远拒绝」，
+	 * 因为拿不到目标就没有任何授权能覆盖它。
+	 */
+	tools: Record<string, ToolDeclaration>;
 	bash?: BashRule;
 	/** 探针配置；undefined = 关闭。 */
 	probe: unknown;
@@ -156,6 +240,7 @@ const INACTIVE: Policy = {
 	readOnly: true,
 	maxReads: 0,
 	allowTools: [],
+	tools: {},
 	probe: undefined,
 	maxDenies: 0,
 	maxWriteDenies: 0,
@@ -184,6 +269,7 @@ function denyAll(source: string): Policy {
 		readOnly: true,
 		maxReads: 0,
 		allowTools: [],
+		tools: {},
 		probe: undefined,
 		maxDenies: DEFAULT_MAX_DENIES,
 		maxWriteDenies: DEFAULT_MAX_WRITE_DENIES,
@@ -362,6 +448,9 @@ function parsePolicyObject(
 	const readOnly = config.readOnly === true;
 	const write = parseWriteScope(config, globs, readOnly, source);
 	if (write.error) return denyAll(write.error);
+	const toolDeclarations = parseToolDeclarations(config.tools);
+	if (toolDeclarations.error)
+		return denyAll(`${source}.${toolDeclarations.error}; everything is refused`);
 	const allWrite = write.writeGlobs as string[];
 	const absoluteWrite = allWrite.filter((g) => isAbsolute(g)).map((g) => canonical(g));
 	const writeGlobs = allWrite.filter((g) => !isAbsolute(g));
@@ -378,6 +467,7 @@ function parsePolicyObject(
 		readOnly,
 		maxReads: positiveInt(config.maxReads),
 		allowTools,
+		tools: toolDeclarations.declarations,
 		bash: parseBashRule(config.bash),
 		probe: config.probe,
 		// 撞权限是纯错误信号：不配也开，父代理可以显式写 0 关掉。
@@ -1561,16 +1651,61 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		return counted.stop ? stop(composed) : deny(composed);
 	};
 
-	/** 路径类工具的判定：读认读范围，写认写范围，两类拒绝各自计数、各自文案。 */
+	/** 工具名 → schema 里的路径入参名；一处缓存，避免每次调用都问一遍注册表。 */
+	const schemaPathArgs = new Map<string, string | undefined>();
+
+	const pathArgFromSchema = (toolName: string): string | undefined => {
+		if (schemaPathArgs.has(toolName)) return schemaPathArgs.get(toolName);
+		let found: string | undefined;
+		try {
+			const registered = (
+				pi as { getAllTools?: () => { name: string; parameters?: unknown }[] }
+			).getAllTools?.();
+			const tool = registered?.find((entry) => entry.name === toolName);
+			const properties = (tool?.parameters as { properties?: Record<string, { type?: string }> } | undefined)
+				?.properties;
+			if (properties?.path?.type === "string") found = "path";
+			else if (properties?.file_path?.type === "string") found = "file_path";
+		} catch {
+			// 宿主没暴露 getAllTools（老版本、测试桩）：退回缺省的 "path"。
+		}
+		schemaPathArgs.set(toolName, found);
+		return found;
+	};
+
+	/**
+	 * 名字 → 类别。undefined 表示它不是路径类工具，交给 allowTools 那条路。
+	 *
+	 * 路径入参名的取值顺序：父代理显式声明 → 工具自己的 schema → "path"。中间那层是为了
+	 * 不靠猜：hashline 那套工具的 schema 里就有 `path`，而换个宿主可能叫 `file_path`。
+	 */
+	const toolKindOf = (
+		toolName: string,
+	): { access: "read" | "write"; pathArg: string | false } | undefined => {
+		const declared = Object.hasOwn(policy.tools, toolName) ? policy.tools[toolName] : undefined;
+		const fallback = Object.hasOwn(DEFAULT_TOOL_ACCESS, toolName) ? DEFAULT_TOOL_ACCESS[toolName] : undefined;
+		const access = declared?.access ?? fallback;
+		if (!access) return undefined;
+		return { access, pathArg: declared?.path ?? pathArgFromSchema(toolName) ?? "path" };
+	};
+
 	const pathToolVerdict = (
 		event: { toolName: string; input?: unknown },
 		cwd: string,
+		kind: { access: "read" | "write"; pathArg: string | false },
 	): { block: true; reason: string; terminate?: boolean } | undefined => {
-		if (!PATH_TOOLS.includes(event.toolName)) return undefined;
-		const input = (event as { input?: { path?: unknown } }).input;
-		const raw = typeof input?.path === "string" ? input.path.trim() : "";
+		const isWrite = kind.access === "write";
+		// 声明成写工具却没有可判的路径入参：目标拿不到，就没有任何授权能覆盖它。永远拒绝，
+		// 而且这是用法/配置问题，不计入撞权限预算。
+		if (isWrite && kind.pathArg === false) {
+			return deny(
+				`pi-subagents-extend: ${event.toolName} is declared as a write tool with no path argument, so its target cannot be checked (source: ${policy.source}). Declare tools.${event.toolName}.path in the bindings, or let the parent perform this write.`,
+			);
+		}
+		const input = (event as { input?: Record<string, unknown> }).input;
+		const pathValue = kind.pathArg === false ? undefined : input?.[kind.pathArg];
+		const raw = typeof pathValue === "string" ? pathValue.trim() : "";
 		const target = raw || ".";
-		const isWrite = WRITE_TOOLS.includes(event.toolName);
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 			return bail(`pi-subagents-extend: read budget exhausted (${policy.maxReads} reads).`);
 		}
@@ -1589,7 +1724,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		// 这是用法错误不是权限错误，不计入撞权限计数。
 		if (isWrite && !raw) {
 			return deny(
-				`pi-subagents-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
+				`pi-subagents-extend: ${event.toolName} needs "${kind.pathArg}"; without it the target cannot be checked, so no scope can allow it (source: ${policy.source}). Enable the tool's force-path option (pi-hashline-edit-pro: requirePath) or declare tools.${event.toolName}.path in the bindings.\nWrite scope: ${preview(policy.writeGlobs)}`,
 			);
 		}
 		const readOk = matches(policy.regexps, cwd, target);
@@ -1847,18 +1982,20 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (EXEC_TOOLS.includes(event.toolName)) {
 			// 从来不可用：给多宽的范围、多长的命令白名单都不会打开，所以不计入撞权限。
 			return deny(
-				`pi-subagents-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
+				`pi-subagents-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use a path tool (read / write / the host's edit family) or an allowlisted bash command.`,
 			);
 		}
+		// 路径类工具先判：它们的授权来自范围，不来自 allowTools。顺序反过来就意味着父代理
+		// 一旦把名字写进 allowTools，路径判定整个被跳过——写范围在那种宿主上等于失效
+		// （实测：allowTools 里写 replace 时，树外路径照写不误）。
+		const kind = toolKindOf(event.toolName);
+		if (kind) return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd, kind);
+
 		// SAFE_TOOLS 已经在最前面处理过，这里只管调用方显式放行的工具。
 		if (policy.allowTools.includes(event.toolName)) return undefined;
 
-		if (PATH_TOOLS.includes(event.toolName)) {
-			return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd);
-		}
-
 		return bail(
-			`pi-subagents-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools).`,
+			`pi-subagents-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools). Tools this layer already judges by scope: ${preview(Object.keys(DEFAULT_TOOL_ACCESS))}.`,
 		);
 	};
 

@@ -31,10 +31,11 @@ subagent(
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `scope` | `string[]` | Globs describing what the subagent may read. Required; an empty array refuses all file access. |
-| `writeScope` | `string[]` | Globs describing what `edit` and `write` may touch. Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
+| `writeScope` | `string[]` | Globs describing what a write tool may touch (`edit`/`write`, or the host's anchored-editing family: `replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`). Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
 | `readOnly` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. |
 | `maxReads` | `number` | Cap on successful reads. |
-| `allowTools` | `string[]` | Extra non-executor tool names to allow. |
+| `allowTools` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. |
+| `tools` | `object` | Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `access` is `read` or `write`; `path` names the argument holding the target path, or is `false` for a tool with no path argument (a write tool declared that way is always refused). The path argument name is taken from the tool's own schema when omitted, so anchors-based tools usually need only `access`. A malformed entry refuses everything. |
 | `maxDenies` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
 | `maxWriteDenies` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
 | `probe` | `object \| boolean` | Circles-and-collisions detection; see [probes](architecture.md#probes). |

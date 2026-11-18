@@ -48,6 +48,8 @@ too.
 | --- | --- |
 | `read` | path resolved (a missing one means the working directory), allowed when inside the scope, subject to `maxReads` |
 | `edit` / `write` | the target must be inside the write scope (`writeScope`, defaulting to `scope`); `readOnly` refuses every write unless a `writeScope` is given explicitly |
+| `replace` / `replace_match` / `insert` / `copy` / `move` / `undo_last_change` | as `edit`: these are the edit family of an anchored-editing host (pi-hashline-edit-pro deletes the builtin `edit` from the active tool set and registers these instead) |
+| `outline` | as `read` |
 | `grep` / `find` / `ls` | as `read` |
 | `bash` | refused entirely without an allowlist; with one, only matching commands are allowed and each is rewritten to run under the helper. Shell control characters are judged **outside quotes only** — the command runs as `bash -lc <command>`, so a `;` or `(` inside single quotes is an ordinary character while `$` and a backtick still expand inside double quotes |
 | `powershell` / `codemode` | always refused: there is no path to judge, so they would escape the scope |
@@ -57,6 +59,24 @@ too.
 
 The last rule is what makes the extension a boundary rather than a filter: a tool added by some
 other extension is refused until someone names it.
+
+**Path tools are judged before `allowTools`.** The order is load-bearing: if a name is reached
+through the allowlist first, the path judgement never runs, so listing a write tool in
+`allowTools` would let it write anywhere. Judging first means the allowlist can only widen access
+to tools this layer cannot judge at all.
+
+**Names are defaults, not the whole rule.** `access` (read or write) cannot be derived from a
+schema, so it comes from `DEFAULT_TOOL_ACCESS` — the builtin names plus the anchored-editing
+family. The *path argument name* is not guessed: it is read from the tool's own `parameters`
+schema (`path`, else `file_path`). A parent can override either through `bindings.tools`, whose
+entries are `{ "<toolName>": { "access": "read" | "write", "path": "file_path" | false } }`:
+
+- `path: false` declares a tool that has no path argument; a write tool declared that way is
+  refused always — the target is unknowable, so no grant can cover it.
+- a write tool whose path argument is absent from the call is refused with the argument named.
+  Anchored-editing tools take an optional `path` until their `requirePath` option is on; that
+  option is the fix, and the refusal says so.
+- a malformed `tools` entry refuses everything (fail closed), like a malformed `scope`.
 
 ### The three write layers
 
