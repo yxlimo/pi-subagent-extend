@@ -154,6 +154,21 @@ caller can relax. A dispatch to a role that has a profile passes only `agent`, `
 the three pieces a new role needs are in the usage skill
 [`pi-subagents-extend`](../packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#call-template).
 
+### Do not pin the edit tool in an agent definition
+
+An agent definition's `tools` field is a strict allowlist over *registered* names, not a request to
+load anything. That makes it host-dependent: the builtin `edit` disappears on a host running
+`pi-hashline-edit-pro` (which deletes it and registers `replace`, `replace_match`, `insert`, `copy`,
+`move`, `undo_last_change`), so a definition listing `edit` stops at the child's first request with
+"declares tools: …, but an extension loaded in this child replaced the tools sent to the model".
+Listing the anchored family instead breaks the child on every host that still has the builtin, and
+listing both is fatal too, since a declared tool that never registered is itself a run error.
+
+Leave `tools` out and let this layer bound the child: it judges path tools by the scope and refuses
+everything that is not a known path tool, a safe tool, or allowlisted. Read-only roles can keep a
+narrow `tools` list as long as every name exists on every host (`read`, `grep`, `find`, `ls`,
+`bash`, `write` all do).
+
 ## Without a parent agent
 
 Hand bindings reach the extension through `PI_SUBAGENT_EXTENSION_BINDINGS`:

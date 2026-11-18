@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 82 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 92 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 
@@ -36,6 +36,29 @@ the wrong reason.
 
 `scripts` in `package.json` run them through node's type stripping, so there is no build step
 between editing a test and running it.
+
+## How the tool-judging layer is covered
+
+The layer decides whether a tool call may touch a path, so most cases assert one of three things:
+allowed, refused by the read scope, or refused by the write scope.
+
+Tool *classification* is declared, not inferred: `DEFAULT_TOOL_ACCESS` maps a name to `read` or
+`write`, `bindings.tools` overrides it, and the path *argument* name is read from the tool's own
+`parameters` schema (`path`, else `file_path`). Cases 85-90 pin that: the anchored-editing family
+(`replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`) is judged by the write
+scope, `allowTools` cannot widen a path tool, a missing target names the argument without charging
+the budget, a custom tool is judged by its declaration, `path: false` means always refused, a
+malformed `tools` entry refuses everything, the schema-derived argument name is honoured, and a tool
+named `constructor` or `__proto__` cannot reach a declaration through the prototype chain.
+
+Cases 91-92 cover recovering a write target from anchor ownership, which the host records in
+`sessions/<sha256(sessionFile)[0:24]>.registry.jsonl` as `allocate` / `free` / `clear` events. A
+resolver miss must refuse, never allow. Case 92 deliberately uses `scope: ["."]`: with a narrower
+scope the fallback target `.` would be refused for the wrong reason and the case would stop
+discriminating.
+
+Every case here was mutation-verified — the implementation was reverted and the suite went red —
+because a case that cannot fail proves nothing.
 
 ## The mock model
 
