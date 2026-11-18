@@ -3522,6 +3522,66 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   replace_match 的锚点入参：只给 replace_from/replace_to 也能判，越界照样拒绝")
 }
 
+// 96. 锚点入参里两种拼写同时出现、各指向不同文件时，拒绝。
+//     宿主会把别名删掉、只留规范名，所以真正被写的是规范名那一个；我们按「第一个能解析的」
+//     取，就会判到另一个文件上 —— 判了 B、写的是 A。任何固定顺序都救不了（replace 与
+//     replace_match 的规范名相反），只能要求所有锚点解析到同一个文件。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-mixed-"))
+  mkdirSync(join(tree, "src"), { recursive: true })
+  writeFileSync(join(tree, "src", "inside.ts"), "inside\n")
+  const elsewhere = join(tree, "..", `${basename(tree)}-elsewhere`)
+  mkdirSync(elsewhere, { recursive: true })
+  writeFileSync(join(elsewhere, "out.ts"), "out\n")
+
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-hldir-"))
+  const sessionFile = join(hl, "session.jsonl")
+  const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const insideAbs = join(tree, "src", "inside.ts")
+  const outsideAbs = join(elsewhere, "out.ts")
+  writeFileSync(
+    join(hl, "sessions", `${key}.registry.jsonl`),
+    [
+      JSON.stringify({ kind: "session", sessionFile }),
+      JSON.stringify({ kind: "allocate", path: insideAbs, rows: [["aanaa", "inside"], ["aanab", "more"]] }),
+      JSON.stringify({ kind: "allocate", path: outsideAbs, rows: [["aanac", "out"]] }),
+      "",
+    ].join("\n"),
+  )
+  // src 可读可写，树外那个只可读不可写：判对了就必须拒绝，判错了（判到 inside）会放行。
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = sessionFile
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: false } }),
+  })
+
+  // 同一份文件的两种拼写：一致，放行（否则这条靠「一律拒绝」也能过）。
+  const agree = await h.call("replace", { remove_from: "aanaa", remove_to: "aanab", text: "x" })
+  assert.notEqual(agree?.block, true, "同一份文件的锚点照旧放行")
+
+  // 两种拼写各指一处：宿主只会用规范名那个（replace_match 用 replace_from），所以真正被写的
+  // 是树外文件；我们解析出两个不同文件 → 拿不到唯一目标 → 必须拒绝。
+  const mixed = await h.call("replace_match", {
+    replace_from: "aanac",
+    replace_to: "aanac",
+    remove_from: "aanaa",
+    remove_to: "aanab",
+    match: "out",
+    replacement: "OUT",
+  })
+  assert.equal(mixed?.block, true, "锚点分别属于两个文件时拒绝，不猜宿主会写哪一个")
+
+  h.restore()
+  if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+  else process.env.PI_HASHLINE_DIR = previous.dir
+  if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+  else process.env.PI_SESSION_FILE = previous.session
+  console.log("  ok   锚点跨两个文件时拒绝：别名与规范名并存也不猜")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")

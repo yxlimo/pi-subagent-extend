@@ -1740,17 +1740,29 @@ function anchorTargetPath(
 			}
 		}
 	}
+	// 所有锚点必须指向同一个文件。宿主的两种拼写互为别名，它会保留自己的规范名、把别名删掉
+	// （utils.ts 的 normalizeAnchorAliases），所以入参里同时出现 `remove_from` 与
+	// `replace_from`、各指向不同文件时，宿主写的是规范名那一个 —— 而「取第一个能解析的」
+	// 会取到另一个，于是判了 B 文件、真正写的是 A 文件。任何固定顺序都不对：`replace` 的规范名
+	// 是 remove_*，`replace_match` 的是 replace_*，两种工具要的顺序相反。拿不到唯一目标就拒绝。
+	const resolvedFiles = new Set<string>();
 	for (const anchor of anchors) {
 		const found = owned.get(anchor);
-		if (found) return found;
+		if (found) resolvedFiles.add(found);
 	}
-	return undefined;
+	if (resolvedFiles.size !== 1) return undefined;
+	const [onlyFile] = resolvedFiles;
+	return onlyFile;
 }
 
 /** sidecar 解析缓存：一次工具调用读一次文件太长，按 mtime+size 失效。 */
 const anchorCache = new Map<string, { stamp: string; raw: string }>();
 
-/** 可能承载锚点的入参名。同一份文件的锚点，工具自己会校验归属一致。 */
+/**
+ * 可能承载锚点的入参名。两种拼写都在里面（`replace` 用 remove_*，`replace_match` 用
+ * replace_*，宿主互为别名），所以列全；至于它们是不是都指向同一份文件，由
+ * `anchorTargetPath` 自己核对 —— 不能指望工具去校验，它会先删掉别名。
+ */
 const ANCHOR_ARGS = [
 	"remove_from",
 	"remove_to",
