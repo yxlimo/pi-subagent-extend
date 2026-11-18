@@ -76,6 +76,8 @@ export interface CommandSpec {
 export interface FakeExtensionApi {
 	on(event: string, handler: EventHandler): void
 	registerCommand(name: string, spec: CommandSpec): void
+	/** Optional: the host's tool registry, which the extension reads for path-argument names. */
+	getAllTools?(): Array<{ name: string; parameters?: unknown }>
 }
 
 /** The extension module as the suites see it. */
@@ -94,6 +96,8 @@ export interface HandlerOptions {
 	cwd?: string
 	profile?: string
 	profileFile?: string
+	/** Fake tool registry, for the schema-derived path-argument lookup. */
+	piTools?: Array<{ name: string; parameters?: unknown }>
 }
 
 /** What the tool_result handler returns: the content array, possibly patched. */

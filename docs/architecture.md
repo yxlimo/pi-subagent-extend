@@ -48,6 +48,9 @@ too.
 | --- | --- |
 | `read` | path resolved (a missing one means the working directory), allowed when inside the scope, subject to `maxReads` |
 | `edit` / `write` | the target must be inside the write scope (`writeScope`, defaulting to `scope`); `readOnly` refuses every write unless a `writeScope` is given explicitly |
+| `replace` / `replace_match` / `insert` / `undo_last_change` | as `edit`: these are the edit family of an anchored-editing host (pi-hashline-edit-pro deletes the builtin `edit` from the active tool set and registers these instead) |
+| `copy` / `move` | as `edit`, plus a second judgment: these two name **two** files — `source_from`/`source_to` belong to the source file, `anchor` (and `remove_*`) to the destination. Both are resolved separately and both are judged. `copy` only reads the source, so the source must be inside the **read** scope; `move` deletes the lines it takes, so the source must be **writable** too. The destination must always be writable. `tools.<name>.transferSource` overrides the source side (`read`/`write`), and a transfer tool the defaults do not know is judged as `write` on both sides. Resolving the two into one list would return whichever anchor came first — the source — leaving the destination unchecked, which let a copy write outside the write scope |
+| `outline` | as `read` |
 | `grep` / `find` / `ls` | as `read` |
 | `bash` | refused entirely without an allowlist; with one, only matching commands are allowed and each is rewritten to run under the helper. Shell control characters are judged **outside quotes only** — the command runs as `bash -lc <command>`, so a `;` or `(` inside single quotes is an ordinary character while `$` and a backtick still expand inside double quotes. Leading `NAME=value` assignments are stripped before an entry is matched, since `HOME=/tmp/x node a.ts` runs `node a.ts`; the scan is quote-aware and accepts `+=`, so `HOME="/tmp/my home" node` and `A+=1 node` are stripped too, and only a *leading* run of assignments is removed. Two consequences: an entry must start with the program name (`HOME=/tmp node` can never fire), and a `re:` entry still sees the command exactly as written. Names that change which program runs or load code into it (`LD_*`, `DYLD_*`, `NODE_*`, `npm_config_*`, `PYTHON*`, `PERL*`, `RUBY*`, `GIT_*`, `BASH_ENV`/`ENV`/`BASH_FUNC_*`, `PATH`, `IFS`, `PAGER`, `LESSOPEN`) are refused with a note naming the variable, because `NODE_OPTIONS=--require=/tmp/x.js node -e ""` really does execute `/tmp/x.js` — that would make the allowlist decoration. This is a deny-list, not a sandbox boundary: `HOME` is deliberately allowed (it is the common case and needs further conditions to inject), and a name nobody listed passes |
 | `powershell` / `codemode` | always refused: there is no path to judge, so they would escape the scope |
@@ -57,6 +60,24 @@ too.
 
 The last rule is what makes the extension a boundary rather than a filter: a tool added by some
 other extension is refused until someone names it.
+
+**Path tools are judged before `allowTools`.** The order is load-bearing: if a name is reached
+through the allowlist first, the path judgement never runs, so listing a write tool in
+`allowTools` would let it write anywhere. Judging first means the allowlist can only widen access
+to tools this layer cannot judge at all.
+
+**Names are defaults, not the whole rule.** `access` (read or write) cannot be derived from a
+schema, so it comes from `DEFAULT_TOOL_ACCESS` — the builtin names plus the anchored-editing
+family. The *path argument name* is not guessed: it is read from the tool's own `parameters`
+schema (`path`, else `file_path`). A parent can override either through `bindings.tools`, whose
+entries are `{ "<toolName>": { "access": "read" | "write", "path": "file_path" | false } }`:
+
+- `path: false` declares a tool that has no path argument; a write tool declared that way is
+  refused always — the target is unknowable, so no grant can cover it.
+- a write tool whose path argument is absent from the call is refused with the argument named.
+  Anchored-editing tools take an optional `path` until their `requirePath` option is on; that
+  option is the fix, and the refusal says so.
+- a malformed `tools` entry refuses everything (fail closed), like a malformed `scope`.
 
 ### The three write layers
 

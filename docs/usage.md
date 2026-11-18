@@ -31,10 +31,11 @@ subagent(
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `scope` | `string[]` | Globs describing what the subagent may read. Required; an empty array refuses all file access. |
-| `writeScope` | `string[]` | Globs describing what `edit` and `write` may touch. Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
+| `writeScope` | `string[]` | Globs describing what a write tool may touch (`edit`/`write`, or the host's anchored-editing family: `replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`). Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
 | `readOnly` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. |
 | `maxReads` | `number` | Cap on successful reads. |
-| `allowTools` | `string[]` | Extra non-executor tool names to allow. |
+| `allowTools` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. |
+| `tools` | `object` | Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `access` is `read` or `write`; `path` names the argument holding the target path, or is `false` for a tool with no path argument (a write tool declared that way is always refused); `transferSource` (`read`/`write`) says how a two-file tool's **source** is judged — `copy` reads its source while `move` deletes from it, and the built-in defaults already say so. The path argument name is taken from the tool's own schema when omitted, so anchors-based tools usually need only `access`. A malformed entry refuses everything. |
 | `maxDenies` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
 | `maxWriteDenies` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
 | `probe` | `object \| boolean` | Circles-and-collisions detection; see [probes](architecture.md#probes). |
@@ -72,9 +73,15 @@ The report is longer than a reply can carry, and a reviewer that cannot write ha
 }
 ```
 
-`write` must be in `allowTools` — the grant is the path, the tool still has to be allowed. Bash
-redirection (`>`, `>>`) is refused by the metacharacter rule regardless, which is deliberate: the
-report goes through the `write` tool, where the path can be judged.
+The grant is the path, not the name: `read` / `write` / the host's edit family are judged by the scopes
+*before* `allowTools` is consulted, so listing `write` there neither authorises nor restricts it — the
+example lists it only because a reader otherwise wonders. Bash redirection (`>`, `>>`) is refused by the
+metacharacter rule regardless, which is deliberate: the report goes through the `write` tool, where the
+path can be judged.
+
+That ordering has one consequence worth knowing: a tool this layer does not recognise is *not* judged by
+the scopes, so allowlisting a **new** write tool (a plugin's own edit tool) allows it unjudged. Declare
+it under `tools` — `{ "access": "write", "path": "<its path argument>" }` — and the scopes apply.
 
 ### A coder in a worktree
 
@@ -152,6 +159,21 @@ Merging favours the stricter side: a call overrides a profile per key, except `b
 caller can relax. A dispatch to a role that has a profile passes only `agent`, `model` and `task` —
 the three pieces a new role needs are in the usage skill
 [`pi-subagents-extend`](../packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#call-template).
+
+### Do not pin the edit tool in an agent definition
+
+An agent definition's `tools` field is a strict allowlist over *registered* names, not a request to
+load anything. That makes it host-dependent: the builtin `edit` disappears on a host running
+`pi-hashline-edit-pro` (which deletes it and registers `replace`, `replace_match`, `insert`, `copy`,
+`move`, `undo_last_change`), so a definition listing `edit` stops at the child's first request with
+"declares tools: …, but an extension loaded in this child replaced the tools sent to the model".
+Listing the anchored family instead breaks the child on every host that still has the builtin, and
+listing both is fatal too, since a declared tool that never registered is itself a run error.
+
+Leave `tools` out and let this layer bound the child: it judges path tools by the scope and refuses
+everything that is not a known path tool, a safe tool, or allowlisted. Read-only roles can keep a
+narrow `tools` list as long as every name exists on every host (`read`, `grep`, `find`, `ls`,
+`bash`, `write` all do).
 
 ## Without a parent agent
 

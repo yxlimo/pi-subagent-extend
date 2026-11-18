@@ -6,7 +6,12 @@ thinking: high
 inheritSkills: false
 inheritProjectContext: true
 model: buddy/coder-d
-tools: read, grep, find, ls, bash, edit, write
+# No `tools` here on purpose. It is a strict allowlist over *registered* names, and the edit tool's
+# name depends on the host: builtin `edit`, or pi-hashline-edit-pro's replace / replace_match /
+# insert / copy / move. Naming one family stops this child on a host that has the other, and naming
+# both is fatal, because a declared tool that never registered is itself a run error. The binding
+# profile bounds this child instead: the judging layer refuses every tool that is not a known path
+# tool, a safe tool, or allowlisted.
 subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 systemPromptMode: replace
 ---

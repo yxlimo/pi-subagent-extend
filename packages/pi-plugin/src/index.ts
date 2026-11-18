@@ -41,6 +41,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, parseBashRule, type BashRule } from "./bash-match.ts";
@@ -62,8 +63,42 @@ const SKILL_DIRS = ["pi-subagents-extend", "pi-subagents-extend-probes", "pi-sub
 );
 
 const READ_TOOL = "read";
-const PATH_TOOLS = ["read", "edit", "write", "grep", "find", "ls"];
-const WRITE_TOOLS = ["edit", "write"];
+/**
+ * 已知路径类工具的访问类别：读认读范围，写认写范围。
+ *
+ * 名字只是**默认值**，不是判据的全部。目标路径从工具自己的入参 schema 里取（见
+ * `pathArgOf`），父代理还能用 bindings.tools 覆盖。名字表之所以省不掉，是因为
+ * 「这个工具会不会改文件」推不出来，必须有人声明。
+ *
+ * 为什么必须收录 hashline 那一套：pi-hashline-edit-pro 把内置 `edit` 从活动工具集里
+ * 删掉（它自己 `setActiveTools(active.filter(t => t !== "edit"))`），换上一组以行锚点
+ * 定位的编辑工具。只认 `edit` / `write` 的名单在这种宿主上会把整套编辑能力判成
+ * 「未知工具」而拒绝——子代理一个改文件的工具都拿不到。
+ */
+const DEFAULT_TOOL_ACCESS: Record<string, "read" | "write"> = {
+	read: "read",
+	grep: "read",
+	find: "read",
+	ls: "read",
+	outline: "read",
+	edit: "write",
+	write: "write",
+	replace: "write",
+	replace_match: "write",
+	insert: "write",
+	copy: "write",
+	move: "write",
+	undo_last_change: "write",
+};
+/**
+ * 双文件工具的源文件按什么判。`copy` 只读源（源可以只读），`move` 从源里删（源必须可写）。
+ * 没在这张表里的双文件工具按 `write` 判 —— 拿不准就往严里判，这是本层的既有取向。
+ */
+const DEFAULT_TRANSFER_SOURCE: Record<string, "read" | "write"> = {
+	copy: "read",
+	move: "write",
+};
+
 const EXEC_TOOLS = ["bash", "powershell", "codemode"];
 /**
  * 不碰文件系统的会话级运行时工具，范围生效时照常放行。
@@ -118,6 +153,68 @@ export function hasUnquotedShellControl(command: string): boolean {
 	return quote !== undefined;
 }
 
+/**
+ * 一个工具的类别声明。
+ *
+ * `access` 缺省时沿用 `DEFAULT_TOOL_ACCESS` 里按名字给的值；`path` 缺省时从工具自己的
+ * 入参 schema 里找（`pathArgFromSchema`），找不到就当 `path`。
+ */
+interface ToolDeclaration {
+	access?: "read" | "write";
+	path?: string | false;
+	/** 双文件工具（copy/move）的源文件按读还是按写判；缺省见 `DEFAULT_TRANSFER_SOURCE`。 */
+	transferSource?: "read" | "write";
+}
+
+/**
+ * 解析 bindings.tools：名字 → 类别覆盖。
+ *
+ * 写坏就整份绑定作废（fail closed），与 scope / writeScope 的处理一致：一个说不清工具
+ * 类别的会话没办法安全地放行任何工具。
+ */
+function parseToolDeclarations(value: unknown): {
+	declarations: Record<string, ToolDeclaration>;
+	error?: string;
+} {
+	// 工具名来自外部输入：用无原型对象，避免 "__proto__" 这类键改写原型链。
+	const declarations: Record<string, ToolDeclaration> = Object.create(null);
+	if (value === undefined) return { declarations };
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return { declarations, error: "tools must be an object of { toolName: { access, path } }" };
+	}
+	for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			return { declarations, error: `tools.${name} must be an object` };
+		}
+		const entry = raw as { access?: unknown; path?: unknown; transferSource?: unknown };
+		if (entry.access !== undefined && entry.access !== "read" && entry.access !== "write") {
+			return { declarations, error: `tools.${name}.access must be "read" or "write"` };
+		}
+		if (
+			entry.path !== undefined &&
+			entry.path !== false &&
+			(typeof entry.path !== "string" || entry.path.trim() === "")
+		) {
+			return { declarations, error: `tools.${name}.path must be a non-empty string or false` };
+		}
+		if (
+			entry.transferSource !== undefined &&
+			entry.transferSource !== "read" &&
+			entry.transferSource !== "write"
+		) {
+			return { declarations, error: `tools.${name}.transferSource must be "read" or "write"` };
+		}
+		const declaration: ToolDeclaration = {};
+		if (entry.access !== undefined) declaration.access = entry.access;
+		if (entry.path !== undefined) {
+			declaration.path = entry.path === false ? false : (entry.path as string).trim();
+		}
+		if (entry.transferSource !== undefined) declaration.transferSource = entry.transferSource;
+		declarations[name] = declaration;
+	}
+	return { declarations };
+}
+
 interface Policy {
 	globs: string[];
 	regexps: RegExp[];
@@ -136,6 +233,13 @@ interface Policy {
 	readOnly: boolean;
 	maxReads: number;
 	allowTools: string[];
+	/**
+	 * 父代理对工具类别的显式声明，覆盖 `DEFAULT_TOOL_ACCESS`。
+	 *
+	 * `path: false` 表示这个工具没有可判的路径入参——写类工具这样声明等于「永远拒绝」，
+	 * 因为拿不到目标就没有任何授权能覆盖它。
+	 */
+	tools: Record<string, ToolDeclaration>;
 	bash?: BashRule;
 	/** 探针配置；undefined = 关闭。 */
 	probe: unknown;
@@ -156,6 +260,7 @@ const INACTIVE: Policy = {
 	readOnly: true,
 	maxReads: 0,
 	allowTools: [],
+	tools: {},
 	probe: undefined,
 	maxDenies: 0,
 	maxWriteDenies: 0,
@@ -184,6 +289,7 @@ function denyAll(source: string): Policy {
 		readOnly: true,
 		maxReads: 0,
 		allowTools: [],
+		tools: {},
 		probe: undefined,
 		maxDenies: DEFAULT_MAX_DENIES,
 		maxWriteDenies: DEFAULT_MAX_WRITE_DENIES,
@@ -362,6 +468,9 @@ function parsePolicyObject(
 	const readOnly = config.readOnly === true;
 	const write = parseWriteScope(config, globs, readOnly, source);
 	if (write.error) return denyAll(write.error);
+	const toolDeclarations = parseToolDeclarations(config.tools);
+	if (toolDeclarations.error)
+		return denyAll(`${source}.${toolDeclarations.error}; everything is refused`);
 	const allWrite = write.writeGlobs as string[];
 	const absoluteWrite = allWrite.filter((g) => isAbsolute(g)).map((g) => canonical(g));
 	const writeGlobs = allWrite.filter((g) => !isAbsolute(g));
@@ -378,6 +487,7 @@ function parsePolicyObject(
 		readOnly,
 		maxReads: positiveInt(config.maxReads),
 		allowTools,
+		tools: toolDeclarations.declarations,
 		bash: parseBashRule(config.bash),
 		probe: config.probe,
 		// 撞权限是纯错误信号：不配也开，父代理可以显式写 0 关掉。
@@ -1561,16 +1671,289 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		return counted.stop ? stop(composed) : deny(composed);
 	};
 
-	/** 路径类工具的判定：读认读范围，写认写范围，两类拒绝各自计数、各自文案。 */
+
+/**
+ * 从锚点解析目标文件。
+ *
+ * 锚点编辑工具（replace / replace_match / insert / copy / move）在入参里可以不带路径：
+ * 目标由「锚点归属」决定，而归属记录在宿主扩展自己的会话 sidecar 里
+ * （`<config>/sessions/<sha256(sessionFile) 前 24 位>.registry.jsonl`，事件为
+ * `allocate {path, rows}` / `free` / `clear`）。
+ *
+ * 我们读它，是为了给这些工具判「目标在不在写范围里」。不读就只能一律拒绝，那样子代理在
+ * 这类宿主上一个字也改不了。代价是依赖一份第三方私有格式，所以证据链是单向的：
+ * 读不到、读不懂、查不到 —— 一律当作**拿不到目标**，然后拒绝。绝不会因为读不到而放行。
+ */
+/**
+ * 一次锚点解析的三种结局。
+ *
+ * 把「锚点不认识」和「锚点分属两个文件」分开，是因为两者的出路完全不同：前者要模型重新读文件
+ * （锚点会过期）或者改用显式 path；后者是入参本身自相矛盾，重读一百次也没用，只能拆成两次调用。
+ * 混成一句「不在注册表里」，模型就会去重读，然后拿回同样的拒绝。
+ */
+type AnchorResolution =
+	| { path: string }
+	| { miss: "unknown" }
+	| { miss: "disagree"; files: string[] };
+function anchorTargetPath(
+	sessionFile: string | undefined,
+	anchors: string[],
+): AnchorResolution {
+	if (!sessionFile || anchors.length === 0) return { miss: "unknown" };
+	const dir = join(
+		process.env.PI_HASHLINE_DIR ??
+			join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "pi-hashline-edit-pro"),
+		"sessions",
+	);
+	const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24);
+	const sidecar = join(dir, `${key}.registry.jsonl`);
+	let raw: string;
+	try {
+		// 一次 stat 取全（mtimeNs + size + ino）：分两次取的话文件可能在两次之间被改写，
+		// 拼出来的 stamp 谁都不对应。用纳秒而不是毫秒 —— 宿主重写（压缩）sidecar 时字节数
+		// 可能刚好不变，毫秒粒度也可能落在同一刻，那样就会拿旧解析结果判新文件。
+		const info = statSync(sidecar, { bigint: true });
+		const stamp = `${info.mtimeNs}:${info.size}:${info.ino}`;
+		const cached = anchorCache.get(sidecar);
+		if (cached?.stamp === stamp) raw = cached.raw;
+		else {
+			raw = readFileSync(sidecar, "utf8");
+			anchorCache.set(sidecar, { stamp, raw });
+		}
+	} catch {
+		return { miss: "unknown" };
+	}
+	const wanted = new Set(anchors);
+	const owned = new Map<string, string>();
+	for (const line of raw.split("\n")) {
+		if (!line) continue;
+		let event: { kind?: string; path?: string; rows?: unknown; anchors?: unknown };
+		try {
+			event = JSON.parse(line) as typeof event;
+		} catch {
+			// 半行（正在追加）或坏行：跳过。宁可判不出来而拒绝，也不猜。
+			continue;
+		}
+		if (event.kind === "clear") owned.clear();
+		else if (event.kind === "free") {
+			if (Array.isArray(event.anchors)) {
+				for (const anchor of event.anchors) if (typeof anchor === "string") owned.delete(anchor);
+			} else if (typeof event.path === "string") {
+				for (const [anchor, path] of owned) if (path === event.path) owned.delete(anchor);
+			}
+		} else if (event.kind === "allocate" && typeof event.path === "string" && Array.isArray(event.rows)) {
+			for (const row of event.rows) {
+				// 只留我们查的那几个锚点：一次 allocate 可能带整份文件的行（实测一份 1998 条），
+				// 全部收进 map 没有意义。
+				if (Array.isArray(row) && typeof row[0] === "string" && wanted.has(row[0])) {
+					owned.set(row[0], event.path);
+				}
+			}
+		}
+	}
+	// 所有锚点必须指向同一个文件，拿不到唯一目标就拒绝。
+	//
+	// 宿主自己也有一条同义规则：两个锚点归属不同文件时它抛
+	// `[E_BAD_SHAPE] The anchors are owned by different files … edit one file per call`
+	// （edit-common.ts 的 resolveEditTarget，paths.size > 1）。这里跟着拒，是为了让本层的
+	// 判断不依赖宿主先把它拦下来 —— 我们判的是「将要被写的文件在不在写范围里」，目标都不唯一
+	// 就没有答案，不能挑一个算数。
+	//
+	// 关于两种拼写（`remove_from` / `replace_from` 互为别名）：宿主在 `prepareArguments` 里
+	// 就按自己的规范名归一化、把另一个删掉，而 pi 的 `tool_call` 钩子拿到的是归一化并校验
+	// 之后的入参（agent-loop: prepareToolCallArguments → validateToolArguments →
+	// beforeToolCall({args})），所以同时带两种拼写、各指一处的入参到不了这里。这条规则防的
+	// 是「锚点确实分属两个文件」的入参，不是别名。
+	const resolvedFiles = new Set<string>();
+	for (const anchor of anchors) {
+		const found = owned.get(anchor);
+		if (found) resolvedFiles.add(found);
+	}
+	if (resolvedFiles.size === 0) return { miss: "unknown" };
+	if (resolvedFiles.size > 1) return { miss: "disagree", files: [...resolvedFiles].sort() };
+	const [onlyFile] = resolvedFiles;
+	return { path: onlyFile };
+}
+
+/** sidecar 解析缓存：一次工具调用读一次文件太长，按 mtime+size 失效。 */
+const anchorCache = new Map<string, { stamp: string; raw: string }>();
+
+/**
+ * 可能承载锚点的入参名。两种拼写都在里面（`replace` 用 remove_*，`replace_match` 用
+ * replace_*，宿主互为别名），所以列全；至于它们是不是都指向同一份文件，由
+ * `anchorTargetPath` 自己核对 —— 不能指望工具去校验，它会先删掉别名。
+ */
+const ANCHOR_ARGS = [
+	"remove_from",
+	"remove_to",
+	"replace_from",
+	"replace_to",
+	"source_from",
+	"source_to",
+	"anchor",
+];
+
+/**
+ * 双文件工具（copy / move）把两份文件写在同一组入参里：`source_from` / `source_to` 属于
+ * 源文件，`anchor` 属于目标文件。两组锚点归属不同文件，必须分开解析 —— 合成一个列表去查，
+ * 只会返回先命中的那一个，等于只判了一侧。
+ *
+ * 目标侧只有 `anchor`：宿主的 copy/move 契约只认 path / source_from / source_to / anchor /
+ * direction，传 `remove_from` 会被它以未知字段拒掉（payload-contract.ts 的 TRANSFER_KEYS）。
+ * 早先这里把 `remove_from` / `remove_to` 也算进目标侧，今天造不成问题（宿主先拒），但排序是
+ * 隐患：多锚点取值取第一个能命中的，那样返回的是源文件，真正的目标反而没判。
+ */
+const TRANSFER_SOURCE_ARGS = ["source_from", "source_to"];
+const TRANSFER_DEST_ARGS = ["anchor"];
+
+	/** 工具名 → schema 里的路径入参名；一处缓存，避免每次调用都问一遍注册表。 */
+	const schemaPathArgs = new Map<string, string | undefined>();
+
+	const pathArgFromSchema = (toolName: string): string | undefined => {
+		if (schemaPathArgs.has(toolName)) return schemaPathArgs.get(toolName);
+		let found: string | undefined;
+		try {
+			const registered = (
+				pi as { getAllTools?: () => { name: string; parameters?: unknown }[] }
+			).getAllTools?.();
+			const tool = registered?.find((entry) => entry.name === toolName);
+			const properties = (tool?.parameters as { properties?: Record<string, { type?: string }> } | undefined)
+				?.properties;
+			if (properties?.path?.type === "string") found = "path";
+			else if (properties?.file_path?.type === "string") found = "file_path";
+		} catch {
+			// 宿主没暴露 getAllTools（老版本、测试桩）：退回缺省的 "path"。
+		}
+		schemaPathArgs.set(toolName, found);
+		return found;
+	};
+
+	/**
+	 * 名字 → 类别。undefined 表示它不是路径类工具，交给 allowTools 那条路。
+	 *
+	 * 路径入参名的取值顺序：父代理显式声明 → 工具自己的 schema → "path"。中间那层是为了
+	 * 不靠猜：hashline 那套工具的 schema 里就有 `path`，而换个宿主可能叫 `file_path`。
+	 */
+	const toolKindOf = (
+		toolName: string,
+	): { access: "read" | "write"; pathArg: string | false; transferSource?: "read" | "write" } | undefined => {
+		const declared = Object.hasOwn(policy.tools, toolName) ? policy.tools[toolName] : undefined;
+		const fallback = Object.hasOwn(DEFAULT_TOOL_ACCESS, toolName) ? DEFAULT_TOOL_ACCESS[toolName] : undefined;
+		const access = declared?.access ?? fallback;
+		if (!access) return undefined;
+		return {
+			access,
+			pathArg: declared?.path ?? pathArgFromSchema(toolName) ?? "path",
+			...(declared?.transferSource === undefined ? {} : { transferSource: declared.transferSource }),
+		};
+	};
+
 	const pathToolVerdict = (
 		event: { toolName: string; input?: unknown },
 		cwd: string,
+		kind: { access: "read" | "write"; pathArg: string | false; transferSource?: "read" | "write" },
+		sessionFile: string | undefined,
 	): { block: true; reason: string; terminate?: boolean } | undefined => {
-		if (!PATH_TOOLS.includes(event.toolName)) return undefined;
-		const input = (event as { input?: { path?: unknown } }).input;
-		const raw = typeof input?.path === "string" ? input.path.trim() : "";
+		const isWrite = kind.access === "write";
+		// 声明成写工具却没有可判的路径入参：目标拿不到，就没有任何授权能覆盖它。永远拒绝，
+		// 而且这是用法/配置问题，不计入撞权限预算。
+		if (isWrite && kind.pathArg === false) {
+			return deny(
+				`pi-subagents-extend: ${event.toolName} is declared as a write tool with no path argument, so its target cannot be checked (source: ${policy.source}). Declare tools.${event.toolName}.path in the bindings, or let the parent perform this write.`,
+			);
+		}
+		const input = (event as { input?: Record<string, unknown> }).input;
+		const pathValue = kind.pathArg === false ? undefined : input?.[kind.pathArg];
+		let raw = typeof pathValue === "string" ? pathValue.trim() : "";
+		// 写类工具没带路径时，先按「锚点归属」把目标找回来：锚点编辑工具的目标就是锚点所属的
+		// 文件，归属记在宿主扩展的会话 sidecar 里。解析不出来就保持空 → 下面拒绝。
+		const anchorTextOf = (keys: string[]): string[] =>
+			keys
+				.map((key) => input?.[key])
+				.filter((value): value is string => typeof value === "string")
+				.map((value) => value.trim())
+				.filter((value) => value !== "");
+
+		let anchorsTried: string[] = [];
+		// 解析失败要分清是哪一种：模型看到的文案不同，出路也不同（重读一次 vs 拆成两次调用）。
+		let anchorMiss: { miss: "unknown" } | { miss: "disagree"; files: string[] } | undefined;
+		if (isWrite && !raw) {
+			anchorsTried = anchorTextOf(ANCHOR_ARGS);
+			const resolved = anchorTargetPath(sessionFile, anchorsTried);
+			if ("path" in resolved) raw = resolved.path;
+			else anchorMiss = resolved;
+		}
+
+		const readable = (path: string): boolean => matches(policy.regexps, cwd, path);
+		const writable = (path: string): boolean =>
+			matches(policy.writeRegexps, cwd, path) || underAny(policy.absoluteWrite, cwd, path);
+
+		// 锚点分属两个文件：这不是「读不到」，重读一百次还是同一个入参 —— 只能拆成两次调用。
+		const disagreeText = (files: string[]): string =>
+			`pi-subagents-extend: ${event.toolName} was given anchors that belong to different files (${files.join(", ")}), so there is no single file whose access could be checked (source: ${policy.source}). One call edits one file — split this into one call per file.\nWrite scope: ${preview(policy.writeGlobs)}`;
+		const transferUnknownText = (side: string): string =>
+			`pi-subagents-extend: ${event.toolName} moves content between two files, and the ${side} anchors are not in this session's anchor registry, so that file is unknown. Both sides have to be known before either can be checked (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`;
+
+		// 双文件工具（copy / move）：`source_*` 属于源文件，`anchor`（与 `remove_*`）属于目标
+		// 文件，两份文件必须分别判定。合成一组去查只会拿到先命中的那一侧，另一侧完全没判 ——
+		// 源在写范围内、目标在范围外时会被放行，而这类工具在子进程里直接落盘，没有 Landlock
+		// 兜底，放行就是一次真正的写越界。
+		const sourceAnchors = isWrite ? anchorTextOf(TRANSFER_SOURCE_ARGS) : [];
+		const destAnchors = isWrite ? anchorTextOf(TRANSFER_DEST_ARGS) : [];
+		if (isWrite && sourceAnchors.length > 0 && destAnchors.length > 0) {
+			const sourceRes = anchorTargetPath(sessionFile, sourceAnchors);
+			const destRes = anchorTargetPath(sessionFile, destAnchors);
+			if (!("path" in sourceRes)) {
+				return deny(sourceRes.miss === "disagree" ? disagreeText(sourceRes.files) : transferUnknownText("source"));
+			}
+			if (!("path" in destRes)) {
+				return deny(destRes.miss === "disagree" ? disagreeText(destRes.files) : transferUnknownText("destination"));
+			}
+			const sourcePath = sourceRes.path;
+			const destPath = destRes.path;
+			// 宿主开了 requirePath 时显式 path 指向其中一侧；对不上就说明声明与锚点不一致。
+			// 必须按**解析后**的绝对路径比：注册表里存的是 toCwd 之后的绝对路径，宿主自己也是把
+			// providedPath resolve 到 cwd 再与锚点归属比对（fs-write.ts 的 resolveInCwd → toCwd，
+			// paths.ts 里非绝对路径就 resolve(cwd, p)）。早先拿原始字符串直接比，任何相对写法
+			// （`docs/b.md`、`./docs/b.md`）都永远对不上，于是把宿主本来会执行的调用一律拒掉 ——
+			// 而相对写法正是模型最常给的形式，也是宿主 read 输出里的显示形式。
+			const rawAbs = raw ? resolve(cwd, raw) : "";
+			if (rawAbs && rawAbs !== sourcePath && rawAbs !== destPath) {
+				return deny(
+					`pi-subagents-extend: ${event.toolName} was given path "${raw}", which matches neither file its anchors belong to ("${sourcePath}" and "${destPath}") (source: ${policy.source}). Pass the path of the file the anchors came from, or omit it.`,
+				);
+			}
+			// 表按 Object.hasOwn 读：工具名是外部输入，`__proto__` / `constructor` 这类名字
+			// 走普通下标会取到原型链上的对象。表里现在只有 copy / move，撞不到，但这是本文件里
+			// 最后一处没设防的表读取，别留着。
+			const defaultSource = Object.hasOwn(DEFAULT_TRANSFER_SOURCE, event.toolName)
+				? DEFAULT_TRANSFER_SOURCE[event.toolName]
+				: undefined;
+			const sourceAccess = kind.transferSource ?? defaultSource ?? "write";
+			if (sourceAccess === "read") {
+				if (!readable(sourcePath)) {
+					return bail(
+						`pi-subagents-extend: ${event.toolName} reads "${sourcePath}", which is outside the read scope — copying content out of it would carry that content past this layer (source: ${policy.source}). Say what you need from it instead.\nRead scope: ${preview(policy.globs)}`,
+					);
+				}
+			} else if (!writable(sourcePath)) {
+				return writeBail(
+					`pi-subagents-extend: ${event.toolName} changes the source file "${sourcePath}" (a move deletes the lines it takes), and that file is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Copy instead of moving if the source may only be read.`,
+				);
+			}
+			if (!writable(destPath)) {
+				return writeBail(
+					`pi-subagents-extend: "${destPath}" is readable but not writable, so ${event.toolName} cannot place the block there — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+				);
+			}
+			const junk = probe?.checkWriteTarget(destPath);
+			if (junk) return { block: true, reason: junk.reason, terminate: false };
+			probe?.noteWriteActivity();
+			// 两侧都过了：不要落回下面的单路径判定（它会把源当成写目标再判一次）。
+			return undefined;
+		}
+
 		const target = raw || ".";
-		const isWrite = WRITE_TOOLS.includes(event.toolName);
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 			return bail(`pi-subagents-extend: read budget exhausted (${policy.maxReads} reads).`);
 		}
@@ -1588,8 +1971,12 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
 		// 这是用法错误不是权限错误，不计入撞权限计数。
 		if (isWrite && !raw) {
+			// 锚点分属两个文件是入参自相矛盾，不是「读不到」：文案要指出去拆调用，别让模型去重读。
+			if (anchorMiss?.miss === "disagree") return deny(disagreeText(anchorMiss.files));
 			return deny(
-				`pi-subagents-extend: ${event.toolName} needs a path; the target cannot be checked without one. Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
+				anchorsTried.length > 0
+					? `pi-subagents-extend: ${event.toolName} has no target path — no "${kind.pathArg}" was passed, and the anchor it points at is not in this session's anchor registry, so the owning file is unknown. Without a target nothing can be checked, so no scope can allow it (source: ${policy.source}). Re-read the file (anchors expire), enable the host's force-path option (pi-hashline-edit-pro: requirePath), or pass the path explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`
+					: `pi-subagents-extend: ${event.toolName} has no "${kind.pathArg}" — without a target nothing can be checked, so no scope can allow it (source: ${policy.source}). Pass it explicitly.\nWrite scope: ${preview(policy.writeGlobs)}`,
 			);
 		}
 		const readOk = matches(policy.regexps, cwd, target);
@@ -1856,18 +2243,24 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		if (EXEC_TOOLS.includes(event.toolName)) {
 			// 从来不可用：给多宽的范围、多长的命令白名单都不会打开，所以不计入撞权限。
 			return deny(
-				`pi-subagents-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use read, edit, write, grep, find, ls, or an allowlisted bash command.`,
+				`pi-subagents-extend: ${event.toolName} is never available in a scoped session; no grant can widen it. Use a path tool (read / write / the host's edit family) or an allowlisted bash command.`,
 			);
 		}
+		// 路径类工具先判：它们的授权来自范围，不来自 allowTools。顺序反过来就意味着父代理
+		// 一旦把名字写进 allowTools，路径判定整个被跳过——写范围在那种宿主上等于失效
+		// （实测：allowTools 里写 replace 时，树外路径照写不误）。
+		const kind = toolKindOf(event.toolName);
+		if (kind) {
+			const sessionFile =
+				ctx?.sessionManager?.getSessionFile?.() ?? process.env.PI_SESSION_FILE ?? undefined;
+			return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd, kind, sessionFile);
+		}
+
 		// SAFE_TOOLS 已经在最前面处理过，这里只管调用方显式放行的工具。
 		if (policy.allowTools.includes(event.toolName)) return undefined;
 
-		if (PATH_TOOLS.includes(event.toolName)) {
-			return pathToolVerdict(event as { toolName: string; input?: unknown }, cwd);
-		}
-
 		return bail(
-			`pi-subagents-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools).`,
+			`pi-subagents-extend: tool ${event.toolName} is not on the allow list (fail closed; the parent can add it to allowTools). Tools this layer already judges by scope: ${preview(Object.keys(DEFAULT_TOOL_ACCESS))}.`,
 		);
 	};
 

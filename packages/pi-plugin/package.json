@@ -34,11 +34,12 @@
     "build:helper": "cargo build --release --manifest-path ../helper/Cargo.toml --locked && mkdir -p bin && cp ../helper/target/release/pi-subagents-extend-helper bin/.helper.new && mv -f bin/.helper.new bin/pi-subagents-extend-helper",
     "pretest": "pnpm run build:helper:test",
     "build:helper:test": "cargo build --release --manifest-path ../helper/Cargo.toml --locked",
-    "test": "pnpm run lint && node test/extension.test.ts && node test/context.test.ts && node test/mock-session.test.ts",
+    "test": "pnpm run lint && node test/extension.test.ts && node test/context.test.ts && node test/mock-session.test.ts && node test/hashline-e2e.test.ts",
     "test:mock": "node test/mock-session.test.ts",
     "test:llm": "node test/e2e.test.ts",
     "prepublishOnly": "pnpm run build",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test:hashline": "node test/hashline-e2e.test.ts"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",
@@ -47,7 +48,8 @@
     "eslint": "^9.39.4",
     "eslint-plugin-unicorn": "^79.0.0",
     "typescript": "^5.9.0",
-    "typescript-eslint": "^8.72.2"
+    "typescript-eslint": "^8.72.2",
+    "pi-hashline-edit-pro": "7.2.0"
   },
   "files": [
     "src",
