@@ -16,8 +16,18 @@ exits 0, or 76 when the kernel is not good enough. `PI_SUBAGENTS_EXTEND_HELPER` 
 binary path. `cargo build --release --manifest-path packages/helper/Cargo.toml` writes
 `packages/helper/target/release/pi-subagents-extend-helper`, which is what the tests execute;
 `pnpm run build:helper` additionally installs it as `packages/pi-plugin/bin/`, which is the path a
-loaded extension resolves and is gitignored. The two are kept apart on purpose: `bin/` belongs to
+loaded extension prefers and is gitignored. The two are kept apart on purpose: `bin/` belongs to
 the running extension, so a test run must not replace it.
+
+The extension resolves the binary in this order: `PI_SUBAGENTS_EXTEND_HELPER`, then
+`packages/pi-plugin/bin/`, then the cargo artifact under `packages/helper/target/release/`. The
+last one exists so that a source checkout with the helper built but not copied still runs — that
+state is easy to reach, and without it every `bash` call is refused.
+
+When a session has `bash` enabled and no usable helper — the binary is missing, or the kernel is
+below ABI 7 — the extension says so once at session start, naming the command that fixes it, rather
+than letting each `bash` call fail on its own. A session with `bash` off says nothing, and
+`/permission` always shows which path resolved, or why none did.
 
 Order inside the helper: enter the namespaces → `chdir` → Landlock → drop capabilities → `exec`.
 The command runs under a supervising PID 1 (see below), never as PID 1 itself.
