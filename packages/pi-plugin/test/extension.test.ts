@@ -3087,7 +3087,60 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   spec 生命周期：结果回来删自己的、重复 id 的孤儿留给清扫、别的文件不碰")
 }
 
-// 86. 锚点编辑族按写工具判：本条只用 `replace` 验证「进了 allowTools 也绕不开写范围」，
+// 86. 前置环境变量赋值不该让白名单失效：`HOME=/tmp/x node a.ts` 跑的就是 `node a.ts`。
+//     实测撞到过——同一个被允许的 `node` 被拒成「command not in the allowlist」，而那行文案里
+//     恰好列着 node，看起来像自相矛盾。三个方向都要钉住，否则「剥太多」也能全绿：
+//       (a) 只剥最前面连续的赋值，命令中间的 `A=1` 不动；
+//       (b) 带引号的值、`+=` 追加赋值同样算赋值（按空白切词会把它们切坏、误拒）；
+//       (c) 能改变「跑哪个程序 / 加载哪段代码」的名字必须拒 —— 带上它，被允许的命令
+//           就等于跑任意代码（`NODE_OPTIONS=--require=/tmp/x.js node` 实测会执行 /tmp/x.js）。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-assign-"))
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["."],
+        bash: { read: ["git status", "node", "re:^ls -la$"] },
+      },
+    }),
+  })
+  const assigned = await h.call("bash", { command: "HOME=/tmp/pi-home node script.mjs" })
+  assert.notEqual(assigned?.block, true, "an assignment prefix does not defeat a plain entry")
+  const twoAssignments = await h.call("bash", { command: "A=1 B=2 git status" })
+  assert.notEqual(twoAssignments?.block, true, "several assignments are stripped too")
+  const stillRefused = await h.call("bash", { command: "HOME=/tmp/pi-home rm -rf src" })
+  assert.equal(stillRefused?.block, true, "stripping the prefix does not allow a command that is not listed")
+  // (a) 命令中间的赋值不是前缀：`git A=1 status` 的真实 argv 是 [git, A=1, status]，不是 git status。
+  //     换成「剥掉所有赋值形状的 token」时这条会变成允许 —— 正是这里要挡的过度剥离。
+  const midCommandAssignment = await h.call("bash", { command: "git A=1 status" })
+  assert.equal(midCommandAssignment?.block, true, "only leading assignments are stripped")
+  // (b) 带引号的空格值、`+=` 追加赋值：bash 都当赋值，按空白切词会切坏。
+  const quotedValue = await h.call("bash", { command: 'HOME="/tmp/my home" node script.mjs' })
+  assert.notEqual(quotedValue?.block, true, "a quoted value with spaces is still one assignment")
+  const appendAssignment = await h.call("bash", { command: "A+=1 node script.mjs" })
+  assert.notEqual(appendAssignment?.block, true, "an append assignment (+=) is an assignment")
+  // (c) 注入入口：这些名字一旦放行，白名单就形同虚设，所以命中即拒并点名。
+  const nodeOptions = await h.call("bash", { command: "NODE_OPTIONS=--require=/tmp/evil.js node -e ''" })
+  assert.equal(nodeOptions?.block, true, "NODE_OPTIONS is refused: it preloads code into an allowed node")
+  assert.match(String(nodeOptions?.reason), /NODE_OPTIONS/, "the note names the offending variable")
+  const gitExternalDiff = await h.call("bash", { command: "GIT_EXTERNAL_DIFF=/tmp/evil git status" })
+  assert.equal(gitExternalDiff?.block, true, "GIT_* is refused: git runs it as a subcommand")
+  const pathSwap = await h.call("bash", { command: "PATH=/tmp/evil git status" })
+  assert.equal(pathSwap?.block, true, "PATH is refused: it swaps which program runs")
+  // 正向控制：同样的命令去掉注入名字后仍然放行，否则上面三条可以靠「一律拒绝」骗过去。
+  const benignAgain = await h.call("bash", { command: "HOME=/tmp/x node script.mjs" })
+  assert.notEqual(benignAgain?.block, true, "a benign name is still allowed after the denied ones are refused")
+  // 正则条目仍是整串匹配：作者写的是真实命令行，赋值前缀该由作者自己决定要不要认。
+  const regexStillSeesAssignment = await h.call("bash", { command: "HOME=/tmp/x ls -la" })
+  assert.equal(regexStillSeesAssignment?.block, true, "re: entries keep matching the command as written")
+  const regexPlain = await h.call("bash", { command: "ls -la" })
+  assert.notEqual(regexPlain?.block, true, "the same re: entry still matches the bare command")
+  h.restore()
+  console.log("  ok   前置赋值：只剥前缀、引号与 += 也算、注入名字拒绝，正则条目仍按原文匹配")
+}
+
+// 87. 锚点编辑族按写工具判：本条只用 `replace` 验证「进了 allowTools 也绕不开写范围」，
 //     其余成员在 87（缺目标）、88（undo_last_change）、94（copy/move 两侧）、97（显式 path）分别钉。
 //     宿主上 pi-hashline-edit-pro 会把内置 edit 从活动工具集里删掉，只认 edit 的名字表在
 //     那里等于「整套编辑能力都是未知工具」。同时钉住顺序：allowTools 不能成为绕过路径判定的
@@ -3116,7 +3169,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   hashline 编辑族按写工具判，allowTools 不能绕过写范围")
 }
 
-// 87. 写工具拿不到目标路径：必须点名缺的是哪个入参并给出解法（hashline 的 requirePath，
+// 88. 写工具拿不到目标路径：必须点名缺的是哪个入参并给出解法（hashline 的 requirePath，
 //     或 bindings.tools.<name>.path），而且这是用法错、不计入撞权限预算。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-nopath-"))
@@ -3140,7 +3193,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   写工具缺路径：点名入参与解法，且不计入撞权限预算")
 }
 
-// 88. undo_last_change 的 path 是必填入参，所以它永远可判：按写范围判，而不是被当成未知工具。
+// 89. undo_last_change 的 path 是必填入参，所以它永远可判：按写范围判，而不是被当成未知工具。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-undo-"))
   mkdirSync(join(tree, "src"), { recursive: true })
@@ -3158,7 +3211,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   undo_last_change 按写工具判范围")
 }
 
-// 89. bindings.tools 的两种用法：给自建工具声明类别与路径入参名；把路径入参声明成 false
+// 90. bindings.tools 的两种用法：给自建工具声明类别与路径入参名；把路径入参声明成 false
 //     等于「永远拒绝」，因为拿不到目标就没有授权能覆盖它。声明写坏则整份绑定作废。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-decl-"))
@@ -3205,7 +3258,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   tools 声明：自定义类别与路径入参、path: false 永久拒绝、写坏就整份作废")
 }
 
-// 90. 路径入参名从工具自己的 schema 里取，不靠我们猜：注册表里写 file_path 的工具，
+// 91. 路径入参名从工具自己的 schema 里取，不靠我们猜：注册表里写 file_path 的工具，
 //     传 path 就是不传，必须被当成缺参数拒绝；读类工具（outline）按读范围判。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-schema-"))
@@ -3233,7 +3286,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   路径入参名取自工具 schema；读类工具按读范围判")
 }
 
-// 91. 工具名是外部输入，撞上 `__proto__` / `constructor` 这类键时不能把原型链当成声明：
+// 92. 工具名是外部输入，撞上 `__proto__` / `constructor` 这类键时不能把原型链当成声明：
 //     否则 `policy.tools["constructor"]` 会读到 Object 的构造器，`{}.access` 虽为 undefined
 //     也会让「是否有声明」的判断失真。这里钉住的是「当成未声明」，以及不崩。
 {
@@ -3260,7 +3313,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   原型键工具名不污染声明表")
 }
 
-// 92. 锚点编辑工具不带路径时，目标从「锚点归属」解析出来再判。归属由宿主扩展记在会话
+// 93. 锚点编辑工具不带路径时，目标从「锚点归属」解析出来再判。归属由宿主扩展记在会话
 //     sidecar 里（sessions/<sha256(sessionFile) 前 24 位>.registry.jsonl），这里用真的
 //     文件布局去喂它：解析得到的路径必须真的受写范围约束，而不是解析成功就放行。
 {
@@ -3322,7 +3375,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   锚点归属解析：范围内放行、范围外拒绝、释放后拒绝")
 }
 
-// 93. 锚点解析不出来的两条硬边界：sidecar 不存在、以及锚点是未知值。两者都必须拒绝，
+// 94. 锚点解析不出来的两条硬边界：sidecar 不存在、以及锚点是未知值。两者都必须拒绝，
 //     绝不能因为「读不到就不知道」而放行——那是把写范围变成摆设。
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-anchor-miss-"))
@@ -3359,7 +3412,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   锚点解析不到时一律拒绝，绝不因读不到而放行")
 }
 
-// 94. copy / move 是双文件工具：`source_*` 属于源文件，`anchor` 属于目标文件。两组锚点必须
+// 95. copy / move 是双文件工具：`source_*` 属于源文件，`anchor` 属于目标文件。两组锚点必须
 //     分别判定 —— 合成一组去查只会拿到先命中的那一侧（源在前），于是目标完全没判，源在写范围
 //     内、目标在范围外时会被放行。这类工具在子进程里直接落盘，没有 Landlock 兜底，那就是真的
 //     写越界。顺带钉住 copy 与 move 的源权限不同：copy 只读源，move 删源里的行。
@@ -3461,7 +3514,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   copy/move 的源与目标分别判定：源只读时 copy 放行、move 拒绝，写越界被挡")
 }
 
-// 95. replace_match 的锚点叫 replace_from / replace_to（宿主 schema 就是这两个名字），
+// 96. replace_match 的锚点叫 replace_from / replace_to（宿主 schema 就是这两个名字），
 //     不带 path 时同样必须能解析出目标 —— 漏了这一对，等于在目标宿主上把「改一行的一部分」
 //     这个动作整个废掉，而拒绝文案还会让模型去「显式传 path」，它做不到。
 {
@@ -3523,7 +3576,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   replace_match 的锚点入参：只给 replace_from/replace_to 也能判，越界照样拒绝")
 }
 
-// 96. 锚点分属两个文件时拒绝：拿不到唯一目标就不判，也不猜宿主会写哪一个。
+// 97. 锚点分属两个文件时拒绝：拿不到唯一目标就不判，也不猜宿主会写哪一个。
 //     主场景用规范名（remove_from 指 A 文件、remove_to 指 B 文件）—— 这种入参能真正递到本层，
 //     宿主自己的 resolveEditTarget 也以 `paths.size > 1` 拒绝它（E_BAD_SHAPE）。
 //     附带场景是两种拼写并存：宿主在 prepareArguments 里就把别名删掉了，pi 的 tool_call 钩子
@@ -3590,7 +3643,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   锚点跨两个文件时拒绝：别名与规范名并存也不猜")
 }
 
-// 97. copy / move 显式给的 `path` 必须按**解析后的绝对路径**和锚点归属比对。
+// 98. copy / move 显式给的 `path` 必须按**解析后的绝对路径**和锚点归属比对。
 //     注册表里存的是 toCwd 之后的绝对路径，宿主也是把 providedPath resolve 到 cwd 再比
 //     （fs-write.ts 的 resolveInCwd → toCwd）。早先拿原始字符串直比，任何相对写法都对不上，
 //     于是把宿主本来会执行的调用一律拒掉 —— 而相对写法正是模型最常给的形式。
