@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 95 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 96 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 | `test/hashline-e2e.test.ts` | 4 | a real pi process loading the real `pi-hashline-edit-pro` |
@@ -57,6 +57,13 @@ know: its two ends are called `replace_from` / `replace_to` (the host's own sche
 `remove_from` / `remove_to` that `replace` uses. Missing that pair meant every anchor-only
 `replace_match` — its normal shape on a host with `requirePath` off, i.e. the host this layer targets —
 was refused with "pass the path explicitly", advice the model cannot follow.
+
+Case 96 covers what happens once both spellings are known: the host treats them as aliases and keeps its
+own canonical one (`replace` keeps `remove_from`, `replace_match` keeps `replace_from`), deleting the
+other. So a payload that carries both, pointing at different files, is written to the canonical one —
+while "take the first anchor that resolves" would judge the other. No fixed order fixes that, because
+the two tools want opposite orders; the rule is that every anchor must resolve to the same file, and a
+disagreement refuses. Verified by mutation: restoring first-match-wins makes the case allow the write.
 
 Cases 92-93 cover recovering a write target from anchor ownership, which the host records in
 `sessions/<sha256(sessionFile)[0:24]>.registry.jsonl` as `allocate` / `free` / `clear` events. A
