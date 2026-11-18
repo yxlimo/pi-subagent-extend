@@ -85,6 +85,8 @@ export interface ExtensionModule {
 	sortByName<T extends { name: string }>(entries: T[]): T[]
 	/** 依赖闸门的扫描范围，暴露出来以便钉住 200 个目录的上限。 */
 	dependencyScope(cwd: string, ignored: string[]): string[]
+	/** helper 的候选路径，暴露出来以便钉住「仓内 cargo 产物也是候选」。 */
+	helperCandidates(here: string): string[]
 }
 
 export interface HandlerOptions {

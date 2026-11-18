@@ -515,17 +515,49 @@ function gitDirs(cwd: string): { gitDir: string; common: string } | undefined {
 	return found;
 }
 
-/** 找 helper：环境变量优先，其次包内构建产物，最后缓存目录。 */
+/** helper 的名字：找它、报它、文档里写它都用这一个常量。 */
+const HELPER_NAME = "pi-subagents-extend-helper";
+
+/**
+ * 找 helper：环境变量优先，其次包装好的 bin/，最后仓内 cargo 产物。
+ *
+ * 第三个候选是给「源码 checkout + 软链加载」这种用法的：cargo 建好了但没跑
+ * `pnpm run build:helper` 把产物拷进 bin/ 时，bash 不该整体失效 —— 这是改名后
+ * 真实踩到的坑。npm 安装的副本没有 ../helper，那一条自然落空。
+ */
+/**
+ * helper 候选路径。纯函数，便于直接钉住候选及其顺序：环境变量不是候选，
+ * 而是覆盖（设了但不存在就不往下找，否则「指错了」会静默用上另一个）。
+ */
+export function helperCandidates(here: string): string[] {
+	return [
+		resolve(here, "..", "bin", HELPER_NAME),
+		resolve(here, "..", "..", "helper", "target", "release", HELPER_NAME),
+	];
+}
+
 function helperPath(): string | undefined {
 	const fromEnv = process.env.PI_SUBAGENTS_EXTEND_HELPER?.trim();
 	if (fromEnv) return existsSync(fromEnv) ? fromEnv : undefined;
 	const here = dirname(fileURLToPath(import.meta.url));
-	const candidates = [
-		resolve(here, "..", "bin", "pi-subagents-extend-helper"),
-		resolve(homedir(), ".pi", "subagent-permission", "bin", "pi-subagents-extend-helper"),
-	];
-	for (const candidate of candidates) {
+	for (const candidate of helperCandidates(here)) {
 		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
+/**
+ * bash 到底能不能跑。缺 helper 与内核对不上都是「每条命令都拒」，与其让子代理
+ * 撞墙几次再自己推断，不如开场就把它说出来。
+ */
+function bashBlocker(helper: string | undefined): string | undefined {
+	if (!helper) {
+		return "no sandbox helper found, so every bash command will be refused. Run `pnpm run build:helper` in packages/pi-plugin, or set PI_SUBAGENTS_EXTEND_HELPER.";
+	}
+	const caps = describeHelper(helper);
+	if (!caps?.landlock.supported) {
+		const reason = caps?.landlock.reason ?? "helper --describe returned nothing usable";
+		return `this kernel cannot enforce the sandbox (${reason}), so every bash command will be refused`;
 	}
 	return undefined;
 }
@@ -1553,6 +1585,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 			? `scope active (${policy.source}, ${policy.globs.length} entries${writeNote}, ${mode}${budget}${bash}${probeLine}${storeLine})`
 			: `scope is empty: every file access is refused${budget}${bash}${probeLine}${storeLine}`;
 		ctx.ui.notify(`pi-subagents-extend: ${msg}`, "info");
+		// 只在该会话真的会跑 bash 时才喊：父会话没 bindings 时 bash 不受管，不必打扰。
+		if (policy.bash) {
+			const blocker = bashBlocker(helperPath());
+			if (blocker) ctx.ui.notify(`pi-subagents-extend: ${blocker}`, "warning");
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1733,6 +1770,11 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		description: "Show the current task scope, the bash allowlist and the probe state",
 		handler: async (_args, ctx) => {
 			const cwd = ctx.cwd ?? process.cwd();
+			// helper 只查一次：它要 fork 一个进程读 --describe。
+			const helper = helperPath();
+			const helperLine = policy.bash
+				? `Helper: ${bashBlocker(helper) ?? helper}`
+				: undefined;
 			const lines = policy.active
 				? [
 					`Source: ${policy.source}`,
@@ -1752,6 +1794,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					policy.bash
 						? `Sandbox: ${policy.bash.network ? "network on" : "offline"}, ${policy.bash.writable ? "scope writable" : "read-only root"}`
 						: undefined,
+					helperLine,
 					policy.bash
 						? `Sandbox writable paths: ${
 							sandboxWritableDirs(policy, cwd, policy.bash, { create: false })

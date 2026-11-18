@@ -33,6 +33,9 @@ extension is a no-op, so the global link does not affect a parent session or an 
 pnpm run build:helper   # cargo build --release, then copy the binary into bin/
 ```
 
+If the helper is ever missing, a session with `bash` enabled says so when it starts and names that
+command — it does not wait for the first `bash` call to fail.
+
 To scope only one agent's subagents, skip the global link and declare the extension in that agent's
 frontmatter instead:
 
@@ -94,7 +97,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and three offline suites: 81 scope cases, 10 context cases and 6
+`pnpm test` runs a lint pass and three offline suites: 82 scope cases, 10 context cases and 6
 sessions against a real pi process driven by a scripted mock model — no model, no network beyond
 localhost. See [testing](docs/testing.md).
 

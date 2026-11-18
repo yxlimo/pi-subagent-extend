@@ -2862,5 +2862,49 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   绝对写授权按绝对路径放行，相对授权仍然出不了树")
 }
 
+// 82. bash 配了却跑不起来时，开场就说，而不是让子代理撞几次墙再自己推断。
+//     （实测过：helper 没装时子代理连跑四条命令，每条都拿到同一句「helper not found」，
+//     它最后自己得出了这个结论 —— 但那是四次调用换来的。）
+{
+  const real = process.env.PI_SUBAGENTS_EXTEND_HELPER
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = "/nonexistent/pi-subagents-extend-helper"
+
+  const missing = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls"] } } }),
+  })
+  const said = missing.ui.join("\n")
+  assert.match(said, /no sandbox helper found/, "a missing helper is announced when the session starts")
+  assert.match(said, /build:helper/, "and it names the command that fixes it")
+  const refused = await missing.call("bash", { command: "ls" })
+  assert.equal(refused?.block, true, "bash is refused rather than attempted")
+  missing.restore()
+
+  // 没开 bash 的会话不该被这条告警打扰。
+  const noBash = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."] } }),
+  })
+  assert.doesNotMatch(noBash.ui.join("\n"), /sandbox helper/, "a session with bash off says nothing")
+  noBash.restore()
+
+  if (real === undefined) delete process.env.PI_SUBAGENTS_EXTEND_HELPER
+  else process.env.PI_SUBAGENTS_EXTEND_HELPER = real
+
+  // 候选顺序：包装好的 bin/ 优先，其次是仓内 cargo 产物 —— 后者正是「建好了但没拷」的兜底。
+  const candidates = ext.helperCandidates("/x/packages/pi-plugin/src")
+  assert.equal(candidates[0], "/x/packages/pi-plugin/bin/pi-subagents-extend-helper")
+  assert.equal(
+    candidates[1],
+    "/x/packages/helper/target/release/pi-subagents-extend-helper",
+    "the cargo artifact is a runtime candidate",
+  )
+  assert.ok(
+    !candidates.some((c) => c.includes("subagent-permission")),
+    "the pre-rename cache directory is not a candidate",
+  )
+  console.log("  ok   缺 helper 开场告警；候选含仓内 cargo 产物，旧目录已移除")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npi-subagents-extend 测试通过")
