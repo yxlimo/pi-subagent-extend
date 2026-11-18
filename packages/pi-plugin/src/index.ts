@@ -39,7 +39,7 @@
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1329,13 +1329,27 @@ export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
 	};
 }
 
-/** 把 spec 写到 helper 读的位置，返回文件路径。 */
-function writeSpecFile(spec: ReturnType<typeof buildSpec>): string | undefined {
+/**
+ * 把 spec 写到 helper 读的位置，返回文件路径。
+ *
+ * 文件名必须**每次调用都唯一**：pi 会并行发出多个工具调用，而 helper 是启动后才读
+ * 这份文件。早先用 `spec-<pid>.json`（一个进程一个名字），并行 bash 会互相覆盖——
+ * 先起的那条 helper 可能读到后一条的 spec，拿到错的写清单与 cwd，症状是随机、不可
+ * 复现的授权失败或命令走错目录。序号只要求进程内唯一，toolCallId 不可打印字符换成下划线。
+ */
+let specSeq = 0;
+function writeSpecFile(spec: ReturnType<typeof buildSpec>, toolCallId: string): string | undefined {
 	try {
 		const dir = resolve(homedir(), ".cache", "pi-subagents-extend");
 		mkdirSync(dir, { recursive: true });
-		const file = resolve(dir, `spec-${process.pid}.json`);
-		writeFileSync(file, JSON.stringify(spec));
+		const safeId = toolCallId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 48);
+		specSeq += 1;
+		const file = resolve(dir, `spec-${process.pid}-${specSeq}-${safeId}.json`);
+		// 先写临时文件再改名：helper 只会看到完整内容，不会读到半截 JSON（半截会被
+		// deny_unknown_fields / 解析失败拒掉，表现为莫名其妙的 exit 77）。
+		const temp = `${file}.tmp`;
+		writeFileSync(temp, JSON.stringify(spec));
+		renameSync(temp, file);
 		return file;
 	} catch {
 		return undefined;
@@ -1418,7 +1432,10 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	const call = extractCallConfig(process.env[BINDINGS_ENV]);
 	let policy: Policy = INACTIVE;
 	/** toolCallId → 这次 bash 的 spec 摘要（写清单、cwd、是否离线）。 */
-	const sandboxSpecs = new Map<string, { write: string[]; cwd: string; offline: boolean }>();
+	const sandboxSpecs = new Map<
+		string,
+		{ write: string[]; cwd: string; offline: boolean; specFile?: string }
+	>();
 	if (call.error) {
 		policy = denyAll(call.error);
 	} else if (call.config) {
@@ -1608,7 +1625,17 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 		// bash 没开时命令根本没跑，别去解释它的结果。
 		const offline = policy.bash !== undefined && policy.bash.network !== true;
 		const ran = sandboxSpecs.get(event.toolCallId);
-		if (ran) sandboxSpecs.delete(event.toolCallId);
+		if (ran) {
+			sandboxSpecs.delete(event.toolCallId);
+			// helper 早已读过它；留着只会堆垃圾文件（每个 bash 调用一份）。
+			if (ran.specFile) {
+				try {
+					rmSync(ran.specFile, { force: true });
+				} catch {
+					// 删不掉不影响判定，忽略。
+				}
+			}
+		}
 		const hints = [
 			handoffHintFor(text),
 			// 两道注解都以「这条命令真的失败了」为前提。不看 isError 时，成功命令的**输出内容**里
@@ -1695,8 +1722,10 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				const storeHint = store.path
 					? ` (pnpm store at ${store.path}, not writable; the parent can add it to bash.writablePaths)`
 					: "";
+				// 点名被拒的**命令**，再列允许项。只印允许列表时，读起来像「列表里那条命令不被接受」：
+				// 实测真有人把 `command not in the allowlist: ls` 读成「ls 被拒」，而实际拒的是别的命令。
 				return bail(
-					`pi-subagents-extend: command not in the allowlist: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
+					`pi-subagents-extend: command not in the allowlist: "${preview([command])}" — allowed: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
 				);
 			}
 			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
@@ -1720,7 +1749,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				return deny(`pi-subagents-extend: this kernel cannot enforce the task scope: ${reason}`);
 			}
 			const spec = buildSpec(cwd, rule, policy);
-			const specFile = writeSpecFile(spec);
+			const specFile = writeSpecFile(spec, event.toolCallId);
 			if (!specFile) {
 				return deny("pi-subagents-extend: cannot write the sandbox spec; check that ~/.cache/pi-subagents-extend is writable");
 			}
@@ -1730,7 +1759,12 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				const oldest = sandboxSpecs.keys().next().value as string | undefined;
 				if (oldest !== undefined) sandboxSpecs.delete(oldest);
 			}
-			sandboxSpecs.set(event.toolCallId, { write: spec.write, cwd, offline: spec.offline });
+			sandboxSpecs.set(event.toolCallId, {
+				write: spec.write,
+				cwd,
+				offline: spec.offline,
+				specFile,
+			});
 			(event.input as { command?: string }).command = wrapInSandbox(command, specFile, helper);
 			return undefined;
 		}

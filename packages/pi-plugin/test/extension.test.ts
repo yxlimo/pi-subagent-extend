@@ -129,11 +129,20 @@ async function handler({ bindings, cwd = workdir, profile, profileFile }: Handle
     await handlers.session_start({ type: "session_start" }, ctx)
   }
 
-  const call = async (toolName: string, input?: Record<string, unknown>): Promise<Outcome> =>
-    (await handlers.tool_call({ type: "tool_call", toolCallId: "t1", toolName, input }, ctx)) as Outcome
-  const result = async (toolName: string, content: unknown, isError = false): Promise<PatchedResult | undefined> =>
+  const call = async (
+    toolName: string,
+    input?: Record<string, unknown>,
+    toolCallId = "t1",
+  ): Promise<Outcome> =>
+    (await handlers.tool_call({ type: "tool_call", toolCallId, toolName, input }, ctx)) as Outcome
+  const result = async (
+    toolName: string,
+    content: unknown,
+    isError = false,
+    toolCallId = "t1",
+  ): Promise<PatchedResult | undefined> =>
     (await handlers.tool_result?.(
-      { type: "tool_result", toolCallId: "t1", toolName, input: {}, content, isError },
+      { type: "tool_result", toolCallId, toolName, input: {}, content, isError },
       ctx,
     )) as PatchedResult | undefined
   const context = async (messages: unknown[]): Promise<AnnotatedMessages | undefined> =>
@@ -389,7 +398,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   assert.equal(await h.call("bash", input), undefined, "listed command passes")
   assert.match(
     input.command,
-    /^'\/[^']*pi-subagents-extend-helper' '--spec' '\/[^']*spec-[0-9]+\.json' '--' 'bash' '-lc'/,
+    /^'\/[^']*pi-subagents-extend-helper' '--spec' '\/[^']*spec-[0-9]+-[0-9]+-[^']*\.json' '--' 'bash' '-lc'/,
     "command is rewritten to run under the sandbox helper",
   )
   assert.match(input.command, /'bash' '-lc' 'pnpm run typecheck'$/, "original command preserved as the payload")
@@ -2904,6 +2913,60 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     "the pre-rename cache directory is not a candidate",
   )
   console.log("  ok   缺 helper 开场告警；候选含仓内 cargo 产物，旧目录已移除")
+}
+
+// 83. 拒绝文案必须点名「被拒的命令」。早先只印允许列表，实测被读成
+//     「command not in the allowlist: ls」→「ls 不被接受」，而真正被拒的是别的命令。
+{
+  const h = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls"] } } }),
+  })
+  const refused = await h.call("bash", { command: "pwd" })
+  assert.equal(refused?.block, true, "a command outside the list is refused")
+  assert.match(refused.reason, /not in the allowlist: "pwd"/, "the message names the command that was refused")
+  assert.match(refused.reason, /allowed: ls/, "and keeps listing what is allowed")
+  h.restore()
+  console.log("  ok   拒绝文案点名被拒的命令，并附允许列表")
+}
+
+// 84. 并行 bash 必须各用各的 spec 文件。早先文件名是 spec-<pid>.json（一进程一个），
+//     pi 并行发工具调用时会互相覆盖：先起的 helper 可能读到后一条的 spec，拿到错的
+//     写清单和 cwd。这里在同一进程里连续发两次调用、都不等结果，然后比对两份文件。
+{
+  const h = await handler({
+    cwd: workdir,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["."], bash: { read: ["ls", "git status"], writable: true } },
+    }),
+  })
+  const first = { command: "ls" }
+  const second = { command: "git status" }
+  const firstOutcome = await h.call("bash", first, "c1")
+  assert.equal(firstOutcome?.block ?? false, false, "first call is allowed")
+  const secondOutcome = await h.call("bash", second, "c2")
+  assert.equal(secondOutcome?.block ?? false, false, "second call is allowed")
+  const pathOf = (command: string): string => {
+    const match = /'--spec' '([^']+)'/.exec(command)
+    assert.ok(match, `no --spec in: ${command}`)
+    return match[1]
+  }
+  const firstSpec = pathOf(first.command)
+  const secondSpec = pathOf(second.command)
+  assert.notEqual(firstSpec, secondSpec, "concurrent calls get distinct spec files")
+  // 两份都还在（结果还没回来），而且各自是自己那次调用的内容。
+  assert.ok(existsSync(firstSpec), "the first spec survives the second call")
+  const a = JSON.parse(readFileSync(firstSpec, "utf8")) as SandboxSpec
+  const b = JSON.parse(readFileSync(secondSpec, "utf8")) as SandboxSpec
+  assert.equal(a.cwd, workdir, "the first spec keeps its own cwd")
+  assert.deepEqual(a, b, "both calls describe the same cwd and grants here")
+  // 结果回来后清掉，避免每个 bash 调用留一份垃圾。
+  await h.result("bash", "ok", false, "c1")
+  await h.result("bash", "ok", false, "c2")
+  assert.equal(existsSync(firstSpec), false, "the first spec is removed once its result is in")
+  assert.equal(existsSync(secondSpec), false, "the second spec is removed too")
+  h.restore()
+  console.log("  ok   并行调用各用各的 spec 文件，结果回来后清理")
 }
 
 rmSync(workdir, { recursive: true, force: true })
