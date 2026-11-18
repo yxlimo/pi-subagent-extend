@@ -98,7 +98,7 @@ cd ../helper && cargo test
 ```
 
 `pnpm test` runs a lint pass and four offline suites: 97 scope cases, 10 context cases, 6 sessions
-against a real pi process driven by a scripted mock model, and 4 end-to-end cases against the real
+against a real pi process driven by a scripted mock model, and 5 end-to-end cases against the real
 `pi-hashline-edit-pro` — no model, no network beyond localhost. See [testing](docs/testing.md).
 
 ## Boundaries

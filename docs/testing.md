@@ -7,7 +7,7 @@
 | `test/extension.test.ts` | 97 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
-| `test/hashline-e2e.test.ts` | 4 | a real pi process loading the real `pi-hashline-edit-pro` |
+| `test/hashline-e2e.test.ts` | 5 | a real pi process loading the real `pi-hashline-edit-pro` |
 
 `cargo test` in `packages/helper` covers the sandbox itself: the ABI check, the ruleset, the
 namespace decisions, the capability drop and process supervision.

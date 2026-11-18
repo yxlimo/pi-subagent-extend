@@ -300,4 +300,48 @@ function refusal(events: { results: { text: string }[] }, pattern: RegExp): stri
 	console.log("  ok   copy 的源只读、目标可写：放行且真的落盘");
 }
 
-console.log("\npi-subagents-extend hashline e2e 测试通过（4 项）");
+// ---------------------------------------------------------------------------
+// 5. copy 带**相对** path：宿主按 resolve(cwd, path) 与锚点归属比对，所以它接受这种写法。
+//    本层早先拿原始字符串直比，把这种调用一律拒掉 —— 而相对写法正是模型最常给的形式。
+//    这条只有真宿主能证明：单元测试里的假 API 无法验「宿主到底接不接受相对 path」。
+// ---------------------------------------------------------------------------
+{
+	// 默认配置（requirePath 关闭）就能复现：实测 `path` 一样会到达本层 —— 把比对改回原始字符串，
+	// 这条立刻转红并打印 "matches neither file"。所以不必开 requirePath，模型最常遇到的形态就是
+	// 默认配置下带相对 path 的 copy。
+	const run5 = await run({
+		files: { "src/a.txt": "alpha\n", "src/dest.txt": "dest\n" },
+		bindings: { "pi-subagents-extend/1": { scope: ["src/**"], writeScope: ["src/**"], bash: false } },
+		steps: [
+			{ calls: [{ name: "read", args: { path: "src/a.txt" } }] },
+			{ calls: [{ name: "read", args: { path: "src/dest.txt" } }] },
+			(parts: unknown[]) => {
+				const sourceAnchor = anchorFromMessages(parts, "alpha");
+				const destAnchor = anchorFromMessages(parts, "dest");
+				return {
+					calls: [
+						{
+							name: "copy",
+							args: {
+								source_from: sourceAnchor,
+								source_to: sourceAnchor,
+								anchor: destAnchor,
+								direction: "after",
+								path: "src/dest.txt",
+							},
+						},
+					],
+				};
+			},
+			{ text: "done" },
+		],
+	});
+	assert.match(
+		run5.read("src/dest.txt"),
+		/alpha/,
+		`a relative path that names the destination is accepted and the copy lands (stderr: ${run5.stderr.slice(-400)}); results: ${JSON.stringify(run5.results.map((r) => r.text.slice(0, 160)))}`,
+	);
+	console.log("  ok   copy 带相对 path：放行且真的落盘");
+}
+
+console.log("\npi-subagents-extend hashline e2e 测试通过（5 项）");
