@@ -65,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: check (${{ matrix.mode }})
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           # Nothing here pushes, and a persisted token would sit in .git/config
           # where the sandboxed commands these tests run can read it.
@@ -87,11 +87,11 @@ jobs:
         if: matrix.lift == 'yes'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115  # v6
         with:
           version: 12
 
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7
         with:
           node-version: 22
           cache: pnpm
@@ -105,10 +105,10 @@ jobs:
         working-directory: packages/pi-plugin
         run: pnpm run typecheck
 
-      # Two bug classes a type checker cannot see, both of which shipped here before:
-      # `await f(x)?.y` reading a property off the Promise, and the same expression
-      # written with explicit parentheses. `pnpm test` also runs it, so a local run
-      # catches it too.
+      # Two bug classes a type checker cannot see, both of which shipped
+      # here before: `await f(x)?.y` reading a property off the Promise,
+      # and the same expression written with explicit parentheses.
+      # `pnpm test` also runs it, so a local run catches it too.
       - name: Lint
         working-directory: packages/pi-plugin
         run: pnpm run lint

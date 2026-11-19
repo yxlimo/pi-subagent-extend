@@ -1,0 +1,16 @@
+---
+# 必须放在 .github/ 下 —— 这是踩过的坑，别再挪走。
+#
+# actionlint 1.7.12 只会自动发现这些位置（实测：把同名文件放在仓库根目录**不生效**，
+# 仍然报 runner-label；放到 .github/ 下就 0 条。根目录那份只有靠 `-config-file` 显式
+# 指定才被读取）：
+#     .github/actionlint.yaml / .github/actionlint.yml
+#
+# 里面登记的是「actionlint 还不认识的 runner 标签」：它的内置清单随发布固定在某个时间点，
+# 比 GitHub 上新镜像上线要晚。`ubuntu-26.04` 是 GitHub 托管的正式镜像（CI 的 26.04 两条腿
+# 就跑在它上面且是绿的），只是这张表里还没有 —— 于是它把真实存在的标签报成 "unknown"。
+# 注意这个键名（self-hosted-runner）是 actionlint 的唯一入口，语义上不是 self-hosted；
+# 等它的内置表跟上之后，这个文件就该删掉。
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

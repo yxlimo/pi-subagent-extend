@@ -1,0 +1,20 @@
+---
+# yamllint 的默认规则集是给通用 YAML（尤其 Ansible 那类）准备的，有两条与
+# GitHub Actions 的语法正面冲突，这里按文件的实际约定关掉，而不是逐个文件加
+# 抑制注释：
+#
+#   document-start：GH Actions 的 workflow 惯例上不以 `---` 开头（GitHub 自己的
+#     模板、 marketplace 上的 action 都不写），要求它只会改动一堆无害但对不上惯例的文件。
+#   truthy：workflow 的顶层键就是 `on:`，YAML 1.1 会把 on 解析成布尔真，于是
+#     yamllint 把**每一份** workflow 的第三行都报成 "truthy value"。这是 YAML 1.1
+#     的坑（GH Actions 按 YAML 1.2 处理），不是文件的问题。
+#
+# 其余规则保留默认：line-length 仍按 80，comments 仍要求两个空格 —— 刚才那三行
+# `uses: ...@<sha> # v7` 就是真被这条抓出来的（一个空格的注释在值里可能被当成
+# 字符串的一部分），已经改成两个空格。
+extends: default
+
+rules:
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false", "on"]
