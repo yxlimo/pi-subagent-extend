@@ -101,7 +101,7 @@ cd packages/pi-plugin && pnpm install && pnpm run typecheck && pnpm test
 cd ../helper && cargo test
 ```
 
-`pnpm test` runs a lint pass and four offline suites: 142 scope cases, 10 context cases, 6 sessions
+`pnpm test` runs a lint pass and four offline suites: 147 scope cases, 10 context cases, 6 sessions
 against a real pi process driven by a scripted mock model, and 5 end-to-end cases against the real
 `pi-hashline-edit-pro` — no model, no network beyond localhost. See [testing](docs/testing.md).
 

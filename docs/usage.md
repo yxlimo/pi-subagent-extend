@@ -128,19 +128,28 @@ once at session start, instead of letting the child discover it by running the c
   neither are entries whose scope the working directory does not decide (`--manifest-path`, `-r`,
   `--filter`, cargo's `-C`). An entry that names its own package directory (`--dir`, `--prefix`)
   is judged against that directory, not against the working tree.
+  When the working directory was reached through a symlink, both the literal path and its resolved
+  real path are walked: the two chains of ancestors are not the same tree, and a command that does
+  run must not be reported as one that cannot.
 - An absolute-path entry is checked against the file system. A path inside a build-artefact
   directory (`target`, `dist`, `build`, `out`, `node_modules`, `.git`, `.venv`, `__pycache__`) is
   not reported while the file is missing: it only needs one `cargo build`.
 
 A reported entry comes with the reason, and with the form that would work when the working tree
 holds exactly one package that has the script (`pnpm --dir packages/pi-plugin run typecheck`).
-With several candidate packages the warning lists them instead of picking one — which package an
-entry meant is the parent's to say — and with no candidate that has the script it says so rather
-than inventing a form.
+With several candidate packages it lists up to eight of them instead of picking one — which package an
+entry meant is the parent's to say — and summarises the rest as `… and N more`, because a monorepo can
+hold hundreds and one message has to stay readable. When the only candidate does not have the script
+the entry names, it says ``no candidate has a `typecheck` script`` rather than asking which package was
+meant: that is a missing script, not a wrong directory, and moving to another package cannot fix it.
 
 The same fact reaches the child: when such a command runs and fails, the result is annotated with
 `[sandbox] this command ran, but "pnpm run typecheck" cannot work from <cwd>: …`, followed by the
-form to use or the candidate list. The annotation is only added to a failed result.
+form to use or the candidate list (capped the same way). The entry it names is the one whose pattern
+**matches the command that ran**, not merely another entry that starts with the same program: the
+allowlist can hold a reachable `pnpm --dir packages/a run build` next to an unreachable
+`pnpm run typecheck`, and a failure of the first must not be explained with the second. The annotation
+is only added to a failed result.
 
 ## Recommended scenarios
 
@@ -308,6 +317,12 @@ An explicit empty list is a third instruction, distinct from both "omitted" and 
 inherits it and `"read": ["x"]` appends to it. So `"bash": { "read": [], "write": [] }` turns bash off
 for a dispatch even when its role carries a long allowlist — writing the empty lists is how you say
 "none of it", and it is the same refusal as having no `bash` field at all.
+
+`bash.allow` is the legacy single-list spelling of the same column as `bash.write` — a command in either
+one is authorised as a write — so emptying **either** of them empties both: `"allow": []` drops a
+`write` the profile supplied, exactly as `"write": []` drops an `allow`. Otherwise a write grant stays
+alive through whichever spelling the other layer happened to use, which is the same silent retention
+the empty list exists to prevent.
 
 A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the profile carries
 one (`review`'s report directory is that shape): the read-only intent would otherwise be cancelled by

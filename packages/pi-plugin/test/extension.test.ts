@@ -3881,6 +3881,8 @@ interface UnreachableEntry {
   fix?: string
   /** cwd 下面所有带 package.json 的目录：多个候选时给不出单一的改法。 */
   candidates?: string[]
+  /** 恰好一个候选、但那个包里没有条目点名的脚本时，记下缺的脚本名。 */
+  scriptMissing?: string
 }
 /** 调纯抽取函数；导出缺失时给一句可读的失败，而不是 TypeError。 */
 function pathCandidates(command: string): string[] {
@@ -4766,6 +4768,151 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	console.log("  ok   跑不起来的命令在工具结果里拿到注解与改法；成功的命令不补注解")
 }
 
+
+// 143. 注解要认「跑的是哪一条授权」，不是「首 token 一样就算」。白名单里同时有可达的
+//      `pnpm --dir packages/a run build` 与不可达的 `pnpm run typecheck` 时，早先只比
+//      `pnpm` 这个程序名，于是**可达**那条一失败就被安上 `pnpm run typecheck` 的诊断与改法：
+//      那条命令根本没跑，照它改也没用。对照组：跑的就是不可达那条时，注解必须点名它。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-note-entry-"))
+	mkdirSync(join(tree, "packages", "a"), { recursive: true })
+	writeFileSync(join(tree, "packages", "a", "package.json"), JSON.stringify({ scripts: { build: "tsc -b" } }))
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({
+			"pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm --dir packages/a run build", "pnpm run typecheck"] } },
+		}),
+	})
+	const reachable = "pnpm --dir packages/a run build"
+	assert.equal(await h.call("bash", { command: reachable }), undefined, "the reachable entry is allowlisted")
+	const unrelatedResult = await h.result("bash", "error TS1234: boom", true)
+	const unrelated = String(unrelatedResult?.content)
+	assert.doesNotMatch(unrelated, /this command ran/, "a failed reachable command is not annotated")
+	assert.doesNotMatch(unrelated, /cannot work from/, "and no other entry's diagnosis is pinned on it")
+	assert.doesNotMatch(unrelated, /pnpm run typecheck/, "the unrelated entry is not named at all")
+	// 对照组：跑的是那条不可达的，注解点名的就必须是它。
+	assert.equal(await h.call("bash", { command: "pnpm run typecheck" }), undefined, "the unreachable entry is allowlisted too")
+	const ownResult = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const own = String(ownResult?.content)
+	assert.match(own, /this command ran/, "the failing unreachable command is annotated")
+	assert.match(own, /"pnpm run typecheck" cannot work/, "and the note names that very entry")
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   注解按条目匹配实际跑的命令；同程序名的无关条目不会被安上来")
+}
+
+// 144. 候选包可能有几百个，文案必须有上限：把整棵树拼进一条告警，读者读不完，
+//      也看不出重点是「这条授权指错了地方」。上限 8 条，超出补 `… and N more`。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-list-cap-"))
+	const names = Array.from({ length: 10 }, (_, i) => `pkg-${String(i + 1).padStart(2, "0")}`)
+	for (const name of names) {
+		mkdirSync(join(tree, name), { recursive: true })
+		writeFileSync(join(tree, name, "package.json"), "{}")
+	}
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run build"] } } }),
+	})
+	const notices = h.ui.join("\n")
+	assert.match(notices, /… and 2 more/, "the session warning stops at eight candidates and counts the rest")
+	assert.ok(!notices.includes("pkg-09") && !notices.includes("pkg-10"), `the warning names no candidate past the cap, got: ${notices}`)
+	assert.equal(await h.call("bash", { command: "pnpm run build" }), undefined, "the entry is allowlisted")
+	const noteResult = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const note = String(noteResult?.content)
+	assert.match(note, /… and 2 more/, "the tool-result note is capped the same way")
+	assert.ok(!note.includes("pkg-09") && !note.includes("pkg-10"), `the note names no candidate past the cap, got: ${note}`)
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   候选列表封在 8 条，超出补「… and N more」；告警与工具结果一致")
+}
+
+// 145. 恰好一个候选、但那个包里没有条目点名的脚本时，说「没有候选带这个脚本」，而不是让人
+//      去候选里「挑一个」：挑哪一个都跑不通（pnpm 自己报 Command not found）。这是「脚本
+//      不存在」，不是「授权不可达」。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-no-script-"))
+	mkdirSync(join(tree, "pkg-a"), { recursive: true })
+	writeFileSync(join(tree, "pkg-a", "package.json"), JSON.stringify({ scripts: { lint: "eslint ." } }))
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run typecheck"] } } }),
+	})
+	const found = unreachableEntries(["pnpm run typecheck"], tree)
+	assert.equal(found[0]?.fix, undefined, "no fix is invented when the only candidate lacks the script")
+	assert.equal(found[0]?.scriptMissing, "typecheck", "the entry carries the missing script name")
+	const notices = h.ui.join("\n")
+	assert.match(notices, /no candidate has a `typecheck` script/, "the warning says the script is missing")
+	assert.doesNotMatch(notices, /pick the one this entry meant/, "and does not send the reader off to pick one")
+	assert.equal(await h.call("bash", { command: "pnpm run typecheck" }), undefined, "the entry is allowlisted")
+	const noteResult = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const note = String(noteResult?.content)
+	// 句首大写：这条注解里它另起一句，措辞本身与告警那一处相同。
+	assert.match(note, /no candidate has a `typecheck` script/i, "the tool-result note says it too")
+	assert.doesNotMatch(note, /pick the one this entry meant/, "instead of asking which candidate was meant")
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   候选缺该脚本时明说「没有候选带这个脚本」，不让读者去挑")
+}
+
+// 146. cwd 是经软链进来的时候，字面祖先链与真实祖先链不是同一棵树。只按字面路径上行，
+//      真实祖先里的 package.json 永远查不到 —— 一条**能跑**的命令被判成永远不可达，
+//      父代理于是被建议去改一条正确的授权。两条链都查，任一命中即可达。
+{
+	const real = mkdtempSync(join(tmpdir(), "pi-subagents-extend-realpath-real-"))
+	// 软链要指向包**之下一层**（`pkg/deep`），manifest 在 `pkg`：这样字面链上每一级都没有
+	// `package.json`，只有真实链查得到。指向包根本身就会失效 —— 那时 `link/package.json`
+	// 经软链本身就命中，判据不查真实链也照样通过（实测：那一版用例撤销实现后仍然绿）。
+	mkdirSync(join(real, "pkg", "deep", "sub"), { recursive: true })
+	writeFileSync(join(real, "pkg", "package.json"), "{}")
+	const holder = mkdtempSync(join(tmpdir(), "pi-subagents-extend-realpath-link-"))
+	const link = join(holder, "link")
+	symlinkSync(join(real, "pkg", "deep"), link)
+	assert.deepEqual(
+		unreachableEntries(["pnpm test"], join(link, "sub")),
+		[],
+		"the manifest above the real path makes the entry reachable through the symlink",
+	)
+	// 对照组：同样的子目录结构，没有软链也没有祖先 manifest 时仍判不可达。
+	const bare = mkdtempSync(join(tmpdir(), "pi-subagents-extend-realpath-bare-"))
+	mkdirSync(join(bare, "sub"), { recursive: true })
+	assert.equal(unreachableEntries(["pnpm test"], join(bare, "sub")).length, 1, "without a manifest anywhere it is still unreachable")
+	rmSync(real, { recursive: true, force: true })
+	rmSync(holder, { recursive: true, force: true })
+	rmSync(bare, { recursive: true, force: true })
+	console.log("  ok   软链 cwd：真实祖先里的 manifest 也算；没有 manifest 时照旧判不可达")
+}
+
+// 147. `allow` 与 `write` 是同一列的两种写法（`parseBashRule` 把两者接起来），所以清空哪一边
+//      都要清空另一边。早先只做了 `write: []` → 清 `allow` 这一个方向，反向的 `allow: []`
+//      让 profile 用新字段 `bash.write` 写下的授权静默留着 —— 与「显式空列表 = 清空该列」
+//      是同一个失败，方向相反。
+{
+	const proj = join(workdir, "proj-empty-allow")
+	mkdirSync(join(proj, ".pi"), { recursive: true })
+	mkdirSync(join(proj, "src"), { recursive: true })
+	writeFileSync(
+		join(proj, ".pi/subagent-bindings.json"),
+		JSON.stringify({ impl: { bash: { read: ["git status"], write: ["git commit"] } } }),
+	)
+	// 正控：profile 的写授权本来生效，否则「它不生效了」证明不了任何事。
+	const open = await handler({ cwd: proj, profile: "impl" })
+	assert.equal(await open.call("bash", { command: "git status" }), undefined, "the profile's read entry runs")
+	assert.equal(await open.call("bash", { command: "git commit -m x" }), undefined, "the profile's write entry runs on its own")
+	open.restore()
+
+	const h = await handler({
+		cwd: proj,
+		profile: "impl",
+		bindings: JSON.stringify({
+			"pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0, bash: { read: ["git status"], allow: [] } },
+		}),
+	})
+	const denied = await h.call("bash", { command: "git commit -m x" })
+	assert.equal(denied?.block, true, "an explicit empty allow column drops the profile's write grant")
+	h.restore()
+	console.log("  ok   allow:[] 同时清掉继承来的 write：两个方向都不再静默保留授权")
+}
 
 rmSync(workdir, { recursive: true, force: true })
 restoreState()

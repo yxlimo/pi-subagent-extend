@@ -47,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
+import { allEntries, classifyCommand, commandMatches, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1615,16 +1615,56 @@ function reportHiddenGrants(dropped: string[]): void {
 const SANDBOX_MARK = "[sandbox]";
 
 /**
+ * 「没有候选包带这个脚本」这一句：告警和工具结果共用，措辞只能有一份。
+ *
+ * 分成两处各写一遍，两边的措辞就会慢慢分开（一边大写、一边小写就够让读者以为是两件
+ * 不同的事），而这条消息的全部价值就在于它说的是一件确定的事。
+ */
+function scriptMissingClause(script: string): string {
+	return `no candidate has a \`${script}\` script`;
+}
+
+/** 同一句话放在句首时用这个：只动首字母，措辞不另写一份。 */
+function sentenceCase(text: string): string {
+	return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+}
+
+/**
  * 候选提示：给不出可靠改法时，把候选列出来让父代理挑。
  *
  * 多个包时「这条授权原本指哪个包」只有父代理知道：随便挑一个再给一条 `--dir`
  * 建议，会把命令指到别的包上。
+ *
+ * `scriptMissing` 有值时不许再写「挑一个」：那个包里连脚本都没有，挑它跑出来是
+ * "Command not found"，改包目录治不好这件事。说清「没有候选带这个脚本」才是真事实。
+ * 候选超过上限时截断（见 `listedJoin`）：几百个包路径拼进一条告警没人读得完。
  */
 function candidateHint(item: UnreachableEntry): string {
 	if (item.fix) return "";
+	if (item.scriptMissing) return `; ${scriptMissingClause(item.scriptMissing)}`;
 	const list = item.candidates ?? [];
 	if (!list.length) return "";
-	return `; candidates: ${list.join(", ")} — pick the one this entry meant`;
+	return `; candidates: ${listedJoin(list)} — pick the one this entry meant`;
+}
+
+/**
+ * 注解里「那该怎么办」的那一句。四种事实各说各的，不含糊：
+ *
+ * - 有可靠改法（恰好一个候选、且它有这个脚本）→ 直接给改法；
+ * - 一个候选但缺脚本 → 说清「没有候选带这个脚本」，别再让人去挑；
+ * - 多个候选 → 列出来让父代理挑（它才知道这条授权原本指谁）；
+ * - 连候选都没有 → 只能由父代理指明一个带 manifest 的目录。
+ *
+ * 顺序不能换：`scriptMissing` 一定同时有 `candidates`，先判候选就会把「脚本不存在」
+ * 说成「包选错了」，而改包目录治不好后者。
+ */
+function remedyFor(item: UnreachableEntry): string {
+	if (item.fix) return `Use ${item.fix} instead.`;
+	if (item.scriptMissing) return `${sentenceCase(scriptMissingClause(item.scriptMissing))}.`;
+	if (item.candidates && item.candidates.length) {
+		return `Candidates: ${listedJoin(item.candidates)} — pick the one this entry meant.`;
+	}
+	return "The parent has to point this entry at a directory that has the manifest.";
 }
 
 /**
@@ -1638,15 +1678,16 @@ function candidateHint(item: UnreachableEntry): string {
  */
 function unreachableCommandNote(text: string, command: string, rule: BashRule, cwd: string): string | undefined {
 	if (text.includes(SANDBOX_MARK)) return undefined;
-	const head = firstToken(leadingAssignments(command).rest);
-	if (!head) return undefined;
-	const bad = unreachableEntries(allEntries(rule), cwd).find((item) => firstToken(item.entry) === head);
+	// 前置赋值先剥掉：匹配时剥得掉，这里也得剥。
+	const rest = leadingAssignments(command).rest;
+	if (!firstToken(rest)) return undefined;
+	// 按**条目**匹配实际跑的这条命令，不是按首 token 相比：白名单里只要有另一条同程序名的
+	// 不可达条目，任何可达命令失败时都会被安上那条无关条目的诊断与改法（跑的是
+	// `pnpm --dir packages/a run build`，却被注解成 `pnpm run typecheck` 不可用）。
+	// 首 token 相同只说明「同一个程序」，不说明「同一条授权」。
+	const bad = unreachableEntries(allEntries(rule), cwd).find((item) => commandMatches(item.entry, rest));
 	if (!bad) return undefined;
-	const remedy = bad.fix
-		? `Use ${bad.fix} instead.`
-		: bad.candidates && bad.candidates.length
-			? `Candidates: ${bad.candidates.join(", ")} — pick the one this entry meant.`
-			: "The parent has to point this entry at a directory that has the manifest.";
+	const remedy = remedyFor(bad);
 	return `${SANDBOX_MARK} this command ran, but "${bad.entry}" cannot work from ${cwd}: ${bad.why}. ${remedy}`;
 }
 

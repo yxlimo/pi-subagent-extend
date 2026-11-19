@@ -12,7 +12,7 @@
  * write 为准，保守方向）。
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export type BashAccess = "read" | "write";
@@ -454,6 +454,12 @@ function bashLists(bottom: Record<string, unknown>, top: Record<string, unknown>
 	if (Object.hasOwn(top, "write") && stringList(top.write).length === 0 && !Object.hasOwn(top, "allow")) {
 		out.allow = [];
 	}
+	// 反向同理，而且更容易漏：`allow` 被显式清空时 `write` 也必须清空。`write` 没写进 out 时
+	// 底层那份（`...inherited` spread 过来的）会原样留着，于是派单写 `allow: []` 想收掉写授权，
+	// profile 用新字段 `bash.write` 写下的那几条却静默生效 —— 与上一条是同一个失败，方向相反。
+	if (Object.hasOwn(top, "allow") && stringList(top.allow).length === 0 && !Object.hasOwn(top, "write")) {
+		out.write = [];
+	}
 	// deny 是硬底线：两层并集，任何一层都拆不掉。
 	const deny = unique([...stringList(bottom.deny), ...stringList(top.deny)]);
 	if (deny.length > 0) out.deny = deny;
@@ -501,7 +507,8 @@ function stallSeconds(value: unknown): number | false {
  * - `re:` 正则条目无法静态判断，跳过；
  * - 程序名是工具链里到处都有的（`git`、`rg`、`node`）时，工作目录语义太杂，一律不判：
  *   误报比漏报糟；
- * - 判据是 cwd 本身，不看祖先目录 —— 理由文本写的就是 cwd，判据与文本必须一致。
+ * - 判据与理由文本必须一致：manifest 按工具自己的规矩**向上**找（cwd 的祖先也算，
+ *   两条链都查：字面路径与真实路径），所以 `why` 写的是 "in <cwd> or its ancestors"。
  */
 export interface UnreachableEntry {
 	/** 条目原文。 */
@@ -516,6 +523,14 @@ export interface UnreachableEntry {
 	 * 有多个候选时给不出可靠的改法：这条授权原本指哪个包只有父代理知道。
 	 */
 	candidates?: string[];
+	/**
+	 * 恰好一个候选包、但那个包里没有条目点名的脚本（`pnpm run typecheck` 而包里只有 `lint`）。
+	 *
+	 * 这是「脚本不存在」，不是「授权不可达」：命令跑起来会得到 pnpm 自己的
+	 * "Command not found"，改包目录也治不好。有了这个标记，文案才能说清「没有候选包带这个
+	 * 脚本」，而不是让读者去几个候选里「挑一个」—— 挑哪一个都不行。
+	 */
+	scriptMissing?: string;
 }
 
 /**
@@ -583,9 +598,40 @@ const MAX_MANIFEST_SEARCH_DEPTH = 8;
  * npm/pnpm/yarn/bun 与 cargo 都是**向上**找 manifest：cwd 是仓库里的子目录时，
  * 祖先目录里有 manifest 就说明这条命令跑得起来。只看 cwd 会把它误判成不可达，
  * 而误报会让父代理去改一条本来没坏的配置。
+ *
+ * 上行要查**两条链**：字面路径（`resolve` 之后）与真实路径（`realpathSync`）。
+ * cwd 是经软链进来的时候两条链不是同一棵树 —— 字面链的祖先里可能没有 manifest，
+ * 真实链的祖先里有。只查字面链的后果是：一条**能跑**的命令被判成永远不可达，
+ * 父代理于是被建议去改一条正确的授权。两条都查、任一命中即可达，代价是偶尔
+ * 把一条本来不可达的条目放过（漏报比误报便宜）。
+ *
+ * 与 `resolveComparable` 那批代码同一个教训：Node 自实现的 realpath 与操作系统的
+ * realpath 会分叉，所以这里不相信任何一条单独的结论。
  */
 function manifestAbove(cwd: string, manifest: string): string | undefined {
-	let dir = resolve(cwd);
+	for (const root of searchRoots(cwd)) {
+		const found = manifestUp(root, manifest);
+		if (found !== undefined) return found;
+	}
+	return undefined;
+}
+
+/** 上行的起点：字面路径，以及（解得出时）真实路径。 */
+function searchRoots(cwd: string): string[] {
+	const lexical = resolve(cwd);
+	let real: string | undefined;
+	try {
+		real = realpathSync(cwd);
+	} catch {
+		// cwd 已经不存在（或没有权限）时退回字面路径：判定本来就不该因为读不到目录而抛。
+		real = undefined;
+	}
+	return real === undefined || real === lexical ? [lexical] : [lexical, real];
+}
+
+/** 一条链上的上行查找。 */
+function manifestUp(start: string, manifest: string): string | undefined {
+	let dir = start;
 	for (let depth = 0; depth <= MAX_MANIFEST_SEARCH_DEPTH; depth += 1) {
 		if (existsSync(join(dir, manifest))) return dir;
 		const parent = dirname(dir);
@@ -662,6 +708,23 @@ function isBuildArtifactPath(path: string): boolean {
 	return path.split(/[/\\]/).some((part) => BUILD_ARTIFACT_DIRS.has(part));
 }
 
+/** 一条文案里最多列几项。monorepo 下候选包可能有几百个，一条告警不该被它撑爆。 */
+const MAX_LISTED = 8;
+
+/**
+ * 把一组路径拼进一条文案，超过上限就截断并说还剩几条。
+ *
+ * 截断放在**渲染**这一层，不放在收集处：`candidates.length !== 1` 决定「给不给改法」，
+ * 收集时就截断会把「12 个候选，判不了」写成「8 个候选，判不了」—— 结论没变，但读者
+ * 以为只有 8 个，而且 `… and N more` 里的 N 也没地方算。收集保持完整，只有给人看的
+ * 那串字有上限。
+ */
+export function listedJoin(items: string[]): string {
+	if (items.length <= MAX_LISTED) return items.join(", ");
+	const rest = items.length - MAX_LISTED;
+	return `${items.slice(0, MAX_LISTED).join(", ")}, … and ${rest} more`;
+}
+
 /**
  * cwd 下面**所有**带 package.json 的目录（相对 cwd 的路径）。
  *
@@ -725,12 +788,21 @@ function hasScript(cwd: string, pkgRel: string, script: string): boolean {
 	}
 }
 
+/** `packageFixFor` 的答案：有改法就给改法，没有就说清为什么没有。 */
+interface PackageFixOutcome {
+	/** 可靠改法；给不出来时没有这个字段。 */
+	fix?: string;
+	/** 恰好一个候选、但那个包里没有这个脚本：交给文案去说明。 */
+	scriptMissing?: string;
+}
+
 /**
  * 改法只在**恰好一个候选**、且那个包里真的有这个脚本时才给。
  *
  * 多个候选时给不出来：这条授权原本指哪个包只有父代理知道，随便挑一个会把命令
  * 指到别的包上。脚本不在包里时那条建议自己也跑不通（pnpm 报 "Command not found"），
- * 那是脚本不存在，不是授权不可达。
+ * 那是脚本不存在，不是授权不可达 —— 所以既不给改法，也要把「原因不是包选错了」
+ * 带回去（`scriptMissing`），否则文案只会让人在候选里挑一个，而挑哪一个都不行。
  */
 function packageFixFor(
 	cwd: string,
@@ -740,11 +812,11 @@ function packageFixFor(
 	candidates: string[],
 	script: string | undefined,
 	dir?: PackageDir,
-): string | undefined {
-if (candidates.length !== 1) return undefined;
+): PackageFixOutcome {
+	if (candidates.length !== 1) return {};
 	const pkg = candidates[0] as string;
-	if (script !== undefined && !hasScript(cwd, pkg, script)) return undefined;
-	return packageFix(head, managerFlag, pkg, entry, dir);
+	if (script !== undefined && !hasScript(cwd, pkg, script)) return { scriptMissing: script };
+	return { fix: packageFix(head, managerFlag, pkg, entry, dir) };
 }
 
 /** 造一条包管理器条目的不可达记录：候选列表，加上可靠时才有的改法。 */
@@ -759,8 +831,9 @@ function packagingItem(
 ): UnreachableEntry {
 	const item: UnreachableEntry = { entry, why };
 	if (candidates.length > 0) item.candidates = candidates;
-	const fix = packageFixFor(cwd, head, managerFlag, entry, candidates, scriptName(entry), dir);
+	const { fix, scriptMissing } = packageFixFor(cwd, head, managerFlag, entry, candidates, scriptName(entry), dir);
 	if (fix) item.fix = fix;
+	if (scriptMissing) item.scriptMissing = scriptMissing;
 	return item;
 }
 
