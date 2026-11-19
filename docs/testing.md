@@ -4,7 +4,7 @@
 
 | Suite | Cases | What it is |
 | --- | --- | --- |
-| `test/extension.test.ts` | 121 | the extension's own judgement, against a fake pi API |
+| `test/extension.test.ts` | 147 | the extension's own judgement, against a fake pi API |
 | `test/context.test.ts` | 10 | the marker stripping and `.pi/main-only.md` injection |
 | `test/mock-session.test.ts` | 6 | a real pi process, driven by a scripted mock model |
 | `test/hashline-e2e.test.ts` | 5 | a real pi process loading the real `pi-hashline-edit-pro` |

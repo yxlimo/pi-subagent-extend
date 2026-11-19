@@ -47,6 +47,9 @@
         "sh",
         "pnpm test",
         "pnpm run typecheck",
+        "pnpm --dir packages/pi-plugin test",
+        "pnpm --dir packages/pi-plugin run typecheck",
+        "pnpm --dir packages/helper test",
         "cargo test",
         "packages/helper/target/release/pi-subagents-extend-helper"
       ],

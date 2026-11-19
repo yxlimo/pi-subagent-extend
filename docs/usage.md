@@ -32,9 +32,10 @@ subagent(
 | --- | --- | --- |
 | `scope` | `string[]` | Globs describing what the subagent may read. Required; an empty array refuses all file access. |
 | `writeScope` | `string[]` | Globs describing what a write tool may touch (`edit`/`write`, or the host's anchored-editing family: `replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`). Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
-| `readOnly` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. |
+| `readOnly` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. A **dispatch** that sets this without its own `writeScope` is read-only even when the profile carries one (`review`'s report directory is the shape): the dispatch's intent wins. Name a `writeScope` in the same layer to keep "read-only except this one file". |
 | `maxReads` | `number` | Cap on successful reads. |
-| `allowTools` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. |
+| `allowTools` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. Unioned with the profile's list; `reset: true` (below) drops that list so a dispatch can be narrower than its role. |
+| `reset` | `boolean` | On a layer that has one below it (the role over `default`, the dispatch over the role): "only these entries this time". Clears the lower layer's `bash.read` / `bash.write` / `bash.allow` **and** its `allowTools` before this layer's own lists are applied, so both a command allowlist and a tool allowlist can be made tighter than the layer below. `bash.deny` is not cleared. `bash.reset` is the same thing for the bash columns alone. See [Profiles](#profiles). |
 | `tools` | `object` | Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `access` is `read` or `write`; `path` names the argument holding the target path, or is `false` for a tool with no path argument (a write tool declared that way is always refused); `transferSource` (`read`/`write`) says how a two-file tool's **source** is judged — `copy` reads its source while `move` deletes from it, and the built-in defaults already say so. The path argument name is taken from the tool's own schema when omitted, so anchors-based tools usually need only `access`. A malformed entry refuses everything. |
 | `maxDenies` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
 | `maxWriteDenies` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
@@ -45,12 +46,13 @@ subagent(
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `bash.read` / `bash.write` | `string[]` | Commands allowed to only read or to write, matched per token as a prefix, or `re:` regexes (which see the command exactly as written). A leading `NAME=value` assignment is stripped before matching — `HOME=/tmp/x node a.ts` matches an entry `node` — so an entry must start with the program name: `HOME=/tmp node` is a rule that can never fire. Names that change which program runs or load code into it (`LD_*`, `NODE_*`, `GIT_*`, `PYTHON*`, `PATH`, `IFS`, `PAGER`, `BASH_ENV`, …) are refused instead, because they would turn an allowlisted command into arbitrary code. |
+| `bash.reset` | `boolean` | Only meaningful on a layer that has one below it: drop that layer's `bash.read`, `bash.write` and `bash.allow` before this layer's lists are applied — "only these entries this time", so a task can be tighter than its role. `bash.deny` is not dropped. The top-level `reset` does the same and also clears `allowTools`; see [Profiles](#profiles). |
 | `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directories and `node_modules` are added, so `git add`/`commit` and an install work. Only scope entries that cover a whole subtree open a directory; file-level entries open just the files they match. In a linked worktree git's grant excludes `.git/hooks` and `.git/config`; in a plain checkout it cannot. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
-| `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one. |
+| `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one, and neither `reset` nor `bash.reset` lifts them. |
 | `bash.dependencyGate` | `boolean \| string[]` | Defaults to `true`. Before a write-classified command or a package-manager invocation runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also show an install — `node_modules/.bin`, or `.pnp.cjs` for a Yarn PnP project; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. An array lists directory prefixes to skip, for a lockfile nobody installs — a `fixtures/` sample, a vendored example: a plain path covers that directory and everything below it (the same reading as a `scope` entry), resolved against the working directory, but the match stops at a path boundary, so `fixtures` does not cover `fixtures-old`. Entries are literal paths, not globs; a glob is named in the refusal rather than silently matching nothing. `[]` skips nothing, the same as `true`. `false` turns the check off. |
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. When set, the helper samples the CPU time of the whole command tree — it is PID 1 of a private PID namespace, so the tree is what `/proc` shows — and kills it once the tree has used **no** CPU for that many seconds, printing why and exiting `79`. The point is to separate a deadlock from a slow build, which a wall-clock limit cannot: a compiling tree gains CPU in every sample, a tree waiting on a lock, a socket, or an orphaned child gains none. Two limits to know before turning it on: a command that deliberately waits (`sleep 300`, a backoff loop) also uses no CPU and will be killed, and the helper cannot see output because stdio is inherited rather than piped, so "no output" cannot corroborate the reading. That is why nothing is armed by default — pick a number well above your slowest quiet gap between CPU bursts. The kill is annotated with `[sandbox]` in the result, saying a retry will stall the same way. |
 
@@ -112,6 +114,42 @@ is what this nudge judges, because a build or a test run has to read the whole t
 `Cargo.toml`, `pnpm` reads the root `package.json`. Judging a bash argument by `scope` would refuse
 those ordinary commands. So the two answer different questions: `scope` answers *may this file tool read
 this file*, the working tree answers *may this command point at this path*.
+
+### Allowlist entries that cannot work from the working directory
+
+Some allowlist entries can never fire from the session's working directory. The extension says so
+once at session start, instead of letting the child discover it by running the command:
+
+- A package-manager entry (`pnpm`, `npm`, `yarn`, `bun`) needs a `package.json`, and `cargo` needs a
+  `Cargo.toml`. Both are looked up **from the working directory upwards** (eight levels at most),
+  the way the tools themselves do it: a child running in `packages/pi-plugin/` still finds the
+  repository's manifest, so such an entry is not reported. Entries that need no manifest at all
+  (`pnpm --version`, `pnpm store path`, `npm --help`, `pnpm dlx`) are not reported either, and
+  neither are entries whose scope the working directory does not decide (`--manifest-path`, `-r`,
+  `--filter`, cargo's `-C`). An entry that names its own package directory (`--dir`, `--prefix`)
+  is judged against that directory, not against the working tree.
+  When the working directory was reached through a symlink, both the literal path and its resolved
+  real path are walked: the two chains of ancestors are not the same tree, and a command that does
+  run must not be reported as one that cannot.
+- An absolute-path entry is checked against the file system. A path inside a build-artefact
+  directory (`target`, `dist`, `build`, `out`, `node_modules`, `.git`, `.venv`, `__pycache__`) is
+  not reported while the file is missing: it only needs one `cargo build`.
+
+A reported entry comes with the reason, and with the form that would work when the working tree
+holds exactly one package that has the script (`pnpm --dir packages/pi-plugin run typecheck`).
+With several candidate packages it lists up to eight of them instead of picking one — which package an
+entry meant is the parent's to say — and summarises the rest as `… and N more`, because a monorepo can
+hold hundreds and one message has to stay readable. When the only candidate does not have the script
+the entry names, it says ``no candidate has a `typecheck` script`` rather than asking which package was
+meant: that is a missing script, not a wrong directory, and moving to another package cannot fix it.
+
+The same fact reaches the child: when such a command runs and fails, the result is annotated with
+`[sandbox] this command ran, but "pnpm run typecheck" cannot work from <cwd>: …`, followed by the
+form to use or the candidate list (capped the same way). The entry it names is the one whose pattern
+**matches the command that ran**, not merely another entry that starts with the same program: the
+allowlist can hold a reachable `pnpm --dir packages/a run build` next to an unreachable
+`pnpm run typecheck`, and a failure of the first must not be explained with the second. The annotation
+is only added to a failed result.
 
 ## Recommended scenarios
 
@@ -214,8 +252,88 @@ import { profile } from "/path/to/pi-subagents-extend/packages/pi-plugin/src/pro
 export default profile("review")
 ```
 
-Merging favours the stricter side: a call overrides a profile per key, except `bash.deny`, which no
-caller can relax. A dispatch to a role that has a profile passes only `agent`, `model` and `task` —
+Three layers, one direction — `default` → role → dispatch:
+
+| Layer | Where it is written | What it does |
+| --- | --- | --- |
+| `default` | the `"default"` key of `.pi/subagent-bindings.json` | the **floor** for every role in the project; it applies to all of them |
+| role | that role's own key in the same file | **adds to** `default`; it does not replace it |
+| dispatch | the `extensionBindings` of one call | **adds to** the role's result |
+
+So a role inherits what `default` supplies instead of restating it, and a dispatch inherits the role's.
+Narrowing is the separate, explicit act described below (`reset: true`) — a role or a dispatch cannot
+be made tighter just by writing a shorter list.
+
+Merging is **per field** — never one layer replacing another — and the field list is the whole rule:
+
+| Category | Fields | Why |
+| --- | --- | --- |
+| **union** | `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths` | the profile's entries stay and the call's are appended (base first, duplicates dropped), so a dispatch can authorise one more command without restating the list it already has. For the three `bash` columns an **empty array written in the upper layer** is not "add nothing" — it empties that column (see below); `allowTools` has no empty-list form, `reset: true` is how that list is cleared |
+| **union, hard floor** | `bash.deny` | a deny entry is a restriction, not a grant, and no layer can lift one: "structurally forbidden" has to survive a dispatch that rewrites the allowlist |
+| **replaced** | `scope`, `writeScope` | a task's range has to be able to be **narrower** than the role default. A union would grow file access on every dispatch — the wrong direction for the one field that decides what may be read, and it would make "narrower than the role" inexpressible |
+| **the call wins** | `readOnly`, `maxReads`, `maxDenies`, `maxWriteDenies`, `probe`, `tools`, `bash.writable`, `bash.network`, `bash.dependencyGate`, `bash.cpuStallSeconds`, `bash.scratchPaths` | these describe *this* task, so the dispatch's value is the value. `probe` and `tools` are replaced whole, not deep-merged. `bash.env` merges per variable name, the call winning on a collision |
+
+Why `deny` can never be anything but a union: a profile's deny list is where a project writes what must
+not happen at all (`git push`, `git reset`). If a call could replace it, every dispatch would have to
+restate the whole list, and the one that forgets silently opens the command.
+
+`reset: true` is how a layer says "only these entries this time" — the one way to be **narrower** than
+the layer below. It clears the lower layer's `bash.read` / `bash.write` / `bash.allow` **and** its
+`allowTools` before the layer's own lists are applied:
+
+```json
+{
+  "pi-subagents-extend/1": {
+    "scope": ["src/auth/**"],
+    "reset": true,
+    "allowTools": ["read"],
+    "bash": { "read": ["pnpm run typecheck"] }
+  }
+}
+```
+
+That dispatch may run `pnpm run typecheck` and nothing else, and its `allowTools` is exactly `["read"]`
+rather than a union with the role's list, however many commands and tools that profile carries. A role
+uses the same key against `default`:
+
+```json
+{
+  "default": { "bash": { "read": ["git push"] } },
+  "review": { "reset": true, "bash": { "read": ["git diff"] } }
+}
+```
+
+`review` may run `git diff` and not `git push`. Without `reset` it would inherit both, because
+`default` is a floor rather than a peer.
+
+`bash.reset: true` is the same thing for the bash columns alone — it does not touch `allowTools`. It
+predates the top-level key and still reads well beside `bash.read`.
+
+`bash.deny` is **not** reset by either key: the project's prohibitions still apply, which is the point
+of it being a floor rather than a default.
+
+An explicit empty list is a third instruction, distinct from both "omitted" and "one more entry":
+`"read": []` says *this column is empty* and drops the column it inherited, while omitting `read`
+inherits it and `"read": ["x"]` appends to it. So `"bash": { "read": [], "write": [] }` turns bash off
+for a dispatch even when its role carries a long allowlist — writing the empty lists is how you say
+"none of it", and it is the same refusal as having no `bash` field at all.
+
+`bash.allow` is the legacy single-list spelling of the same column as `bash.write` — a command in either
+one is authorised as a write — so emptying **either** of them empties both: `"allow": []` drops a
+`write` the profile supplied, exactly as `"write": []` drops an `allow`. Otherwise a write grant stays
+alive through whichever spelling the other layer happened to use, which is the same silent retention
+the empty list exists to prevent.
+
+A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the profile carries
+one (`review`'s report directory is that shape): the read-only intent would otherwise be cancelled by
+a grant the dispatch never asked for. Add `"writeScope": ["/tmp/pi-review-reports"]` in the same
+dispatch to keep "read-only except this one directory".
+
+When both layers are in play the refusal's `source:` names both —
+`profile impl (.pi/subagent-bindings.json) + extensionBindings` — because the entry that answered may
+have come from either file.
+
+A dispatch to a role that has a profile passes only `agent`, `model` and `task` —
 the three pieces a new role needs are in the usage skill
 [`pi-subagents-extend`](../packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#call-template).
 
