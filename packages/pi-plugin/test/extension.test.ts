@@ -4855,9 +4855,9 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	console.log("  ok   候选缺该脚本时明说「没有候选带这个脚本」，不让读者去挑")
 }
 
-// 146. cwd 是经软链进来的时候，字面祖先链与真实祖先链不是同一棵树。只按字面路径上行，
-//      真实祖先里的 package.json 永远查不到 —— 一条**能跑**的命令被判成永远不可达，
-//      父代理于是被建议去改一条正确的授权。两条链都查，任一命中即可达。
+// 146. cwd 是经软链进来的时候，字面祖先链与真实祖先链不是同一棵树。命令跑在**物理**目录里，
+//      所以只有真实祖先里的 package.json 算数 —— 只按字面路径上行会漏掉它，一条能跑的命令
+//      被判成永远不可达，父代理于是被建议去改一条正确的授权。判据只走解析后的路径。
 {
 	const real = mkdtempSync(join(tmpdir(), "pi-subagents-extend-realpath-real-"))
 	// 软链要指向包**之下一层**（`pkg/deep`），manifest 在 `pkg`：这样字面链上每一级都没有
@@ -5080,6 +5080,35 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	assert.deepEqual(unreachableEntries(["bun test --watch"], empty), [], "and neither does a trailing one")
 	rmSync(empty, { recursive: true, force: true })
 	console.log("  ok   bun test 不判不可达；bun run test 仍按脚本判")
+}
+
+// 155. 注解只能按「这条**命令**需不需要 manifest」归因。宽条目 `pnpm` 会被判成不可达，
+//      但它放行的 `pnpm --version` 根本不需要 manifest：失败原因是网络或别的什么，
+//      拿「没有 manifest」去解释它是把原因安到了不成立的前提上（误报比漏报糟）。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-wide-entry-"))
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm"] } } }),
+	})
+	// 正控：条目本身确实被报成不可达，否则「没有注解」证明不了任何事。
+	assert.match(h.ui.join("\n"), /can never match/, "the wide entry is reported as unreachable")
+	assert.equal(await h.call("bash", { command: "pnpm --version" }), undefined, "the wide entry allowlists it")
+	const versionResult = await h.result("bash", "ENETUNREACH: network is unreachable", true)
+	const versionText = String(versionResult?.content)
+	assert.doesNotMatch(versionText, /"pnpm" cannot work from/, "a command that needs no manifest gets no manifest diagnosis")
+	// 对照：同一条条目放行的 `pnpm run build` 确实需要 manifest，注解必须出现。
+	assert.equal(await h.call("bash", { command: "pnpm run build" }), undefined, "the same entry allowlists this too")
+	const buildResult = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const buildText = String(buildResult?.content)
+	assert.match(buildText, /"pnpm" cannot work from/, "a command that does need one is still explained")
+	// P3-7：旗标带值与 bun 的 dlx 都不需要 manifest，不能被当成「需要」。
+	assert.deepEqual(unreachableEntries(["bun --cwd /tmp test"], tree), [], "a flag's value is not the subcommand")
+	assert.deepEqual(unreachableEntries(["bun x cowsay"], tree), [], "bun's dlx needs no manifest either")
+	assert.equal(unreachableEntries(["bun --cwd /tmp run test"], tree).length, 1, "but a script behind the flags still does")
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   注解只按命令自身是否需要 manifest 归因；bun 的旗标值与 dlx 也认")
 }
 
 

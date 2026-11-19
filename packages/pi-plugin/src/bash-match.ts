@@ -521,6 +521,13 @@ export interface UnreachableEntry {
 	entry: string;
 	/** 为什么命中不了：一句可核对的事实。 */
 	why: string;
+	/**
+	 * 判定时实际查看的目录：cwd 的**解析后**路径（`realpathSync`），解不出时才是字面路径。
+	 *
+	 * 文案要印这个而不是字面 cwd：cwd 经软链进来时，读者按字面链一查就能找到 manifest，
+	 * 那条「永远命中不了」的结论于是看起来是错的。
+	 */
+	lookedIn?: string;
 	/** 改成什么：拿不到可靠改法时没有这个字段。 */
 	fix?: string;
 	/**
@@ -695,6 +702,40 @@ function hasExemptSubcommand(entry: string): boolean {
 }
 
 /**
+ * bun 自带的子命令：`test` 用它自己的 runner，`x` 是它的 dlx —— 两者都不看 `package.json`。
+ *
+ * 判据是「`run` 出现在子命令之前 ⇒ 那是包脚本」，所以 `bun run test` 与
+ * `bun --cwd <dir> run test` 不豁免，而 `bun test`、`bun --bun test`、`bun --cwd <dir> test`
+ * 都豁免。这样不必知道每个旗标吃几个值，也就不会把旗标的**值**当成子命令。
+ */
+function bunBuiltin(entry: string): string | undefined {
+	if (firstToken(entry) !== "bun") return undefined;
+	const rest = tokens(entry).slice(1);
+	const runAt = rest.indexOf("run");
+	const testAt = rest.indexOf("test");
+	const xAt = rest.indexOf("x");
+	if (runAt !== -1 && testAt !== -1 && runAt < testAt) return undefined;
+	if (testAt !== -1) return "test";
+	if (xAt !== -1) return "x";
+	return undefined;
+}
+
+/**
+ * 这条**命令**自己需不需要 manifest —— 与「条目」的判据分开。
+ *
+ * 宽条目（`pnpm`）放行的 `pnpm --version` 并不需要 manifest，它失败的原因是网络、二进制
+ * 缺失或别的什么；拿「这条条目没有 manifest 可用」去解释它，是把原因安到了不成立的前提上。
+ */
+export function commandNeedsNoManifest(command: string): boolean {
+	const entry = command.trim();
+	if (!entry) return false;
+	if (hasExemptSubcommand(entry) || hasExemptFlag(entry)) return true;
+	// 自己指了包目录（`pnpm --dir packages/a run build`）：cwd 有没有 manifest 与之无关。
+	if (packageDirFlag(entry) !== undefined) return true;
+	return bunBuiltin(entry) !== undefined;
+}
+
+/**
  * 构建产物目录：路径里有一段是这些目录时，文件不存在只说明还没构建，
  * 不说明这条授权命中不了（`packages/helper/target/release/…` 要等一次 cargo build）。
  */
@@ -838,7 +879,7 @@ function packagingItem(
 	candidates: string[],
 	dir?: PackageDir,
 ): UnreachableEntry {
-	const item: UnreachableEntry = { entry, why };
+	const item: UnreachableEntry = { entry, why, lookedIn: searchRoots(cwd)[0] };
 	if (candidates.length > 0) item.candidates = candidates;
 	const { fix, scriptMissing } = packageFixFor(cwd, head, managerFlag, entry, candidates, scriptName(entry), dir);
 	if (fix) item.fix = fix;
@@ -874,6 +915,10 @@ function packageManagerItem(
 	managerFlag: string,
 	candidates: string[],
 ): UnreachableEntry | undefined {
+	// bun 自带的子命令先判：`bun --cwd <dir> test` 里的 `--cwd` 会被当成包目录旗标，
+	// 于是它先掉进下面那个分支、被按「那个目录里没有 package.json」判成不可达 ——
+	// 而 `bun test` 用的是它自己的 runner，跟 package.json 无关。
+	if (bunBuiltin(entry) !== undefined) return undefined;
 	const dir = packageDirFlag(entry);
 	if (dir) {
 		// 条目自己指了包目录：那个目录里没有 package.json 才算命中不了。
@@ -881,11 +926,6 @@ function packageManagerItem(
 		if (existsSync(join(target, "package.json"))) return undefined;
 		return packagingItem(cwd, entry, head, managerFlag, `no package.json in ${dir.path}`, candidates, dir);
 	}
-	// `bun test` 跑的是 bun 自带的测试运行器：不看 `scripts.test`，也不需要 `package.json`。
-	// 把它判成「没有 manifest 所以跑不起来」是误报 —— 它在空目录里照样能跑。
-	// 找第一个非旗标词，`bun --bun test` 与 `bun test --watch` 都要认出来；`bun run test` 不走这条路
-	// （`run` 在前，它是包脚本）。
-	if (head === "bun" && tokens(entry).slice(1).find((word) => !word.startsWith("-")) === "test") return undefined;
 	// 不需要 manifest 的子命令（`pnpm store path`）与判不了的旗标（`pnpm -r test`）：不判。
 	if (hasExemptSubcommand(entry) || hasExemptFlag(entry)) return undefined;
 	// manifest 向上找：cwd 是子目录时，祖先有 package.json 就说明跑得起来。

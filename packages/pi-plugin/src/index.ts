@@ -47,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
+import { allEntries, classifyCommand, commandNeedsNoManifest, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1629,6 +1629,11 @@ function sentenceCase(text: string): string {
 	return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
 
+/** 候选超过上限时的补充说明；没被截断时不给。 */
+function truncationNote(list: string[]): string {
+	return list.length > MAX_LISTED ? ` (only the first ${MAX_LISTED} are listed)` : "";
+}
+
 /**
  * 候选提示：给不出可靠改法时，把候选列出来让父代理挑。
  *
@@ -1637,14 +1642,10 @@ function sentenceCase(text: string): string {
  *
  * `scriptMissing` 有值时不许再写「挑一个」：那个包里连脚本都没有，挑它跑出来是
  * "Command not found"，改包目录治不好这件事。说清「没有候选带这个脚本」才是真事实。
- * 候选超过上限时截断（见 `listedJoin`）：几百个包路径拼进一条告警没人读得完。
- * 候选被截断时得说一句「没列全」：否则文案让人去挑，而被要求挑的那几个恰好没显示出来。
+ * 候选超过上限时截断（见 `listedJoin`），并用 `truncationNote` 说一句「没列全」：
+ * 几百个包路径拼进一条告警没人读得完，但让人去挑看不见的那几个同样不行。
  */
 
-/** 候选超过上限时的补充说明；没被截断时不给。 */
-function truncationNote(list: string[]): string {
-	return list.length > MAX_LISTED ? ` (only the first ${MAX_LISTED} are listed)` : "";
-}
 function candidateHint(item: UnreachableEntry): string {
 	if (item.fix) return "";
 	if (item.scriptMissing) return `; ${scriptMissingClause(item.scriptMissing)}`;
@@ -1689,11 +1690,15 @@ function unreachableCommandNote(text: string, command: string, rule: BashRule, c
 	// 在不可达子集里按 `allEntries` 顺序取第一条命中，会让一条**比命令更短**的宽条目（`pnpm`）
 	// 顶替真正放行它的那条。`classifyCommand` 用的是判定本身的规则（write 列优先、第一条命中），
 	// 所以它给的答案就是唯一的答案。
+	// 命令**自己**不需要 manifest 时，一句都不要说：宽条目 `pnpm` 会被判成不可达，但它放行的
+	// `pnpm --version` / `pnpm store path` / `pnpm --dir x run build` 跟 cwd 有没有 manifest
+	// 无关，失败原因是别的东西。把原因安到不成立的前提上，比不说更糟。
+	if (commandNeedsNoManifest(command)) return undefined;
 	const granted = classifyCommand(rule, command);
 	const bad = granted === undefined ? undefined : unreachableEntries([granted.entry], cwd)[0];
 	if (!bad) return undefined;
 	const remedy = remedyFor(bad);
-	return `${SANDBOX_MARK} this command ran, but "${bad.entry}" cannot work from ${cwd}: ${bad.why}. ${remedy}`;
+	return `${SANDBOX_MARK} this command ran, but "${bad.entry}" cannot work from ${bad.lookedIn ?? cwd}: ${bad.why}. ${remedy}`;
 }
 
 /**
@@ -1715,9 +1720,12 @@ function reportUnreachableEntries(rule: BashRule, cwd: string): void {
 	const list = `${shown.map((item) => `${item.entry} (${item.why}${candidateHint(item)})`).join(", ")}${hidden > 0 ? `, … and ${hidden} more` : ""}`;
 	// 改法按条目给：每条建议里带着自己的脚本名，读者能对上是哪一条。
 	const fixes = shown.map((item) => item.fix).filter((fix): fix is string => fix !== undefined);
-	const tail = fixes.length > 0 ? ` Use the package-relative form instead: ${fixes.join("; ")}` : "";
+	// 隐藏条目的改法换不出来：候选是同一份列表，全列一遍只会让这条告警更长。总数照实说，
+	// 并明说下面的改法只覆盖列出来的这几条 —— 不说的话读者会以为改法覆盖了全部。
+	const covered = hidden > 0 ? " (the forms below cover the listed entries only)" : "";
+	const tail = fixes.length > 0 ? ` Use the package-relative form instead: ${fixes.join("; ")}${covered}` : "";
 	uiWarning?.(
-		`pi-subagents-extend: ${unreachable.length} allowlist entries can never match from ${cwd}: ${list}. Commands run in the session's working directory; there is no \`cd\`.${tail}`
+		`pi-subagents-extend: ${unreachable.length} allowlist entries can never match from ${unreachable[0]?.lookedIn ?? cwd}: ${list}. Commands run in the session's working directory; there is no \`cd\`.${tail}`
 	);
 }
 
