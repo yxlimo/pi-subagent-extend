@@ -115,6 +115,33 @@ is what this nudge judges, because a build or a test run has to read the whole t
 those ordinary commands. So the two answer different questions: `scope` answers *may this file tool read
 this file*, the working tree answers *may this command point at this path*.
 
+### Allowlist entries that cannot work from the working directory
+
+Some allowlist entries can never fire from the session's working directory. The extension says so
+once at session start, instead of letting the child discover it by running the command:
+
+- A package-manager entry (`pnpm`, `npm`, `yarn`, `bun`) needs a `package.json`, and `cargo` needs a
+  `Cargo.toml`. Both are looked up **from the working directory upwards** (eight levels at most),
+  the way the tools themselves do it: a child running in `packages/pi-plugin/` still finds the
+  repository's manifest, so such an entry is not reported. Entries that need no manifest at all
+  (`pnpm --version`, `pnpm store path`, `npm --help`, `pnpm dlx`) are not reported either, and
+  neither are entries whose scope the working directory does not decide (`--manifest-path`, `-r`,
+  `--filter`, cargo's `-C`). An entry that names its own package directory (`--dir`, `--prefix`)
+  is judged against that directory, not against the working tree.
+- An absolute-path entry is checked against the file system. A path inside a build-artefact
+  directory (`target`, `dist`, `build`, `out`, `node_modules`, `.git`, `.venv`, `__pycache__`) is
+  not reported while the file is missing: it only needs one `cargo build`.
+
+A reported entry comes with the reason, and with the form that would work when the working tree
+holds exactly one package that has the script (`pnpm --dir packages/pi-plugin run typecheck`).
+With several candidate packages the warning lists them instead of picking one — which package an
+entry meant is the parent's to say — and with no candidate that has the script it says so rather
+than inventing a form.
+
+The same fact reaches the child: when such a command runs and fails, the result is annotated with
+`[sandbox] this command ran, but "pnpm run typecheck" cannot work from <cwd>: …`, followed by the
+form to use or the candidate list. The annotation is only added to a failed result.
+
 ## Recommended scenarios
 
 ### A reviewer that may write exactly one report

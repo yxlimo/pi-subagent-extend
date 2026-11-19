@@ -12,8 +12,8 @@
  * write 为准，保守方向）。
  */
 
-import { existsSync, readdirSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export type BashAccess = "read" | "write";
 
@@ -510,6 +510,12 @@ export interface UnreachableEntry {
 	why: string;
 	/** 改成什么：拿不到可靠改法时没有这个字段。 */
 	fix?: string;
+	/**
+	 * cwd 下面所有带 package.json 的目录（相对 cwd 的路径）。
+	 *
+	 * 有多个候选时给不出可靠的改法：这条授权原本指哪个包只有父代理知道。
+	 */
+	candidates?: string[];
 }
 
 /**
@@ -568,14 +574,102 @@ function packageDirFlag(entry: string): PackageDir | undefined {
 /** 找包目录时最多往下走几层。 */
 const MAX_PACKAGE_SEARCH_DEPTH = 4;
 
+/** 向上找 manifest 时最多走几层：病态的深路径不至于把判定拖成扫盘。 */
+const MAX_MANIFEST_SEARCH_DEPTH = 8;
+
 /**
- * cwd 下面第一个带 package.json 的目录（相对 cwd 的路径）。
+ * 从 cwd 向上找 manifest（`package.json` / `Cargo.toml`）。
  *
- * 往下找而不是只看一层：仓库根没有 package.json、包在 `packages/pi-plugin/` 才是常见布局，
- * 只看一层就找不到真正该建议的那个目录。深度封顶、跳过 `node_modules` 与隐藏目录，
- * 判定因此便宜，也不会在依赖树里乱找。
+ * npm/pnpm/yarn/bun 与 cargo 都是**向上**找 manifest：cwd 是仓库里的子目录时，
+ * 祖先目录里有 manifest 就说明这条命令跑得起来。只看 cwd 会把它误判成不可达，
+ * 而误报会让父代理去改一条本来没坏的配置。
  */
-function packageDirUnder(cwd: string): string | undefined {
+function manifestAbove(cwd: string, manifest: string): string | undefined {
+	let dir = resolve(cwd);
+	for (let depth = 0; depth <= MAX_MANIFEST_SEARCH_DEPTH; depth += 1) {
+		if (existsSync(join(dir, manifest))) return dir;
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+	return undefined;
+}
+
+/**
+ * 这些子命令本来就不需要 manifest：版本号、帮助、store/config 之类。
+ * 它们在没有任何 package.json 的目录里照样跑得起来，判成不可达就是误报。
+ */
+const MANIFEST_EXEMPT_SUBCOMMANDS = new Set([
+	"--version",
+	"--help",
+	"-v",
+	"-V",
+	"store",
+	"config",
+	"setup",
+	"env",
+	"cache",
+	"dlx",
+]);
+
+/**
+ * 这些旗标让「从 cwd 找 manifest」这件事判不了：工作区范围（`-r`、`--filter`）
+ * 或别的目录（cargo 的 `-C`）。带着它们猜 cwd 必然猜错。
+ */
+const MANIFEST_EXEMPT_FLAGS = new Set([
+	"-w",
+	"--workspace-root",
+	"--filter",
+	"-r",
+	"--recursive",
+	"--manifest-path",
+	"-C",
+]);
+
+/** 条目里有没有这些旗标（`--flag=value` 形态也算）。 */
+function hasExemptFlag(entry: string): boolean {
+	return tokens(entry).some((word) => {
+		if (MANIFEST_EXEMPT_FLAGS.has(word)) return true;
+		for (const flag of MANIFEST_EXEMPT_FLAGS) {
+			if (flag.startsWith("--") && word.startsWith(`${flag}=`)) return true;
+		}
+		return false;
+	});
+}
+
+/** 条目的子命令位置上有没有不需要 manifest 的词（`pnpm store path`、`npm --help`…）。 */
+function hasExemptSubcommand(entry: string): boolean {
+	return tokens(entry).slice(1).some((word) => MANIFEST_EXEMPT_SUBCOMMANDS.has(word));
+}
+
+/**
+ * 构建产物目录：路径里有一段是这些目录时，文件不存在只说明还没构建，
+ * 不说明这条授权命中不了（`packages/helper/target/release/…` 要等一次 cargo build）。
+ */
+const BUILD_ARTIFACT_DIRS = new Set([
+	"target",
+	"dist",
+	"build",
+	"out",
+	"node_modules",
+	".git",
+	".venv",
+	"__pycache__",
+]);
+
+/** 路径里有没有一段是构建产物目录。 */
+function isBuildArtifactPath(path: string): boolean {
+	return path.split(/[/\\]/).some((part) => BUILD_ARTIFACT_DIRS.has(part));
+}
+
+/**
+ * cwd 下面**所有**带 package.json 的目录（相对 cwd 的路径）。
+ *
+ * 收集全部而不是第一个：仓库里常有多个包，「这条授权原本指哪个包」只有父代理知道，
+ * 随便挑一个再给一条 `--dir` 建议，会把命令指到别的包上。
+ */
+function packageCandidatesUnder(cwd: string): string[] {
+	const out: string[] = [];
 	let frontier = [""];
 	for (let depth = 0; depth < MAX_PACKAGE_SEARCH_DEPTH; depth += 1) {
 		const next: string[] = [];
@@ -597,13 +691,77 @@ function packageDirUnder(cwd: string): string | undefined {
 			}
 			for (const name of names) {
 				const childRel = rel === "" ? name : join(rel, name);
-				if (existsSync(join(cwd, childRel, "package.json"))) return childRel;
+				if (existsSync(join(cwd, childRel, "package.json"))) out.push(childRel);
 				next.push(childRel);
 			}
 		}
 		frontier = next;
 	}
+	return out;
+}
+
+/**
+ * 条目里的脚本名：`run <script>` 与裸 `test` 两种形态。
+ *
+ * 只认这两种：别的裸词（`pnpm install`）是子命令还是脚本名猜不准，
+ * 猜错就会把一条本来跑得起来的命令判成不可达。
+ */
+function scriptName(entry: string): string | undefined {
+	const words = tokens(entry);
+	if (words.length < 2) return undefined;
+	if (words[1] === "run") return words[2];
+	if (words[1] === "test") return "test";
 	return undefined;
+}
+
+/** 候选包的 package.json 里真的有这个脚本吗。 */
+function hasScript(cwd: string, pkgRel: string, script: string): boolean {
+	try {
+		const raw = readFileSync(join(cwd, pkgRel, "package.json"), "utf8");
+		const parsed = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+		return parsed.scripts !== undefined && Object.prototype.hasOwnProperty.call(parsed.scripts, script);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * 改法只在**恰好一个候选**、且那个包里真的有这个脚本时才给。
+ *
+ * 多个候选时给不出来：这条授权原本指哪个包只有父代理知道，随便挑一个会把命令
+ * 指到别的包上。脚本不在包里时那条建议自己也跑不通（pnpm 报 "Command not found"），
+ * 那是脚本不存在，不是授权不可达。
+ */
+function packageFixFor(
+	cwd: string,
+	head: string,
+	managerFlag: string,
+	entry: string,
+	candidates: string[],
+	script: string | undefined,
+	dir?: PackageDir,
+): string | undefined {
+if (candidates.length !== 1) return undefined;
+	const pkg = candidates[0] as string;
+	if (script !== undefined && !hasScript(cwd, pkg, script)) return undefined;
+	return packageFix(head, managerFlag, pkg, entry, dir);
+}
+
+/** 造一条包管理器条目的不可达记录：候选列表，加上可靠时才有的改法。 */
+function packagingItem(
+	cwd: string,
+	entry: string,
+	head: string,
+	managerFlag: string,
+	why: string,
+	candidates: string[],
+	dir?: PackageDir,
+): UnreachableEntry {
+	const item: UnreachableEntry = { entry, why };
+	if (candidates.length > 0) item.candidates = candidates;
+	const fix = packageFixFor(cwd, head, managerFlag, entry, candidates, scriptName(entry), dir);
+	if (fix) item.fix = fix;
+	return item;
 }
 
 /**
@@ -626,23 +784,51 @@ function packageFix(head: string, managerFlag: string, pkgDir: string, entry: st
 	return [head, managerFlag, pkgDir, ...rest].join(" ");
 }
 
+/** 一条包管理器条目在 cwd 下跑不跑得起来；跑不起来时给出记录。 */
+function packageManagerItem(
+	cwd: string,
+	entry: string,
+	head: string,
+	managerFlag: string,
+	candidates: string[],
+): UnreachableEntry | undefined {
+	const dir = packageDirFlag(entry);
+	if (dir) {
+		// 条目自己指了包目录：那个目录里没有 package.json 才算命中不了。
+		const target = isAbsolute(dir.path) ? dir.path : resolve(cwd, dir.path);
+		if (existsSync(join(target, "package.json"))) return undefined;
+		return packagingItem(cwd, entry, head, managerFlag, `no package.json in ${dir.path}`, candidates, dir);
+	}
+	// 不需要 manifest 的子命令（`pnpm store path`）与判不了的旗标（`pnpm -r test`）：不判。
+	if (hasExemptSubcommand(entry) || hasExemptFlag(entry)) return undefined;
+	// manifest 向上找：cwd 是子目录时，祖先有 package.json 就说明跑得起来。
+	if (manifestAbove(cwd, "package.json")) return undefined;
+	return packagingItem(cwd, entry, head, managerFlag, `no package.json in ${cwd} or its ancestors`, candidates);
+}
+
+/** 一条 cargo 条目在 cwd 下跑不跑得起来。 */
+function cargoItem(cwd: string, entry: string): UnreachableEntry | undefined {
+	// `cargo --manifest-path <p>` / `cargo -C <dir>` 指了别的包：判不了，不判。
+	if (hasExemptFlag(entry) || hasExemptSubcommand(entry)) return undefined;
+	if (manifestAbove(cwd, "Cargo.toml")) return undefined;
+	return { entry, why: `no Cargo.toml in ${cwd} or its ancestors` };
+}
+
 /**
  * 扫出永远命中不了的条目。
  *
  * 判据只有「这条命令在 cwd 下跑不起来」这一类事实：语法不匹配的条目不在这里（那条命令
  * 本来就会被拒，拒绝文案里会说）。判不出来的（正则、工具链里到处都有的程序名）一律放过。
+ *
+ * 「跑不起来」按工具自己的规矩算：manifest 向上找（cwd 与它的祖先），找不到才算。
  */
 export function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] {
 	const out: UnreachableEntry[] = [];
-	// 包目录只找一次：多个包管理器条目指向同一个候选目录，找一次就够。
-	let pkgDir: string | undefined;
-	let pkgDirKnown = false;
-	const findPkgDir = (): string | undefined => {
-		if (!pkgDirKnown) {
-			pkgDir = packageDirUnder(cwd);
-			pkgDirKnown = true;
-		}
-		return pkgDir;
+	// 候选目录只找一次：多个包管理器条目指向同一批候选目录，找一次就够。
+	let candidates: string[] | undefined;
+	const findCandidates = (): string[] => {
+		if (candidates === undefined) candidates = packageCandidatesUnder(cwd);
+		return candidates;
 	};
 	for (const raw of entries) {
 		const entry = raw.trim();
@@ -653,36 +839,19 @@ export function unreachableEntries(entries: string[], cwd: string): UnreachableE
 		if (!head) continue;
 		const managerFlag = PACKAGE_MANAGERS[head];
 		if (managerFlag !== undefined) {
-			const dir = packageDirFlag(entry);
-			if (dir) {
-				// 条目自己指了包目录：那个目录里没有 package.json 才算命中不了。
-				const target = isAbsolute(dir.path) ? dir.path : resolve(cwd, dir.path);
-				if (!existsSync(join(target, "package.json"))) {
-					const item: UnreachableEntry = { entry, why: `no package.json in ${dir.path}` };
-					const pkg = findPkgDir();
-					// 找不到带 package.json 的目录就不给改法：给一条跑不通的建议比不给更糟。
-					if (pkg) item.fix = packageFix(head, managerFlag, pkg, entry, dir);
-					out.push(item);
-				}
-				continue;
-			}
-			if (existsSync(join(cwd, "package.json"))) continue;
-			const item: UnreachableEntry = { entry, why: `no package.json in ${cwd}` };
-			const pkg = findPkgDir();
-			if (pkg) item.fix = packageFix(head, managerFlag, pkg, entry);
-			out.push(item);
+			const item = packageManagerItem(cwd, entry, head, managerFlag, findCandidates());
+			if (item) out.push(item);
 			continue;
 		}
 		if (head === "cargo") {
-			// `cargo --manifest-path <p>` 指了别的包：判不了，不判。
-			if (entry.includes("--manifest-path")) continue;
-			if (!existsSync(join(cwd, "Cargo.toml"))) {
-				out.push({ entry, why: `no Cargo.toml in ${cwd}` });
-			}
+			const item = cargoItem(cwd, entry);
+			if (item) out.push(item);
 			continue;
 		}
 		if (head.startsWith("/")) {
 			// 程序位写成绝对路径：这个可以静态核对。
+			// 构建产物目录里的文件不存在只说明还没构建，不说明这条授权命中不了。
+			if (isBuildArtifactPath(head)) continue;
 			if (!existsSync(head)) {
 				out.push({ entry, why: `${head} does not exist` });
 			}

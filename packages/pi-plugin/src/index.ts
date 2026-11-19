@@ -47,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule } from "./bash-match.ts";
+import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1611,6 +1611,45 @@ function reportHiddenGrants(dropped: string[]): void {
 	);
 }
 
+/** 沙箱注解的前缀：与 `sandbox-note.ts` 里的注解同一个标记。 */
+const SANDBOX_MARK = "[sandbox]";
+
+/**
+ * 候选提示：给不出可靠改法时，把候选列出来让父代理挑。
+ *
+ * 多个包时「这条授权原本指哪个包」只有父代理知道：随便挑一个再给一条 `--dir`
+ * 建议，会把命令指到别的包上。
+ */
+function candidateHint(item: UnreachableEntry): string {
+	if (item.fix) return "";
+	const list = item.candidates ?? [];
+	if (!list.length) return "";
+	return `; candidates: ${list.join(", ")} — pick the one this entry meant`;
+}
+
+/**
+ * 「命令被放行了，但它在 cwd 下跑不起来」的注解。
+ *
+ * 白名单里的命令进了沙箱，包管理器自己报 "No package.json found"：子代理只看到那句
+ * 原始报错，看不出这是配置问题（授权指向的地方没有 manifest）。这条注解把原因与改法
+ * 写进工具结果，父代理与子代理在同一条消息里看到。
+ *
+ * 只在失败时补：成功的输出里混一句「跑不起来」会误导。
+ */
+function unreachableCommandNote(text: string, command: string, rule: BashRule, cwd: string): string | undefined {
+	if (text.includes(SANDBOX_MARK)) return undefined;
+	const head = firstToken(leadingAssignments(command).rest);
+	if (!head) return undefined;
+	const bad = unreachableEntries(allEntries(rule), cwd).find((item) => firstToken(item.entry) === head);
+	if (!bad) return undefined;
+	const remedy = bad.fix
+		? `Use ${bad.fix} instead.`
+		: bad.candidates && bad.candidates.length
+			? `Candidates: ${bad.candidates.join(", ")} — pick the one this entry meant.`
+			: "The parent has to point this entry at a directory that has the manifest.";
+	return `${SANDBOX_MARK} this command ran, but "${bad.entry}" cannot work from ${cwd}: ${bad.why}. ${remedy}`;
+}
+
 /**
  * 把「授权写了却永远命中不了」这件事告诉父代理一次。
  *
@@ -1624,7 +1663,7 @@ function reportHiddenGrants(dropped: string[]): void {
 function reportUnreachableEntries(rule: BashRule, cwd: string): void {
 	const unreachable = unreachableEntries(allEntries(rule), cwd);
 	if (unreachable.length === 0) return;
-	const list = unreachable.map((item) => `${item.entry} (${item.why})`).join(", ");
+	const list = unreachable.map((item) => `${item.entry} (${item.why}${candidateHint(item)})`).join(", ");
 	// 改法按条目给：每条建议里带着自己的脚本名，读者能对上是哪一条。
 	const fixes = unreachable.map((item) => item.fix).filter((fix): fix is string => fix !== undefined);
 	const tail = fixes.length > 0 ? ` Use the package-relative form instead: ${fixes.join("; ")}` : "";
@@ -1656,7 +1695,8 @@ function headEntriesHint(rule: BashRule, command: string, cwd: string): string {
 	const details = siblings.map((entry) => {
 		const bad = unreachable.find((item) => item.entry === entry);
 		if (!bad) return entry;
-		return bad.fix ? `${entry} (${bad.why}; use instead: ${bad.fix})` : `${entry} (${bad.why})`;
+		const fix = bad.fix ? `; use instead: ${bad.fix}` : "";
+		return `${entry} (${bad.why}${candidateHint(bad)}${fix})`;
 	});
 	// 被拒的这条命令本身也可能跑不起来（同一个 cwd、同一个程序名）：那是子代理真正要改的
 	// 东西，所以它的改法也写进去。
@@ -1863,7 +1903,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	/** toolCallId → 这次 bash 的 spec 摘要（写清单、cwd、是否离线）。 */
 	const sandboxSpecs = new Map<
 		string,
-		{ write: string[]; cwd: string; offline: boolean; specFile?: string }
+		{ write: string[]; cwd: string; offline: boolean; command: string; specFile?: string }
 	>();
 	if (call.error) {
 		policy = denyAll(call.error);
@@ -2364,6 +2404,9 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			isBash && event.isError ? networkFailureNote(text, offline) : undefined,
 			isBash && event.isError ? cpuStallNote(text) : undefined,
 			isBash && ran && event.isError ? writeRefusalNote(text, ran.write, ran.cwd) : undefined,
+			isBash && ran && event.isError && policy.bash
+				? unreachableCommandNote(text, ran.command, policy.bash, ran.cwd)
+				: undefined,
 		].filter((hint): hint is string => Boolean(hint));
 		if (!hints.length) return undefined;
 		return { content: withHint(event.content, hints.join("\n\n")) };
@@ -2520,6 +2563,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			sandboxSpecs.set(event.toolCallId, {
 				write: spec.write,
 				cwd,
+				command,
 				offline: spec.offline,
 				specFile,
 			});

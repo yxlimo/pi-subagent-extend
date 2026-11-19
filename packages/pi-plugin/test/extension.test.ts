@@ -3879,6 +3879,8 @@ interface UnreachableEntry {
   entry: string
   why: string
   fix?: string
+  /** cwd 下面所有带 package.json 的目录：多个候选时给不出单一的改法。 */
+  candidates?: string[]
 }
 /** 调纯抽取函数；导出缺失时给一句可读的失败，而不是 TypeError。 */
 function pathCandidates(command: string): string[] {
@@ -4213,7 +4215,7 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-"))
   mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
-  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), "{}")
+  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }))
 
   const found = unreachableEntries(["pnpm run typecheck"], tree)
   assert.equal(found.length, 1, "an entry whose cwd has no package.json can never match")
@@ -4303,7 +4305,7 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 {
   const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-ui-"))
   mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
-  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), "{}")
+  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }))
   const h = await handler({
     cwd: tree,
     bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run typecheck"] } } }),
@@ -4672,6 +4674,96 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
   )
   h.restore()
   console.log("  ok   派单把 bash 写坏 = bash 被禁，不是静默沿用 profile 的整份白名单")
+}
+
+// 139. `npm`/`pnpm`/`yarn`/`bun` 与 `cargo` 都是**向上**找 manifest：cwd 是仓库里的子目录时，
+//      祖先目录里有 manifest 就说明这条命令跑得起来。只看 cwd 会把它误报成不可达，
+//      父代理于是去改一条本来没坏的配置 —— 误报比漏报糟。
+//      不需要 manifest 的子命令（`pnpm --version`、`pnpm store path`、`npm --help`）本来就能跑，不判。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-upward-"))
+	writeFileSync(join(tree, "package.json"), "{}")
+	writeFileSync(join(tree, "Cargo.toml"), "[package]\nname = \"x\"\n")
+	mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
+	const sub = join(tree, "packages", "pi-plugin")
+	assert.deepEqual(unreachableEntries(["pnpm test"], sub), [], "pnpm finds the manifest in an ancestor")
+	assert.deepEqual(unreachableEntries(["npm run build"], sub), [], "npm finds it the same way")
+	assert.deepEqual(unreachableEntries(["cargo test"], sub), [], "cargo finds Cargo.toml the same way")
+	// 祖先也没有 manifest：仍然判不可达。
+	const bare = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-nomanifest-"))
+	assert.equal(unreachableEntries(["pnpm test"], bare).length, 1, "without a manifest anywhere the entry cannot match")
+	assert.equal(unreachableEntries(["cargo test"], bare).length, 1, "the same holds for cargo")
+	// 本来就不需要 manifest 的子命令：不判。
+	assert.deepEqual(unreachableEntries(["pnpm --version"], bare), [], "pnpm --version needs no manifest")
+	assert.deepEqual(unreachableEntries(["pnpm store path"], bare), [], "pnpm store path needs no manifest")
+	assert.deepEqual(unreachableEntries(["npm --help"], bare), [], "npm --help needs no manifest")
+	rmSync(tree, { recursive: true, force: true })
+	rmSync(bare, { recursive: true, force: true })
+	console.log("  ok   manifest 向上找：子目录里跑得起来；不需要 manifest 的子命令不判")
+}
+
+// 140. 多个候选包时给不出可靠的改法：这条授权原本指哪个包只有父代理知道，随便挑一个
+//      再给一条 `--dir` 建议，会把命令指到别的包上。候选列表交回去让父代理挑。
+//      只有一个候选、但那个包里没有这个脚本时同样不给改法：pnpm 会自己报脚本不存在，
+//      那是「脚本不存在」，不是「授权不可达」。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-candidates-"))
+	mkdirSync(join(tree, "pkg-a"), { recursive: true })
+	mkdirSync(join(tree, "pkg-b"), { recursive: true })
+	writeFileSync(join(tree, "pkg-a", "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }))
+	writeFileSync(join(tree, "pkg-b", "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }))
+	const found = unreachableEntries(["pnpm run typecheck"], tree)
+	assert.equal(found.length, 1, "the entry is still reported: there is no manifest anywhere")
+	assert.equal(found[0].fix, undefined, "two candidates: no single fix is invented")
+	assert.deepEqual(found[0].candidates, ["pkg-a", "pkg-b"], "both candidates are listed instead")
+	// 一个候选，但那个包里没有这个脚本：不给改法。
+	const single = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-noscript-"))
+	mkdirSync(join(single, "pkg-a"), { recursive: true })
+	writeFileSync(join(single, "pkg-a", "package.json"), JSON.stringify({ scripts: { lint: "eslint ." } }))
+	const one = unreachableEntries(["pnpm run typecheck"], single)
+	assert.equal(one.length, 1, "the entry is reported")
+	assert.equal(one[0].fix, undefined, "no fix is invented when the candidate has no such script")
+	assert.deepEqual(one[0].candidates, ["pkg-a"], "the candidate is still listed")
+	rmSync(tree, { recursive: true, force: true })
+	rmSync(single, { recursive: true, force: true })
+	console.log("  ok   多个候选包时给候选列表不给改法；包里没有该脚本时也不给改法")
+}
+
+// 141. 绝对路径条目指向构建产物目录时，文件不存在只说明还没构建
+//      （`packages/helper/target/release/…` 要等一次 cargo build），不说明授权命中不了。
+//      指向普通目录的不存在路径仍然判不可达。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-artifact-"))
+	const artifact = join(tree, "packages", "helper", "target", "release", "pi-subagents-extend-helper")
+	const plain = join(tree, "packages", "helper", "bin", "pi-subagents-extend-helper")
+	assert.deepEqual(unreachableEntries([artifact], tree), [], "an artefact that does not exist yet is not unreachable")
+	assert.equal(unreachableEntries([plain], tree).length, 1, "a missing file outside an artefact directory is unreachable")
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   构建产物目录里的缺失文件不判不可达；普通缺失路径照旧判")
+}
+
+// 142. 白名单里的命令在 cwd 下跑不起来时，子代理只看到 pnpm 自己的报错，看不出这是配置问题。
+//      注解写进工具结果，把原因与改法一起给出；成功的命令不补（成功的输出里混注解会误导）。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-note-"))
+	mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
+	writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }))
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run typecheck"] } } }),
+	})
+	assert.equal(await h.call("bash", { command: "pnpm run typecheck" }), undefined, "the entry is allowlisted, so the command runs")
+	const failed = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const failure = String(failed?.content)
+	assert.match(failure, /\[sandbox\] this command ran/, "the failure says the command ran")
+	assert.match(failure, /cannot work from/, "and that the entry cannot work from this directory")
+	assert.match(failure, /--dir/, "and it carries the usable form")
+	assert.equal(await h.call("bash", { command: "pnpm run typecheck" }), undefined, "the same command runs again")
+	const succeeded = await h.result("bash", "typecheck: no errors", false)
+	assert.doesNotMatch(String(succeeded?.content), /this command ran/, "a successful command gets no such note")
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   跑不起来的命令在工具结果里拿到注解与改法；成功的命令不补注解")
 }
 
 
