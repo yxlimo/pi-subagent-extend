@@ -29,6 +29,8 @@
  *   Landlock 强制（内核 ABI 7 起），网络默认断（bash.network 可开）：断网时连
  *   UDP/DNS 一起断，靠私有网络命名空间 + 盖掉解析器套接字；可写面只有写范围覆盖到的路径
  *   （bash.writable 时）、git 真正要写的目录与 bash.writablePaths，防止用 shell 绕过范围去改文件
+ *   读面不收紧（工具链在 /nix/store，收窄读根会打死所有命令）；只读类命令另加一条路径引导：
+ *   参数里看起来像路径的 token 按真实路径判，落在范围外就被点名拒绝，并指回去用 read 工具
  * - powershell / codemode：一律拒绝（没有路径可判，能绕过范围）
  * - structured_output 与 allowTools 里列出的工具：放行（执行器类不可放行）
  * - 其余未知工具：拒绝
@@ -44,7 +46,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, parseBashRule, type BashRule } from "./bash-match.ts";
+import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, parseBashRule, pathCandidates, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1437,6 +1439,55 @@ export function privatisedDirs(cwd: string, scratch: string): string[] {
 }
 
 /**
+ * 只读类 bash 命令的参数路径可以指向的地方（工具链必读）。
+ *
+ * 沙箱的读面仍是 `/`：node、rg、cargo 全在 /nix/store，收窄读根会一次打死所有命令。所以这一层
+ * 不判「能不能读」，只在插件层把参数里的路径引到任务范围上 —— 引导，不是墙。
+ */
+const BASH_READ_EXEMPT_ROOTS = ["/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sys"];
+
+/** `path` 是否在 `root` 之下。按路径边界比，`/etc` 不覆盖 `/etc-other`。 */
+function underRoot(root: string, path: string): boolean {
+	if (path === root) return true;
+	return path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+/**
+ * 一条只读类命令的参数路径是否可放行。任一条成立即放行：在读范围内 / 在工具链豁免集内 /
+ * 在 cwd 或私有 scratch 之下 / 是沙箱默认可写的设备。
+ *
+ * 判不了的一律放行（`expandPath` 返回 undefined），这是刻意的方向：漏放只是少一次引导，误拒会
+ * 让一条本来能跑的命令死在插件层，而子代理多半把它读成「这台机器坏了」，然后换一百个写法再试。
+ */
+function bashPathArgAllowed(token: string, cwd: string, rule: BashRule, policy: Policy): boolean {
+	const expanded = expandPath(cwd, token);
+	if (!expanded) return true;
+	// 范围判定内部已经按真实路径比过软链，传绝对路径进去不影响它的语义。
+	if (matches(policy.regexps, cwd, expanded)) return true;
+	// 豁免集要按字面与真实两种形态各比一次：NixOS 上 /bin、/lib 是指向 /nix/store 的软链，
+	// 只比一种会让同一条 /bin/sh 有时豁免、有时不豁免。
+	const real = canonical(expanded);
+	if (BASH_READ_EXEMPT_ROOTS.some((root) => underRoot(root, expanded) || underRoot(root, real))) return true;
+	if (underRoot(canonical(cwd), real)) return true;
+	// scratch 用 privatisedDirs：cwd 落在 /tmp 之下时 helper 并不挂那个 tmpfs，那就不算
+	// 「命令自己的临时目录」，免得 /tmp 顺带把整片宿主机路径放进来。
+	for (const dir of privatisedDirs(cwd, scratchDir(cwd, rule))) {
+		if (underRoot(canonical(dir), real)) return true;
+	}
+	return SANDBOX_DEVICE_PATHS.some((device) => underRoot(device, real));
+}
+
+/**
+ * 只读类命令里第一个指向范围之外的路径参数；没有就返回 undefined。
+ *
+ * 只看读类命令：写类命令的文件面由 Landlock 与写范围管，而这里判的是「它在读什么」。候选的抽取
+ * 在 bash-match 里（纯字符串），放行判定留在这里，因为豁免集、scratch 与 canonical 都在这边。
+ */
+function foreignBashPath(command: string, cwd: string, rule: BashRule, policy: Policy): string | undefined {
+	return pathCandidates(command).find((token) => !bashPathArgAllowed(token, cwd, rule, policy));
+}
+
+/**
  * 把路径解析到「可比形态」，与 helper 的 `resolve_comparable` 对齐：对最深的**已存在**祖先做
  * realpath，再把不存在的尾巴原样接回去。两边都用 OS 的 realpath（Node 用 `.native`）并原样拼尾巴，
  * 因此对存在的路径与「祖先软链 + 缺失尾巴」两类结果逐字节一致。
@@ -2295,6 +2346,18 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				return bail(
 					`pi-subagents-extend: command not in the allowlist: "${preview([command])}" — allowed: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
 				);
+			}
+			// 只读类命令的参数路径：沙箱读面是 `/`（工具链要读 /nix/store），所以路径引导放在插件层。
+			// 位置在元字符与注入型赋值之后、依赖闸门之前：前两条决定「这条命令能不能跑」，
+			// 闸门判的是环境，这一条只是把参数里的路径引回范围，三者互不重叠。
+			if (match.access === "read") {
+				const foreign = foreignBashPath(command, cwd, rule, policy);
+				if (foreign) {
+					// 计入撞权限预算（bail）：父代理放宽范围就能解决，正是这一类。
+					return bail(
+						`pi-subagents-extend: "${foreign}" is outside the read scope — bash arguments may only point inside the scope (source: ${policy.source}). This is a path nudge, not a wall: use the read tool, or say what you need from it.\nRead scope: ${preview(policy.globs)}`,
+					);
+				}
 			}
 			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
 			const gate = dependencyGateVerdict(rule, command, match.access, cwd);
