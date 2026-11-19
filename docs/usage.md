@@ -124,13 +124,15 @@ once at session start, instead of letting the child discover it by running the c
   `Cargo.toml`. Both are looked up **from the working directory upwards** (eight levels at most),
   the way the tools themselves do it: a child running in `packages/pi-plugin/` still finds the
   repository's manifest, so such an entry is not reported. Entries that need no manifest at all
-  (`pnpm --version`, `pnpm store path`, `npm --help`, `pnpm dlx`) are not reported either, and
+  (`pnpm --version`, `pnpm store path`, `npm --help`, `pnpm dlx`, `bun test`) are not reported either, and
   neither are entries whose scope the working directory does not decide (`--manifest-path`, `-r`,
   `--filter`, cargo's `-C`). An entry that names its own package directory (`--dir`, `--prefix`)
   is judged against that directory, not against the working tree.
-  When the working directory was reached through a symlink, both the literal path and its resolved
-  real path are walked: the two chains of ancestors are not the same tree, and a command that does
-  run must not be reported as one that cannot.
+  The walk starts at the **resolved** path: a command runs in the process's physical working directory,
+  so a `package.json` that exists only on the literal path (an ancestor reached through a symlink) is one
+  the tool will never see. Walking both chains would judge such a dead grant reachable and stop reporting
+  it — the opposite of what this check is for. If the path cannot be resolved (it no longer exists), the
+  literal path is used so the judgement does not throw.
 - An absolute-path entry is checked against the file system. A path inside a build-artefact
   directory (`target`, `dist`, `build`, `out`, `node_modules`, `.git`, `.venv`, `__pycache__`) is
   not reported while the file is missing: it only needs one `cargo build`.
@@ -145,11 +147,12 @@ meant: that is a missing script, not a wrong directory, and moving to another pa
 
 The same fact reaches the child: when such a command runs and fails, the result is annotated with
 `[sandbox] this command ran, but "pnpm run typecheck" cannot work from <cwd>: …`, followed by the
-form to use or the candidate list (capped the same way). The entry it names is the one whose pattern
-**matches the command that ran**, not merely another entry that starts with the same program: the
-allowlist can hold a reachable `pnpm --dir packages/a run build` next to an unreachable
-`pnpm run typecheck`, and a failure of the first must not be explained with the second. The annotation
-is only added to a failed result.
+form to use or the candidate list (capped the same way). The entry it names is **the one the allowlist
+actually used to authorise the command**, not merely another entry that matches it: the allowlist can hold
+a reachable `pnpm --dir packages/a run build` next to an unreachable `pnpm run typecheck`, or next to a
+wider `pnpm` that would also match — a failure of the first must not be explained with either of the
+others. Once the list is truncated, the text says so (`only the first 8 are listed`): asking someone to
+pick from a list whose tail was cut is asking for a guess. The annotation is only added to a failed result.
 
 ## Recommended scenarios
 
@@ -319,10 +322,12 @@ for a dispatch even when its role carries a long allowlist — writing the empty
 "none of it", and it is the same refusal as having no `bash` field at all.
 
 `bash.allow` is the legacy single-list spelling of the same column as `bash.write` — a command in either
-one is authorised as a write — so emptying **either** of them empties both: `"allow": []` drops a
-`write` the profile supplied, exactly as `"write": []` drops an `allow`. Otherwise a write grant stays
-alive through whichever spelling the other layer happened to use, which is the same silent retention
-the empty list exists to prevent.
+one is authorised as a write — so they are merged **as one column, not as two keys**: emptying either of
+them empties the column, even when the other spelling is written in the same object. `"allow": []` with
+`"write": ["git status"]` therefore drops a `write` the profile supplied and keeps only `git status`, and
+the mirror image behaves identically. Key-wise merging got this wrong: the same intent ("keep only this
+one") produced two different columns depending on which spelling the *profile* had used, which is the same
+silent retention the empty list exists to prevent, only harder to see.
 
 A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the profile carries
 one (`review`'s report directory is that shape): the read-only intent would otherwise be cancelled by

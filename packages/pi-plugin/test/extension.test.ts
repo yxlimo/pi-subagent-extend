@@ -4914,6 +4914,172 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	console.log("  ok   allow:[] 同时清掉继承来的 write：两个方向都不再静默保留授权")
 }
 
+// 148. 注解该问的是「allowlist 用**哪一条**放行了这条命令」，不是「白名单里哪一条匹配得上」。
+//      白名单里有一条**比命令短**的宽条目（`pnpm`）时，可达命令失败仍会被安上那条宽条目的
+//      诊断 —— 它自己确实不可达，但它不是放行这条命令的那一条。判据与放行必须同源。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-grant-entry-"))
+	mkdirSync(join(tree, "packages", "a"), { recursive: true })
+	writeFileSync(join(tree, "packages", "a", "package.json"), JSON.stringify({ scripts: { build: "tsc -b" } }))
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({
+			"pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm --dir packages/a run build", "pnpm"] } },
+		}),
+	})
+	const exact = "pnpm --dir packages/a run build"
+	assert.equal(await h.call("bash", { command: exact }), undefined, "the reachable entry allowlists it")
+	const failedResult = await h.result("bash", "error TS1234: boom", true)
+	const failed = String(failedResult?.content)
+	assert.doesNotMatch(failed, /this command ran/, "the entry that granted it is reachable, so there is nothing to explain")
+	assert.doesNotMatch(failed, /"pnpm" cannot work/, "the shorter, wider entry is not pinned on this command")
+	// 对照组：跑的就是那条宽条目，注解必须点名它自己。
+	assert.equal(await h.call("bash", { command: "pnpm" }), undefined, "the wide entry allowlists the bare command")
+	const wideResult = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const wide = String(wideResult?.content)
+	assert.match(wide, /"pnpm" cannot work/, "running the wide entry still gets its own diagnosis")
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   注解问 allowlist 是哪条放行的；更短的宽条目不再顶替真正的授权")
+}
+
+// 149. 与 146 反方向：字面祖先里有 manifest、真实祖先里没有。工具走 `chdir` 后的**物理**路径，
+//      字面链上的那份 manifest 它永远看不到，所以这条授权**确实**跑不起来，必须被报出来。
+//      两条链取并集只会把死授权判成可达、永不报告 —— 正是这个判据要防的事。
+{
+	const repo = mkdtempSync(join(tmpdir(), "pi-subagents-extend-link-lexical-"))
+	writeFileSync(join(repo, "package.json"), "{}")
+	const outside = mkdtempSync(join(tmpdir(), "pi-subagents-extend-link-real-"))
+	mkdirSync(join(outside, "pkg", "deep", "sub"), { recursive: true })
+	symlinkSync(join(outside, "pkg", "deep"), join(repo, "link"))
+	assert.equal(
+		unreachableEntries(["pnpm test"], join(repo, "link", "sub")).length,
+		1,
+		"a manifest on the lexical chain only is invisible to the tool, so the entry stays unreachable",
+	)
+	rmSync(repo, { recursive: true, force: true })
+	rmSync(outside, { recursive: true, force: true })
+	console.log("  ok   只看物理祖先链：字面链上的 manifest 不把死授权洗成可达")
+}
+
+// 150. `write`/`allow` 是一列的两个拼法，所以「这一列只留 x」不能因为用的是哪个拼法而有两种结果。
+//      两边都写、其中一边为空时，这一列同样要从底层清空。
+{
+	const proj = join(workdir, "proj-both-columns")
+	mkdirSync(join(proj, ".pi"), { recursive: true })
+	mkdirSync(join(proj, "src"), { recursive: true })
+	writeFileSync(
+		join(proj, ".pi/subagent-bindings.json"),
+		JSON.stringify({ impl: { bash: { read: ["git status"], write: ["git commit"] } } }),
+	)
+	const h = await handler({
+		cwd: proj,
+		profile: "impl",
+		bindings: JSON.stringify({
+			"pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0, bash: { read: ["git status"], allow: [], write: ["git status"] } },
+		}),
+	})
+	assert.equal(await h.call("bash", { command: "git status" }), undefined, "the column's own entry still runs")
+	const denied = await h.call("bash", { command: "git commit -m x" })
+	assert.equal(denied?.block, true, "emptying one spelling clears the column even though the other spelling is written")
+	h.restore()
+
+	// 镜像：profile 用旧拼法，派单用新拼法清空。
+	const proj2 = join(workdir, "proj-both-columns-mirror")
+	mkdirSync(join(proj2, ".pi"), { recursive: true })
+	mkdirSync(join(proj2, "src"), { recursive: true })
+	writeFileSync(
+		join(proj2, ".pi/subagent-bindings.json"),
+		JSON.stringify({ impl: { bash: { read: ["git status"], allow: ["git commit"] } } }),
+	)
+	const h2 = await handler({
+		cwd: proj2,
+		profile: "impl",
+		bindings: JSON.stringify({
+			"pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0, bash: { read: ["git status"], write: [], allow: ["git status"] } },
+		}),
+	})
+	const denied2 = await h2.call("bash", { command: "git commit -m x" })
+	assert.equal(denied2?.block, true, "the mirror direction behaves the same")
+	h2.restore()
+	console.log("  ok   write 与 allow 合成一列：任一边显式为空都清空整列")
+}
+
+// 151. 候选被截断时得说一句「没列全」：否则文案让人去挑，而没显示出来的恰好是它挑不了的那几个。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-cap-note-"))
+	for (let i = 1; i <= 10; i += 1) {
+		const name = `pkg-${String(i).padStart(2, "0")}`
+		mkdirSync(join(tree, name), { recursive: true })
+		writeFileSync(join(tree, name, "package.json"), "{}")
+	}
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run build"] } } }),
+	})
+	const notices = h.ui.join("\n")
+	assert.match(notices, /only the first 8 are listed/, "the warning says the list is not complete")
+	assert.equal(await h.call("bash", { command: "pnpm run build" }), undefined, "the entry is allowlisted")
+	const noteResult = await h.result("bash", "ERR_PNPM_NO_PKG_MANIFEST  No package.json found", true)
+	const note = String(noteResult?.content)
+	assert.match(note, /only the first 8 are listed/, "and so does the tool-result note")
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   候选被截断时明说「只列了前 8 个」，不让人去挑看不见的")
+}
+
+// 152. 告警里的**条目**列表同样要封顶：十几条不可达条目一起展开，那条告警会长到没人读。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-entry-cap-"))
+	mkdirSync(join(tree, "pkg-a"), { recursive: true })
+	writeFileSync(join(tree, "pkg-a", "package.json"), "{}")
+	const entries = Array.from({ length: 10 }, (_, i) => `pnpm run e${String(i + 1).padStart(2, "0")}`)
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: entries } } }),
+	})
+	const notices = h.ui.join("\n")
+	assert.match(notices, /10 allowlist entries can never match/, "the count still says how many there really are")
+	assert.match(notices, /… and 2 more/, "but the list itself stops at eight")
+	assert.ok(!notices.includes("pnpm run e09") && !notices.includes("pnpm run e10"), `no entry past the cap is named, got: ${notices}`)
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   条目列表也封在 8 条，总数照实说")
+}
+
+// 153. 拒绝文案里的「同首 token 条目」提示走的是同一套候选渲染，所以也必须有截断说明
+//      （上一轮只给告警与注解补了用例，这条渲染点漏了）。
+{
+	const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-deny-cap-"))
+	for (let i = 1; i <= 10; i += 1) {
+		const name = `pkg-${String(i).padStart(2, "0")}`
+		mkdirSync(join(tree, name), { recursive: true })
+		writeFileSync(join(tree, name, "package.json"), "{}")
+	}
+	const h = await handler({
+		cwd: tree,
+		bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], maxDenies: 0, bash: { read: ["pnpm run build"] } } }),
+	})
+	const denied = await h.call("bash", { command: "pnpm run other" })
+	assert.equal(denied?.block, true, "a command outside the entry is refused")
+	const text = String(denied?.reason ?? "")
+	assert.match(text, /only the first 8 are listed/, `the refusal hint is capped with the same note, got: ${text}`)
+	h.restore()
+	rmSync(tree, { recursive: true, force: true })
+	console.log("  ok   拒绝提示里的候选也封顶并说明")
+}
+// 154. `bun test` 跑的是 bun 自带的运行器：不看 `scripts.test`，连 `package.json` 都不需要。
+//      把它判成「没有 manifest 所以永远命中不了」是误报（它在空目录里照样能跑），
+//      文案里那句「没有候选带这个脚本」对它就更是假话。
+{
+	const empty = mkdtempSync(join(tmpdir(), "pi-subagents-extend-bun-test-"))
+	assert.deepEqual(unreachableEntries(["bun test"], empty), [], "`bun test` runs without any manifest, so it is never reported")
+	assert.equal(unreachableEntries(["bun run test"], empty).length, 1, "but `bun run test` is a package script and still needs one")
+	rmSync(empty, { recursive: true, force: true })
+	console.log("  ok   bun test 不判不可达；bun run test 仍按脚本判")
+}
+
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")

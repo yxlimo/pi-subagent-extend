@@ -47,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, commandMatches, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
+import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1638,13 +1638,19 @@ function sentenceCase(text: string): string {
  * `scriptMissing` 有值时不许再写「挑一个」：那个包里连脚本都没有，挑它跑出来是
  * "Command not found"，改包目录治不好这件事。说清「没有候选带这个脚本」才是真事实。
  * 候选超过上限时截断（见 `listedJoin`）：几百个包路径拼进一条告警没人读得完。
+ * 候选被截断时得说一句「没列全」：否则文案让人去挑，而被要求挑的那几个恰好没显示出来。
  */
+
+/** 候选超过上限时的补充说明；没被截断时不给。 */
+function truncationNote(list: string[]): string {
+	return list.length > MAX_LISTED ? ` (only the first ${MAX_LISTED} are listed)` : "";
+}
 function candidateHint(item: UnreachableEntry): string {
 	if (item.fix) return "";
 	if (item.scriptMissing) return `; ${scriptMissingClause(item.scriptMissing)}`;
 	const list = item.candidates ?? [];
 	if (!list.length) return "";
-	return `; candidates: ${listedJoin(list)} — pick the one this entry meant`;
+	return `; candidates: ${listedJoin(list)} — pick the one this entry meant${truncationNote(list)}`;
 }
 
 /**
@@ -1662,7 +1668,7 @@ function remedyFor(item: UnreachableEntry): string {
 	if (item.fix) return `Use ${item.fix} instead.`;
 	if (item.scriptMissing) return `${sentenceCase(scriptMissingClause(item.scriptMissing))}.`;
 	if (item.candidates && item.candidates.length) {
-		return `Candidates: ${listedJoin(item.candidates)} — pick the one this entry meant.`;
+		return `Candidates: ${listedJoin(item.candidates)} — pick the one this entry meant${truncationNote(item.candidates)}.`;
 	}
 	return "The parent has to point this entry at a directory that has the manifest.";
 }
@@ -1678,14 +1684,13 @@ function remedyFor(item: UnreachableEntry): string {
  */
 function unreachableCommandNote(text: string, command: string, rule: BashRule, cwd: string): string | undefined {
 	if (text.includes(SANDBOX_MARK)) return undefined;
-	// 前置赋值先剥掉：匹配时剥得掉，这里也得剥。
-	const rest = leadingAssignments(command).rest;
-	if (!firstToken(rest)) return undefined;
-	// 按**条目**匹配实际跑的这条命令，不是按首 token 相比：白名单里只要有另一条同程序名的
-	// 不可达条目，任何可达命令失败时都会被安上那条无关条目的诊断与改法（跑的是
-	// `pnpm --dir packages/a run build`，却被注解成 `pnpm run typecheck` 不可用）。
-	// 首 token 相同只说明「同一个程序」，不说明「同一条授权」。
-	const bad = unreachableEntries(allEntries(rule), cwd).find((item) => commandMatches(item.entry, rest));
+	// 别在这里再推一遍匹配：直接问 allowlist「是**哪一条**放行这条命令的」，再查那一条是否
+	// 不可达。自己匹配会出错，而且已经错过两次：按首 token 比，会让同程序名的无关条目被点名；
+	// 在不可达子集里按 `allEntries` 顺序取第一条命中，会让一条**比命令更短**的宽条目（`pnpm`）
+	// 顶替真正放行它的那条。`classifyCommand` 用的是判定本身的规则（write 列优先、第一条命中），
+	// 所以它给的答案就是唯一的答案。
+	const granted = classifyCommand(rule, command);
+	const bad = granted === undefined ? undefined : unreachableEntries([granted.entry], cwd)[0];
 	if (!bad) return undefined;
 	const remedy = remedyFor(bad);
 	return `${SANDBOX_MARK} this command ran, but "${bad.entry}" cannot work from ${cwd}: ${bad.why}. ${remedy}`;
@@ -1704,9 +1709,12 @@ function unreachableCommandNote(text: string, command: string, rule: BashRule, c
 function reportUnreachableEntries(rule: BashRule, cwd: string): void {
 	const unreachable = unreachableEntries(allEntries(rule), cwd);
 	if (unreachable.length === 0) return;
-	const list = unreachable.map((item) => `${item.entry} (${item.why}${candidateHint(item)})`).join(", ");
+	// 条目本身也要封顶：一个大白名单里十几条 pnpm 条目同时不可达时，一条告警会长到没人读。
+	const shown = unreachable.slice(0, MAX_LISTED);
+	const hidden = unreachable.length - shown.length;
+	const list = `${shown.map((item) => `${item.entry} (${item.why}${candidateHint(item)})`).join(", ")}${hidden > 0 ? `, … and ${hidden} more` : ""}`;
 	// 改法按条目给：每条建议里带着自己的脚本名，读者能对上是哪一条。
-	const fixes = unreachable.map((item) => item.fix).filter((fix): fix is string => fix !== undefined);
+	const fixes = shown.map((item) => item.fix).filter((fix): fix is string => fix !== undefined);
 	const tail = fixes.length > 0 ? ` Use the package-relative form instead: ${fixes.join("; ")}` : "";
 	uiWarning?.(
 		`pi-subagents-extend: ${unreachable.length} allowlist entries can never match from ${cwd}: ${list}. Commands run in the session's working directory; there is no \`cd\`.${tail}`

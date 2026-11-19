@@ -438,7 +438,7 @@ export function mergeBashConfig(
  */
 function bashLists(bottom: Record<string, unknown>, top: Record<string, unknown>, reset: boolean): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
-	for (const key of ["read", "write", "allow"] as const) {
+	for (const key of ["read"] as const) {
 		// 「写了这一列」与「没写」不是一回事：写了空列表 = 该列就是空（清空底层的授权），
 		// 没写 = 继承（并集）。以前两者都算「加零条」，于是派单写 `read: []` 想禁用 bash，
 		// profile 的整列授权却原样留着 —— 静默保留授权是最坏的一种失败。
@@ -449,17 +449,23 @@ function bashLists(bottom: Record<string, unknown>, top: Record<string, unknown>
 		// 显式空列表同理：不写进结果，底层那份就又回来了。
 		if (list.length > 0 || reset || declared) out[key] = list;
 	}
-	// `allow` 是 write 的旧别名（`parseBashRule` 把两者接在一起），所以 `write` 被显式清空时
-	// 它也必须清空：否则 profile 用旧字段写下的授权会让「read:[] + write:[] = 禁用 bash」落空。
-	if (Object.hasOwn(top, "write") && stringList(top.write).length === 0 && !Object.hasOwn(top, "allow")) {
-		out.allow = [];
-	}
-	// 反向同理，而且更容易漏：`allow` 被显式清空时 `write` 也必须清空。`write` 没写进 out 时
-	// 底层那份（`...inherited` spread 过来的）会原样留着，于是派单写 `allow: []` 想收掉写授权，
-	// profile 用新字段 `bash.write` 写下的那几条却静默生效 —— 与上一条是同一个失败，方向相反。
-	if (Object.hasOwn(top, "allow") && stringList(top.allow).length === 0 && !Object.hasOwn(top, "write")) {
-		out.write = [];
-	}
+	// `write` 与 `allow` 是**同一列**的两个拼法（`parseBashRule` 把两者接在一起），所以合并也
+	// 必须按列、不能按键：不然「这一列只留 x」会有两种拼法、两种结果 —— 派单写
+	// `{ write: [], allow: ["x"] }` 能清掉 profile 的 `write`，而 `{ allow: [], write: ["x"] }`
+	// 却留着，差别只在 profile 当初用哪个拼法。按列处理：上层**任一**别名显式为空，
+	// 这一列就从底层清空；否则并集。
+	const writeDeclared = Object.hasOwn(top, "write");
+	const allowDeclared = Object.hasOwn(top, "allow");
+	const writeGiven = stringList(top.write);
+	const allowGiven = stringList(top.allow);
+	const emptied = (writeDeclared && writeGiven.length === 0) || (allowDeclared && allowGiven.length === 0);
+	const clears = reset || emptied;
+	const writeBase = clears ? [] : stringList(bottom.write);
+	const allowBase = clears ? [] : stringList(bottom.allow);
+	const writeList = unique([...writeBase, ...writeGiven]);
+	const allowList = unique([...allowBase, ...allowGiven]);
+	if (writeList.length > 0 || reset || writeDeclared || emptied) out.write = writeList;
+	if (allowList.length > 0 || reset || allowDeclared || emptied) out.allow = allowList;
 	// deny 是硬底线：两层并集，任何一层都拆不掉。
 	const deny = unique([...stringList(bottom.deny), ...stringList(top.deny)]);
 	if (deny.length > 0) out.deny = deny;
@@ -599,14 +605,10 @@ const MAX_MANIFEST_SEARCH_DEPTH = 8;
  * 祖先目录里有 manifest 就说明这条命令跑得起来。只看 cwd 会把它误判成不可达，
  * 而误报会让父代理去改一条本来没坏的配置。
  *
- * 上行要查**两条链**：字面路径（`resolve` 之后）与真实路径（`realpathSync`）。
- * cwd 是经软链进来的时候两条链不是同一棵树 —— 字面链的祖先里可能没有 manifest，
- * 真实链的祖先里有。只查字面链的后果是：一条**能跑**的命令被判成永远不可达，
- * 父代理于是被建议去改一条正确的授权。两条都查、任一命中即可达，代价是偶尔
- * 把一条本来不可达的条目放过（漏报比误报便宜）。
+ * 起点是**物理**路径（见 `searchRoots`）：工具看到的是 `process.cwd()`，软链已经被解开。
+ * 依据是「工具自己的规矩」，不是「把可能的路径都试一遍」——后者只会多报可达，
+ * 把一条死授权藏起来，而那正是这个判据要防的事。
  *
- * 与 `resolveComparable` 那批代码同一个教训：Node 自实现的 realpath 与操作系统的
- * realpath 会分叉，所以这里不相信任何一条单独的结论。
  */
 function manifestAbove(cwd: string, manifest: string): string | undefined {
 	for (const root of searchRoots(cwd)) {
@@ -616,17 +618,21 @@ function manifestAbove(cwd: string, manifest: string): string | undefined {
 	return undefined;
 }
 
-/** 上行的起点：字面路径，以及（解得出时）真实路径。 */
+/**
+ * 上行的起点：**物理**路径优先。
+ *
+ * 工具看到的是 `process.cwd()`，它已经把软链解开（内核在 `chdir` 时解析），沙箱 helper
+ * 也是 `chdir(spec.cwd)` 起的进程。所以字面链上命中的 manifest 工具**永远看不到**：
+ * 把两条链取并集，只会把一条真的跑不起来的授权判成可达、从此不再报告 —— 而这正是
+ * 这个判据要防的事。`realpathSync` 失败（cwd 已不存在或没权限）时才退回字面路径：
+ * 判定不该因为读不到目录而抛。
+ */
 function searchRoots(cwd: string): string[] {
-	const lexical = resolve(cwd);
-	let real: string | undefined;
 	try {
-		real = realpathSync(cwd);
+		return [realpathSync(cwd)];
 	} catch {
-		// cwd 已经不存在（或没有权限）时退回字面路径：判定本来就不该因为读不到目录而抛。
-		real = undefined;
+		return [resolve(cwd)];
 	}
-	return real === undefined || real === lexical ? [lexical] : [lexical, real];
 }
 
 /** 一条链上的上行查找。 */
@@ -709,7 +715,7 @@ function isBuildArtifactPath(path: string): boolean {
 }
 
 /** 一条文案里最多列几项。monorepo 下候选包可能有几百个，一条告警不该被它撑爆。 */
-const MAX_LISTED = 8;
+export const MAX_LISTED = 8;
 
 /**
  * 把一组路径拼进一条文案，超过上限就截断并说还剩几条。
@@ -773,7 +779,10 @@ function scriptName(entry: string): string | undefined {
 	const words = tokens(entry);
 	if (words.length < 2) return undefined;
 	if (words[1] === "run") return words[2];
-	if (words[1] === "test") return "test";
+	// `bun test` 跑的是 bun 自带的测试运行器，不看 `scripts.test`，连 package.json 都不需要；
+	// 把它当成「包里的 test 脚本」会让文案说一句假话（"no candidate has a `test` script"）。
+	// 只有 `bun run test` 才是脚本。
+	if (words[1] === "test") return words[0] === "bun" ? undefined : "test";
 	return undefined;
 }
 
@@ -872,6 +881,9 @@ function packageManagerItem(
 		if (existsSync(join(target, "package.json"))) return undefined;
 		return packagingItem(cwd, entry, head, managerFlag, `no package.json in ${dir.path}`, candidates, dir);
 	}
+	// `bun test` 跑的是 bun 自带的测试运行器：不看 `scripts.test`，也不需要 `package.json`。
+	// 把它判成「没有 manifest 所以跑不起来」是误报 —— 它在空目录里照样能跑。
+	if (head === "bun" && tokens(entry)[1] === "test") return undefined;
 	// 不需要 manifest 的子命令（`pnpm store path`）与判不了的旗标（`pnpm -r test`）：不判。
 	if (hasExemptSubcommand(entry) || hasExemptFlag(entry)) return undefined;
 	// manifest 向上找：cwd 是子目录时，祖先有 package.json 就说明跑得起来。
