@@ -114,7 +114,7 @@ subagent(
 | `maxReads` | `number` | Optional. Upper bound on successful `read` calls; once it is exceeded, every read is refused |
 | `maxWriteDenies` | `number` | Optional. Write refusals have their own budget: defaults to 2, `0` disables. Kept apart from `maxDenies` because repeatedly trying to write is a usage mistake, answered by delivering a report |
 | `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way. It cannot widen a path tool: file tools are judged by the scope first, so listing a write tool here does not free it from `writeScope` |
-| `tools` | `object` | Optional. Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `path` names the argument that carries the target; `false` means the tool has no path argument, and a write tool declared that way is always refused. Omit `path` and the argument name is read from the tool's own schema |
+| `tools` | `object` | Optional. Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `path` names the argument that carries the target; `false` means the tool has no path argument, and a write tool declared that way is always refused. Omit `path` and the argument name is read from the tool's own schema. `access` is `read` or `write`; a tool that touches a **second** file (`copy`/`move`) takes `transferSource: "read"\|"write"` as well — `copy`'s source is only read, `move`'s is written to, and an undeclared transfer tool is judged as a write on both sides |
 
 Glob rules: `**` matches any number of levels (including zero), `*` matches characters within a single level, `?` matches a single character.
 
@@ -166,6 +166,8 @@ Everything else is still refused. A plain `echo x > tmp.txt` in the working dire
 - the directory goes in `writeScope` if the subagent may also write it by hand (a review writing its report);
 - it goes in `bash.writablePaths` if only the toolchain needs it;
 - or point the tool at a temporary directory: the sandbox already makes it writable **and** mounts an empty tmpfs over it, so what lands there is scratch, not state. That is `/tmp` and also the command's own temp directory — the host's `TMPDIR`, or the one pinned through `bash.env`: `"env": { "COVERAGE_DIR": "/tmp/coverage" }`.
+
+A grant **inside** one of those mount points is a mistake, and it is dropped rather than obeyed: the private tmpfs is mounted over `/tmp` (and over a `bash.env.TMPDIR`), so a directory under it does not exist in the child as it does on the host, and every command that needs it would fail with "spec path does not exist". The extension drops such a grant when it builds the sandbox spec and prints one warning naming the path, instead of writing a spec the helper will refuse. The helper refuses it too (exit `77`) if one reaches it anyway. The two ways out are the ones above: let the tool write under the tmpfs (it is already writable, and the contents are scratch), or move the directory out from under `/tmp`, for instance `bash.env.TMPDIR: "/var/tmp/pi"`.
 
 Entries come in two forms:
 

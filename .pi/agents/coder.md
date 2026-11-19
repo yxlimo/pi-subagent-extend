@@ -42,15 +42,19 @@ You are confined by that extension right now, through the project profile `.pi/s
 ## Tests
 
 The suites are TypeScript and are type checked with the source.
-
 ```bash
-mkdir -p packages/pi-plugin/bin
-cp /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/bin/pi-subagents-extend-helper packages/pi-plugin/bin/
-cd packages/pi-plugin && node test/extension.test.ts
+cd packages/pi-plugin && pnpm test    # cargo builds the helper into target/, then lint + the four suites
+pnpm run typecheck
+cargo test --manifest-path ../helper/Cargo.toml   # the helper's own tests
 ```
 
-In a worktree there is no `node_modules`, so `tsc` and `eslint` cannot run; do not attempt them, and do
-not run `pnpm install`. The parent runs those.
+Do not copy a helper binary into `packages/pi-plugin/bin/`. That file is the one a live session is
+executing; overwriting it fails with `ETXTBSY`, and the tests do not need it — they resolve the
+helper from cargo's `target/release/` first. `pnpm run build:helper` is the only thing that writes
+`bin/`, and the parent runs it deliberately.
+
+`node test/extension.test.ts` alone works too and skips the type check; the `pretest` in `pnpm test`
+only builds the helper, it does not touch `bin/`.
 
 How to add a case:
 
