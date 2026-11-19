@@ -408,11 +408,26 @@ export default profile("writer");
 }
 ```
 
-Merging rules — per field, never one layer over another:
+Merging runs over three layers, and the direction is one way: `default` → role → dispatch. `default` is
+the **floor** of every role in that file, the role's layer is appended to it, and the call's
+`extensionBindings` are appended to the result. A role therefore inherits `default` rather than
+restating it, and cannot be narrowed by writing a shorter list — narrowing is `reset: true`.
+
+| Layer | Source | Relation to the layer below |
+| --- | --- | --- |
+| `default` | the `"default"` key of `.pi/subagent-bindings.json` | the floor for every role |
+| role | that role's own key in the same file | appends to `default` |
+| dispatch | `extensionBindings` of one call | appends to the role |
+
+Rules per field — never one layer over another:
 
 - **union** — `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths`. The base
   entries come first and the call's are appended, so a dispatch adds an authorisation instead of
-  restating the list, and cannot drop one it did not name.
+  restating the list, and cannot drop one it did not name. For `bash.read` / `bash.write` /
+  `bash.allow`, an **explicitly empty array in the upper layer** is a different instruction: it
+  empties that column rather than adding nothing. Reading `"read": []` as "add zero entries" left
+  the lower layer's whole allowlist in place, so a dispatch that meant to close bash kept the grant.
+  `allowTools` and `bash.writablePaths` have no empty-list form; `reset: true` clears the former.
 - **union, hard floor** — `bash.deny`: **no caller can relax it**. That is what makes a project's
   structural prohibition different from an ordinary allowlist.
 - **replaced** — `scope`, `writeScope`. A task range has to be able to be *narrower* than the role
@@ -421,9 +436,20 @@ Merging rules — per field, never one layer over another:
 - **the call wins** — the remaining scalars and switches (`readOnly`, `maxReads`, `maxDenies`,
   `maxWriteDenies`, `tools`, `probe`, `bash.writable`, `bash.network`, `bash.dependencyGate`,
   `bash.cpuStallSeconds`, `bash.scratchPaths`); `bash.env` merges per variable name.
-- `bash.reset: true` in the call drops the profile's `bash.read` / `bash.write` / `bash.allow` before
-  the call's own lists are applied — "only these entries this time". `bash.deny` is still unioned, so
-  narrowing an allowlist never lifts a prohibition.
+- **`readOnly: true` with no `writeScope` in the same layer** empties the merged `writeScope`. Without
+  that, a profile's `writeScope` (the `review` role's report directory is the shape) cancelled a
+  dispatch's read-only intent, because the merged config then had an "explicit" write scope and
+  explicit scope wins. Naming a `writeScope` in the same layer still expresses "read-only plus this
+  one directory".
+- `reset: true` on a layer drops what it inherited — `bash.read` / `bash.write` / `bash.allow` **and**
+  `allowTools` — before the layer's own lists are applied: "only these entries this time". A dispatch
+  uses it to be tighter than its role, and the role layer uses it to be tighter than `default`, which
+  would otherwise be a floor the role could never leave. `bash.deny` is still unioned, so narrowing an
+  allowlist never lifts a prohibition. `bash.reset: true` is the same for the bash columns alone (no
+  `allowTools`) and stays for callers that only mean the commands.
+- A `bash` written as anything but an object is not ignored: the merged `bash` is empty, so bash is
+  refused. Field-by-field merging made a broken layer fall through to the lower layer's whole
+  allowlist — a typo kept every grant, the opposite of what a broken grant should do.
 - The merged policy reports both layers in `source:` (`profile impl
   (.pi/subagent-bindings.json) + extensionBindings`); a refusal is the one place the model reads that
   string, and the entry that answered may live in either file.

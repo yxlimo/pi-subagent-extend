@@ -389,27 +389,34 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
  * 派单反而不能放宽权限。
  *
  * - 白名单（read / write / allow）取并集：调用方只能往上加，不能悄悄删掉底层已放行的。
+ *   但「写了这一列」与「没写」不是一回事：写了空列表 = 该列就是空（清空底层的授权），
+ *   没写 = 继承。否则 `read: []` 被当成「加零条」，派单想禁用 bash 却静默保留了整列授权。
  * - deny 取并集，且是硬底线：任何一层都拆不掉它（拆掉禁令与放宽权限是两件事）。
  * - 其余字段调用方优先（写了的以调用方为准，没写的沿用底层的值）：network、writable、
  *   gitExcludes、dependencyGate、cpuStallSeconds、scratchPaths。
  * - writablePaths 取并集（多一条是保住底层已经给的授权，不是放宽）；env 按键合并，
  *   同名键以调用方为准。
  *
- * `reset: true`（只可能出现在调用方这一层）表示「这次只给这几条」：先把底下那层的
- * read / write / allow 丢掉，再套用调用方的白名单。deny 仍然并集 —— 收窄白名单不等于
- * 拆掉项目禁令。
+ * `reset: true`（只可能出现在调用方这一层，或由调用方的顶层 `reset: true` 传进来）表示
+ * 「这次只给这几条」：先把底下那层的 read / write / allow 丢掉，再套用调用方的白名单。
+ * deny 仍然并集 —— 收窄白名单不等于拆掉项目禁令。
  *
  * 纯函数：不改传入的两个对象，返回新对象。`reset` 键不会进结果，它是控制合并的，
  * 不是给 `parseBashRule` 的字段。
  */
-export function mergeBashConfig(base: unknown, over: unknown): Record<string, unknown> | undefined {
+export function mergeBashConfig(
+	base: unknown,
+	over: unknown,
+	/** 调用方顶层写了 `reset: true`：那一层「只给这些」也覆盖 bash 白名单。 */
+	forceReset = false,
+): Record<string, unknown> | undefined {
 	const lower = configObject(base);
 	const upper = configObject(over);
 	if (!lower && !upper) return undefined;
 	const bottom = lower ?? {};
 	const top = upper ?? {};
 	// reset 只认调用方这一层：它的意思是「丢掉下面那层的白名单」，底层自己写没有意义。
-	const reset = top.reset === true;
+	const reset = forceReset || top.reset === true;
 	// 底层整体搬过来（`reset` 不搬：它是控制合并的，不是给 parseBashRule 的字段）。
 	const inherited: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(bottom)) {
@@ -432,9 +439,20 @@ export function mergeBashConfig(base: unknown, over: unknown): Record<string, un
 function bashLists(bottom: Record<string, unknown>, top: Record<string, unknown>, reset: boolean): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const key of ["read", "write", "allow"] as const) {
-		const list = unique([...(reset ? [] : stringList(bottom[key])), ...stringList(top[key])]);
+		// 「写了这一列」与「没写」不是一回事：写了空列表 = 该列就是空（清空底层的授权），
+		// 没写 = 继承（并集）。以前两者都算「加零条」，于是派单写 `read: []` 想禁用 bash，
+		// profile 的整列授权却原样留着 —— 静默保留授权是最坏的一种失败。
+		const declared = Object.hasOwn(top, key);
+		const given = stringList(top[key]);
+		const list = declared && given.length === 0 ? [] : unique([...(reset ? [] : stringList(bottom[key])), ...given]);
 		// reset 时即使为空也要写进去：否则底层那份白名单还留在结果里，reset 就白写了。
-		if (list.length > 0 || reset) out[key] = list;
+		// 显式空列表同理：不写进结果，底层那份就又回来了。
+		if (list.length > 0 || reset || declared) out[key] = list;
+	}
+	// `allow` 是 write 的旧别名（`parseBashRule` 把两者接在一起），所以 `write` 被显式清空时
+	// 它也必须清空：否则 profile 用旧字段写下的授权会让「read:[] + write:[] = 禁用 bash」落空。
+	if (Object.hasOwn(top, "write") && stringList(top.write).length === 0 && !Object.hasOwn(top, "allow")) {
+		out.allow = [];
 	}
 	// deny 是硬底线：两层并集，任何一层都拆不掉。
 	const deny = unique([...stringList(bottom.deny), ...stringList(top.deny)]);
