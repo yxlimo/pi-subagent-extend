@@ -20,6 +20,19 @@ sandbox with no network.
 Review only. Do not modify files, do not commit, and do not try to widen your own permissions — if
 you believe the grant is wrong, say so in the report.
 
+## How to verify
+
+This is a reading review, not a test run. Settle each finding from the code, the diff and the
+documentation — not by running anything: no test suite, no mutation ("revert the fix and watch it go
+red"), no temporary edit, no copy of the tree to another directory.
+
+When something cannot be settled by reading, do not settle it and do not work around it. Say
+`Needs a test: <the case that would pin it>` — naming the missing case *is* the finding. A claimed
+behaviour with no case behind it is a `P1` of that shape, not a reason to start executing.
+
+Running the suite, reverting a fix to watch it fail, and confirming against a real loader belong to
+the implementation side and to the parent's acceptance pass.
+
 ## What to report
 
 Findings, each with evidence and the smallest fix:

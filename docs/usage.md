@@ -54,6 +54,65 @@ subagent(
 | `bash.dependencyGate` | `boolean \| string[]` | Defaults to `true`. Before a write-classified command or a package-manager invocation runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also show an install — `node_modules/.bin`, or `.pnp.cjs` for a Yarn PnP project; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. An array lists directory prefixes to skip, for a lockfile nobody installs — a `fixtures/` sample, a vendored example: a plain path covers that directory and everything below it (the same reading as a `scope` entry), resolved against the working directory, but the match stops at a path boundary, so `fixtures` does not cover `fixtures-old`. Entries are literal paths, not globs; a glob is named in the refusal rather than silently matching nothing. `[]` skips nothing, the same as `true`. `false` turns the check off. |
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. When set, the helper samples the CPU time of the whole command tree — it is PID 1 of a private PID namespace, so the tree is what `/proc` shows — and kills it once the tree has used **no** CPU for that many seconds, printing why and exiting `79`. The point is to separate a deadlock from a slow build, which a wall-clock limit cannot: a compiling tree gains CPU in every sample, a tree waiting on a lock, a socket, or an orphaned child gains none. Two limits to know before turning it on: a command that deliberately waits (`sleep 300`, a backoff loop) also uses no CPU and will be killed, and the helper cannot see output because stdio is inherited rather than piped, so "no output" cannot corroborate the reading. That is why nothing is armed by default — pick a number well above your slowest quiet gap between CPU bursts. The kill is annotated with `[sandbox]` in the result, saying a retry will stall the same way. |
 
+### What bash may read
+
+The sandbox's read face stays open: `node`, `rg`, `cargo` and the rest live in `/nix/store`, so narrowing
+the read root would kill every command at once. Reads are the file tools' job — `read`, `grep`, `find`
+and `ls` are judged against `scope` before they run.
+
+One nudge applies on top, for **read-class** commands only (the `bash.read` column), and it is judged
+against the **working tree**: the directory the command runs in, which is the session's cwd. A token
+qualifies as a path when it contains a slash and consists only of path characters — `src/index.ts`,
+`./a.ts`, `../outside/x` and `~/x` all do, while `foo`, `--flag` and `@scope/pkg` do not. It is resolved
+(symlinks by their real target) and, when that real path lands outside the working tree, the command is
+refused with the path named:
+
+```text
+pi-subagents-extend: "/home/someone/notes" is outside the working tree (source: …). This is a path nudge,
+not a wall: the command runs in /home/shay/extensions/pi-subagents-extend, and a file outside it is not
+yours to read — say what you need from it instead.
+Working tree: /home/shay/extensions/pi-subagents-extend
+```
+
+The point is the shape of a wasted run, measured: a child hunting for an API inside a 258 MB package with
+`rg -a -o '<pattern>' /nix/store/…` produced empty output for every pattern that did not exist, read that
+as "no match", and burned half an hour on 140 more guesses. Naming the path ends that in one turn — and
+that command is refused now, because a toolchain directory is where a child goes looking, not what the
+task is about.
+
+It is a nudge, so it is deliberately loose, and the looseness is the design, not an oversight: a token
+that could be something else — quoted, containing `$VAR` or a backtick, a glob, a URL, a colon — is
+skipped rather than guessed at, and nothing is checked past the first 32 candidates or in tokens over 200
+characters. These count as allowed:
+
+| Command | Why it passes |
+| --- | --- |
+| `/nix/store/…/bin/rg -n pattern` | the program token is exempt: it is the tool being run, not a file of the task's |
+| `cat /etc/passwd` | `/etc`, `/proc`, `/dev` and `/sys` are the system's, not the task's |
+| `node -e 'require("/nix/store/x")'` | the token is quoted, so it is skipped |
+| `rg "$DIR"` | dynamic, so the token is skipped |
+| `rg foo https://example.com/a` | a URL, so skipped |
+| `rg foo /tmp/out.md` | the command's private scratch directory, unless the session's cwd is itself under it — then the helper does not privatise that directory and it is an ordinary host path |
+| `rg -n ./src/auth/login.ts` | inside the working tree, so the check passes — the same holds for the bare spelling `src/auth/login.ts`, which is a candidate too since it contains a slash |
+| `rg foo escape-link/x` | **refused** when `escape-link` is a symlink to `/home/other`: the relative spelling is not an escape route, the real path is what counts |
+
+A quoted token is skipped whole, so `rg foo "/home/other/x"` runs: the quoting is the reason, not what
+the argument means. One gap is worth knowing: `~user/x` is not expanded — only `~/` is — so the token
+lands under the working tree and passes, while `~/x` does expand and points at the home directory, which
+is outside the tree.
+
+Refusals here are charged to `maxDenies`, like the other refusals a wider grant would answer, and the
+message says which way out applies: use `read` when the read scope covers the file, or say what is
+needed from a file outside the tree.
+
+**`scope` and the working tree are two different contracts.** `scope` is the authorisation for the
+**file tools** — `read`, `grep`, `find`, `ls`, `edit`, `write` — and it can be much narrower than the
+tree: `scope: ["src/auth/**"]` is the normal shape. The **working tree** is where a command runs, and it
+is what this nudge judges, because a build or a test run has to read the whole tree: `cargo build` reads
+`Cargo.toml`, `pnpm` reads the root `package.json`. Judging a bash argument by `scope` would refuse
+those ordinary commands. So the two answer different questions: `scope` answers *may this file tool read
+this file*, the working tree answers *may this command point at this path*.
+
 ## Recommended scenarios
 
 ### A reviewer that may write exactly one report
