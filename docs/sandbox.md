@@ -42,11 +42,12 @@ The command runs under a supervising PID 1 (see below), never as PID 1 itself.
 
 ## Files
 
-A Landlock ruleset. `/` stays readable and executable, so `cat` can read outside the scope as
+A Landlock ruleset. `/` stays readable and executable, so `cat` can read outside the tree as
 noted in [architecture](architecture.md#boundaries). That is deliberate, and the nudge that comes with
 it is separate from the ruleset: before a read-class command starts, the extension checks its path
-arguments (see [usage](usage.md#what-bash-may-read)), and a command that gets past that nudge can still
-read anything. Only these are writable:
+arguments against the **working tree** — the directory the command runs in, not the read scope (see
+[usage](usage.md#what-bash-may-read)) — and a command that gets past that nudge can still read anything.
+Only these are writable:
 
 - the paths the write scope **covers**, when `bash.writable` is set. Landlock can only grant, never
 exclude, and a rule on a directory grants everything beneath it — so a scope entry opens a directory

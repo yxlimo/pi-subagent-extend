@@ -450,12 +450,14 @@ register them.
   src/link/evil` where `src/link -> /elsewhere` was allowed and landed outside.
 - Reads are not confined inside the sandbox: a test suite must read the tree, its `node_modules` and
   its configuration, and the toolchain lives in `/nix/store`. Read confinement stays with `read`,
-  `grep` and `find`. One nudge runs on top of the sandbox, for read-class commands only: a path
-  argument that contains a slash and nothing but path characters is resolved (symlinks by their real
-  target) and refused when it lands outside the scope, naming the path and pointing at the `read`
-  tool — see [usage](usage.md#what-bash-may-read). It is a nudge, so it is loose by construction:
-  quoted arguments, `$VAR`, globs, URLs and bare words are skipped, and the sandbox still reads
-  anything the command asks for.
+  `grep` and `find`, which are judged by `scope`. One nudge runs on top of the sandbox, for read-class
+  commands only: a path argument that contains a slash and nothing but path characters is resolved
+  (symlinks by their real target) and refused when it lands outside the **working tree** — the directory
+  the command runs in, not the read scope — naming the path and saying what the way out is — see
+  [usage](usage.md#what-bash-may-read). The toolchain directories are not exempt: the program being run
+  is, because that is the tool rather than a file of the task's. It is a nudge, so it is loose by
+  construction: quoted arguments, `$VAR`, globs, URLs and bare words are skipped, and the sandbox still
+  reads anything the command asks for.
 - The extension intercepts at `tool_call`. A subagent inherits the parent's environment and
   credentials, so this guards against overstepping, not against malice.
 - Nested subagents do not inherit bindings: an unscoped nested subagent runs without this

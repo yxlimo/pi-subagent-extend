@@ -153,10 +153,21 @@ const MAX_PATH_CANDIDATES = 32;
 /** 超长 token 直接跳过：那多半不是路径，白做一次 realpath。 */
 const MAX_PATH_TOKEN_LENGTH = 200;
 
-/** 从一条命令里抽出「看起来像路径」的参数候选；纯抽取，不做授权判断。宁可漏放，不许误拒。 */
+/**
+ * 从一条命令里抽出「看起来像路径」的参数候选；纯抽取，不做授权判断。宁可漏放，不许误拒。
+ *
+ * 第一个 token 是程序位，它本身是路径形态时**不算**参数候选：可执行文件由 bash 通过 PATH 解析，
+ * 根本不进参数表；只有把程序写成绝对路径（`/nix/store/…/bin/foo args`）时它才出现在命令开头，
+ * 而那是「正在执行的工具」，不是在工具链目录里翻东西。路径形态的四种写法（绝对路径、`~/`、`./`、
+ * `../`）都带斜杠，一条斜杠判据就覆盖了全部。
+ */
 export function pathCandidates(command: string): string[] {
 	const out: string[] = [];
-	for (const token of shellTokens(command)) {
+	const words = shellTokens(command);
+	for (let i = 0; i < words.length; i += 1) {
+		const token = words[i] as string;
+		// 程序位是路径形态时跳过：它是要执行的工具，不是这条命令的参数。
+		if (i === 0 && token.includes("/")) continue;
 		if (out.length >= MAX_PATH_CANDIDATES) break;
 		if (token.length > MAX_PATH_TOKEN_LENGTH) continue;
 		if (PATH_TOKEN_SKIP.some((ch) => token.includes(ch))) continue;

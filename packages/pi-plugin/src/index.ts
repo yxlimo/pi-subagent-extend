@@ -1439,12 +1439,17 @@ export function privatisedDirs(cwd: string, scratch: string): string[] {
 }
 
 /**
- * 只读类 bash 命令的参数路径可以指向的地方（工具链必读）。
+ * 只读类 bash 命令的参数路径可以指向、且无需再解释的系统目录：设备与系统信息，不是工具。
  *
  * 沙箱的读面仍是 `/`：node、rg、cargo 全在 /nix/store，收窄读根会一次打死所有命令。所以这一层
  * 不判「能不能读」，只在插件层把参数里的路径引到任务范围上 —— 引导，不是墙。
+ *
+ * 刻意**不**含 /nix/store、/usr、/bin、/sbin、/lib、/lib64：工具住在这些目录里，不代表命令的参数
+ * 会包含它们 —— 程序位由 bash 经 PATH 解析，根本不进参数表（见 bash-match 的 `pathCandidates`）。
+ * 参数里真的出现 store 或系统二进制目录，就是子代理在工具链里翻东西，正是要把路径引回范围的场景
+ * （实测：一个子代理在 258MB 的包体里 rg 了 140 次，全部为空）。
  */
-const BASH_READ_EXEMPT_ROOTS = ["/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc", "/dev", "/sys"];
+const BASH_READ_EXEMPT_ROOTS = ["/etc", "/proc", "/dev", "/sys"];
 
 /** `path` 是否在 `root` 之下。按路径边界比，`/etc` 不覆盖 `/etc-other`。 */
 function underRoot(root: string, path: string): boolean {
@@ -1453,26 +1458,32 @@ function underRoot(root: string, path: string): boolean {
 }
 
 /**
- * 一条只读类命令的参数路径是否可放行。任一条成立即放行：在读范围内 / 在工具链豁免集内 /
+ * 一条只读类命令的参数路径是否可放行。任一条成立即放行：在工作树内 / 在设备与系统信息豁免集内 /
  * 在 cwd 或私有 scratch 之下 / 是沙箱默认可写的设备。
  *
- * 判不了的一律放行（`expandPath` 返回 undefined），这是刻意的方向：漏放只是少一次引导，误拒会
- * 让一条本来能跑的命令死在插件层，而子代理多半把它读成「这台机器坏了」，然后换一百个写法再试。
+ * 方向是宁可漏放：漏放只是少一次引导，误拒会让一条本来能跑的命令死在插件层，而子代理多半把它读成
+ * 「这台机器坏了」，然后换一百个写法再试。
+ *
+ * 下面 `expandPath` 那道守卫（返回 undefined 即放行）是防御性代码，当前**不可达**：候选由
+ * `pathCandidates` 产出，必含斜杠因而非空，而 `expandPath` 只在空串时返回 undefined。
  */
 function bashPathArgAllowed(token: string, cwd: string, rule: BashRule, policy: Policy): boolean {
 	const expanded = expandPath(cwd, token);
 	if (!expanded) return true;
 	// 范围判定内部已经按真实路径比过软链，传绝对路径进去不影响它的语义。
 	if (matches(policy.regexps, cwd, expanded)) return true;
-	// 豁免集要按字面与真实两种形态各比一次：NixOS 上 /bin、/lib 是指向 /nix/store 的软链，
-	// 只比一种会让同一条 /bin/sh 有时豁免、有时不豁免。
-	const real = canonical(expanded);
+	// 豁免集要按字面与真实两种形态各比一次：有些系统上 /etc 自己就是软链（macOS 上是 /private/etc），
+	// 只比一种会让同一个路径有时豁免、有时不豁免。
+	//
+	// 真实路径用 `resolveComparable` 而不是 `canonical`：前者是与 helper 的 `fs::canonicalize` 对齐的
+	// 实现（OS 的 realpath + 字面拼尾），后者是 Node 的自实现版，两边在部分输入上结果不同。
+	const real = resolveComparable(expanded);
 	if (BASH_READ_EXEMPT_ROOTS.some((root) => underRoot(root, expanded) || underRoot(root, real))) return true;
-	if (underRoot(canonical(cwd), real)) return true;
+	if (underRoot(resolveComparable(cwd), real)) return true;
 	// scratch 用 privatisedDirs：cwd 落在 /tmp 之下时 helper 并不挂那个 tmpfs，那就不算
 	// 「命令自己的临时目录」，免得 /tmp 顺带把整片宿主机路径放进来。
 	for (const dir of privatisedDirs(cwd, scratchDir(cwd, rule))) {
-		if (underRoot(canonical(dir), real)) return true;
+		if (underRoot(resolveComparable(dir), real)) return true;
 	}
 	return SANDBOX_DEVICE_PATHS.some((device) => underRoot(device, real));
 }
@@ -1481,7 +1492,7 @@ function bashPathArgAllowed(token: string, cwd: string, rule: BashRule, policy: 
  * 只读类命令里第一个指向范围之外的路径参数；没有就返回 undefined。
  *
  * 只看读类命令：写类命令的文件面由 Landlock 与写范围管，而这里判的是「它在读什么」。候选的抽取
- * 在 bash-match 里（纯字符串），放行判定留在这里，因为豁免集、scratch 与 canonical 都在这边。
+ * 在 bash-match 里（纯字符串），放行判定留在这里，因为豁免集、scratch 与 `resolveComparable` 都在这边。
  */
 function foreignBashPath(command: string, cwd: string, rule: BashRule, policy: Policy): string | undefined {
 	return pathCandidates(command).find((token) => !bashPathArgAllowed(token, cwd, rule, policy));
@@ -2355,11 +2366,13 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				if (foreign) {
 					// 计入撞权限预算（bail）：父代理放宽范围就能解决，正是这一类。
 					return bail(
-						`pi-subagents-extend: "${foreign}" is outside the read scope — bash arguments may only point inside the scope (source: ${policy.source}). This is a path nudge, not a wall: use the read tool, or say what you need from it.\nRead scope: ${preview(policy.globs)}`,
+						`pi-subagents-extend: "${foreign}" is outside the working tree (source: ${policy.source}). This is a path nudge, not a wall: the command runs in ${cwd}, and a file outside it is not yours to read — say what you need from it instead.\nWorking tree: ${cwd}`,
 					);
 				}
 			}
-			// 依赖完整性闸门先于一切计数：它拒的是环境，不是授权，子代理重试也不会变好。
+			// 依赖完整性闸门判的是环境，不是授权，子代理重试也不会变好，所以只拒不计。
+			// 它已不再是「先于一切」的那一条：上面的路径 nudge 排在它之前，而且计入撞权限预算 ——
+			// 路径出了工作树属于「授权与任务不匹配」，父代理放宽范围能解决。
 			const gate = dependencyGateVerdict(rule, command, match.access, cwd);
 			if (gate) return deny(gate);
 			const repeatEvent = probe?.noteBashStart(command, match.access, event.toolCallId);

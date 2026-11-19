@@ -60,22 +60,25 @@ The sandbox's read face stays open: `node`, `rg`, `cargo` and the rest live in `
 the read root would kill every command at once. Reads are the file tools' job — `read`, `grep`, `find`
 and `ls` are judged against `scope` before they run.
 
-One nudge applies on top, for **read-class** commands only (the `bash.read` column): a token qualifies as
-a path when it contains a slash and consists only of path characters — `src/index.ts`, `./a.ts`,
-`../outside/x`, `~/x` and `/nix/store/x` all do, while `foo`, `--flag` and `@scope/pkg` do not. It is
-resolved (symlinks by their real target) and, when that real path lands outside the scope, the command
-is refused with the path named:
+One nudge applies on top, for **read-class** commands only (the `bash.read` column), and it is judged
+against the **working tree**: the directory the command runs in, which is the session's cwd. A token
+qualifies as a path when it contains a slash and consists only of path characters — `src/index.ts`,
+`./a.ts`, `../outside/x` and `~/x` all do, while `foo`, `--flag` and `@scope/pkg` do not. It is resolved
+(symlinks by their real target) and, when that real path lands outside the working tree, the command is
+refused with the path named:
 
 ```text
-pi-subagents-extend: "/home/someone/notes" is outside the read scope — bash arguments may only point
-inside the scope (source: …). This is a path nudge, not a wall: use the read tool, or say what you need
-from it.
-Read scope: src/auth/**
+pi-subagents-extend: "/home/someone/notes" is outside the working tree (source: …). This is a path nudge,
+not a wall: the command runs in /home/shay/extensions/pi-subagents-extend, and a file outside it is not
+yours to read — say what you need from it instead.
+Working tree: /home/shay/extensions/pi-subagents-extend
 ```
 
 The point is the shape of a wasted run, measured: a child hunting for an API inside a 258 MB package with
 `rg -a -o '<pattern>' /nix/store/…` produced empty output for every pattern that did not exist, read that
-as "no match", and burned half an hour on 140 more guesses. Naming the path ends that in one turn.
+as "no match", and burned half an hour on 140 more guesses. Naming the path ends that in one turn — and
+that command is refused now, because a toolchain directory is where a child goes looking, not what the
+task is about.
 
 It is a nudge, so it is deliberately loose, and the looseness is the design, not an oversight: a token
 that could be something else — quoted, containing `$VAR` or a backtick, a glob, a URL, a colon — is
@@ -84,17 +87,31 @@ characters. These count as allowed:
 
 | Command | Why it passes |
 | --- | --- |
-| `rg -a -o 'x' /nix/store/pkg/index.js` | `/nix/store`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/proc`, `/dev`, `/sys` are the toolchain's, not the task's |
-| `cat /etc/passwd` | same exemption |
-| `node -e 'require("/nix/store/x")'` | the argument is quoted code, not a path |
+| `/nix/store/…/bin/rg -n pattern` | the program token is exempt: it is the tool being run, not a file of the task's |
+| `cat /etc/passwd` | `/etc`, `/proc`, `/dev` and `/sys` are the system's, not the task's |
+| `node -e 'require("/nix/store/x")'` | the token is quoted, so it is skipped |
 | `rg "$DIR"` | dynamic, so the token is skipped |
 | `rg foo https://example.com/a` | a URL, so skipped |
 | `rg foo /tmp/out.md` | the command's private scratch directory, unless the session's cwd is itself under it — then the helper does not privatise that directory and it is an ordinary host path |
-| `rg -n ./src/auth/login.ts` | in scope, so the check passes — the same holds for the bare spelling `src/auth/login.ts`, which is a candidate too since it contains a slash |
+| `rg -n ./src/auth/login.ts` | inside the working tree, so the check passes — the same holds for the bare spelling `src/auth/login.ts`, which is a candidate too since it contains a slash |
 | `rg foo escape-link/x` | **refused** when `escape-link` is a symlink to `/home/other`: the relative spelling is not an escape route, the real path is what counts |
 
+A quoted token is skipped whole, so `rg foo "/home/other/x"` runs: the quoting is the reason, not what
+the argument means. One gap is worth knowing: `~user/x` is not expanded — only `~/` is — so the token
+lands under the working tree and passes, while `~/x` does expand and points at the home directory, which
+is outside the tree.
+
 Refusals here are charged to `maxDenies`, like the other refusals a wider grant would answer, and the
-message says which way out applies: use `read` (the scope already covers it), or say what is needed.
+message says which way out applies: use `read` when the read scope covers the file, or say what is
+needed from a file outside the tree.
+
+**`scope` and the working tree are two different contracts.** `scope` is the authorisation for the
+**file tools** — `read`, `grep`, `find`, `ls`, `edit`, `write` — and it can be much narrower than the
+tree: `scope: ["src/auth/**"]` is the normal shape. The **working tree** is where a command runs, and it
+is what this nudge judges, because a build or a test run has to read the whole tree: `cargo build` reads
+`Cargo.toml`, `pnpm` reads the root `package.json`. Judging a bash argument by `scope` would refuse
+those ordinary commands. So the two answer different questions: `scope` answers *may this file tool read
+this file*, the working tree answers *may this command point at this path*.
 
 ## Recommended scenarios
 

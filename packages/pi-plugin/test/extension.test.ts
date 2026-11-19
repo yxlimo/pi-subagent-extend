@@ -3928,7 +3928,7 @@ function pathCandidates(command: string): string[] {
   console.log("  ok   pathCandidates caps the candidate list at 32")
 }
 
-// 108. 只读类 bash 指向树外绝对路径要拒：文案点名路径、说清撞的是读范围，
+// 108. 只读类 bash 指向树外绝对路径要拒：文案点名路径、说清撞的是工作树，
 //      并且说这是提醒不是墙 —— 模型要知道自己该改路径，而不是以为整条命令被禁。
 {
   const h = await handler({
@@ -3940,7 +3940,8 @@ function pathCandidates(command: string): string[] {
   const outside = "/home/other-notes"
   const denied = await h.call("bash", { command: `rg foo ${outside}` })
   assert.equal(denied?.block, true, "a read-class command pointing outside the tree is refused")
-  assert.match(denied.reason, /is outside the read scope/, "the refusal names the read scope")
+  assert.match(denied.reason, /is outside the working tree/, "the refusal names the working tree")
+  assert.doesNotMatch(denied.reason, /read scope/, "the refusal no longer talks about the read scope")
   assert.match(denied.reason, /path nudge, not a wall/, "the refusal says it is a nudge, not a wall")
   assert.ok(denied.reason.includes(outside), `the refusal names the path verbatim, got: ${denied.reason}`)
   h.restore()
@@ -3963,21 +3964,21 @@ function pathCandidates(command: string): string[] {
   console.log("  ok   read-class bash inside the tree still passes")
 }
 
-// 110. 工具链目录在豁免里：`/nix/store` 下的路径不是树外读取，放行。
+// 110. 工具链目录不再是豁免集：`/nix/store` 作为参数指向树外，要拒。
+//      豁免集收窄成设备与系统信息（/etc、/proc、/dev、/sys）之后，工具链目录回到了「树外」这一侧。
 {
   const h = await handler({
     bindings: JSON.stringify({
-      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["rg"] } },
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["rg"] }, maxDenies: 0 },
     }),
     cwd: workdir,
   })
-  assert.equal(
-    await h.call("bash", { command: "rg foo /nix/store/anything" }),
-    undefined,
-    "a toolchain path is exempt from the read-scope path check",
-  )
+  const denied = await h.call("bash", { command: "rg foo /nix/store/anything" })
+  assert.equal(denied?.block, true, "a toolchain path passed as an argument is refused")
+  assert.match(denied.reason, /is outside the working tree/, "the refusal names the working tree")
+  assert.ok(denied.reason.includes("/nix/store/anything"), `the refusal names the offending argument, got: ${denied.reason}`)
   h.restore()
-  console.log("  ok   toolchain paths are exempt from the read-scope path check")
+  console.log("  ok   工具链目录不再豁免：作为参数的 /nix/store 路径被拒")
 }
 
 // 111. 引号里的代码片段不误拒：跳过规则生效时，`node -e 'require("/home/other/x")'` 照旧放行。
@@ -3994,10 +3995,10 @@ function pathCandidates(command: string): string[] {
     "a path quoted inside code is not a candidate, so the command passes",
   )
   h.restore()
-  console.log("  ok   quoted code fragments do not trigger the read-scope path check")
+  console.log("  ok   quoted code fragments do not trigger the working-tree path check")
 }
 
-// 112. 写类命令不受这条检查影响：写类命令撞的是写范围，这条检查管的是读范围。
+// 112. 写类命令不受这条检查影响：写类命令撞的是写范围，这条检查管的是工作树。
 {
   const h = await handler({
     bindings: JSON.stringify({
@@ -4009,7 +4010,7 @@ function pathCandidates(command: string): string[] {
   assert.equal(await h.call("bash", input), undefined, "a write-class command keeps working")
   assert.ok(input.command.includes("pnpm test /home/other-notes"), "the command payload is preserved")
   h.restore()
-  console.log("  ok   write-class bash is not subject to the read-scope path check")
+  console.log("  ok   write-class bash is not subject to the working-tree path check")
 }
 
 // 113. 裸相对路径带斜杠、解析后落在树外：必须拒。
@@ -4027,7 +4028,8 @@ function pathCandidates(command: string): string[] {
   symlinkSync(dirname(repo), link)
   const denied = await h.call("bash", { command: "rg foo escape-link/x" })
   assert.equal(denied?.block, true, "a relative path with a slash that resolves outside the tree is refused")
-  assert.match(denied.reason, /is outside the read scope/, "the refusal names the read scope")
+  assert.match(denied.reason, /is outside the working tree/, "the refusal names the working tree")
+  assert.doesNotMatch(denied.reason, /read scope/, "the refusal no longer talks about the read scope")
   assert.match(denied.reason, /path nudge, not a wall/, "the refusal says it is a nudge, not a wall")
   assert.ok(denied.reason.includes("escape-link/x"), `the refusal names the offending argument, got: ${denied.reason}`)
   // 另一条逃逸形态：`..` 抬出 cwd。
@@ -4065,6 +4067,122 @@ function pathCandidates(command: string): string[] {
   assert.deepEqual(pathCandidates("rg @scope"), [], "a package scope without a slash is not a candidate")
   assert.deepEqual(pathCandidates("rg @scope/pkg"), [], "a package spec is not a candidate")
   console.log("  ok   pathCandidates skips words without a slash")
+}
+
+// 116. PR 的动机案例：参数指向工具链包体必须拒。
+//      实测有一个子代理在 258MB 的包体里 rg 了 140 次，全部为空 —— 那些路径参数每次都指向
+//      工具链而不是任务。工具链不再是豁免集的一员，这类参数要回到工作树这一侧。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["rg"] }, maxDenies: 0 },
+    }),
+    cwd: workdir,
+  })
+  const denied = await h.call("bash", { command: "rg -a -o 'x' /nix/store/anything" })
+  assert.equal(denied?.block, true, "a read-class command pointing into the toolchain store is refused")
+  assert.match(denied.reason, /is outside the working tree/, "the refusal names the working tree")
+  assert.doesNotMatch(denied.reason, /read scope/, "the refusal no longer talks about the read scope")
+  assert.ok(denied.reason.includes("/nix/store/anything"), `the refusal names the offending argument, got: ${denied.reason}`)
+  h.restore()
+  console.log("  ok   /nix/store 作为参数被拒（PR 的动机案例）")
+}
+
+// 117. 程序位豁免：程序本身写成绝对路径时不算参数候选。
+//      可执行文件由 bash 经 PATH 解析，本来就不进参数表；把程序写成绝对路径时，那是在执行
+//      工具，不是在工具链目录里翻东西。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["re:/nix/store/[^ ]+/bin/rg .+"] } },
+    }),
+    cwd: workdir,
+  })
+  assert.deepEqual(pathCandidates("/nix/store/abc/bin/rg foo"), [], "the program position is not a path candidate")
+  assert.equal(
+    await h.call("bash", { command: "/nix/store/abc/bin/rg foo" }),
+    undefined,
+    "a command whose program is an absolute path passes",
+  )
+  h.restore()
+  console.log("  ok   程序位是绝对路径时不算候选，放行")
+}
+
+// 118. 判据是工作树，不是读范围：范围比树窄时，树内范围外的路径照旧放行。
+//      这与 read 工具不同（read 按范围拒，范围外读不到），差异是有意的：构建要读整棵树，
+//      按范围收窄会让一条本来能跑的构建命令死在插件层。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["rg"] }, maxDenies: 0 },
+    }),
+    cwd: workdir,
+  })
+  mkdirSync(join(workdir, "docs"), { recursive: true })
+  writeFileSync(join(workdir, "docs", "x.md"), "x\n")
+  const read = await h.call("read", { path: "docs/x.md" })
+  assert.equal(read?.block, true, "the read tool still refuses a path outside the scope")
+  assert.equal(
+    await h.call("bash", { command: "rg foo docs/x.md" }),
+    undefined,
+    "a read-class command may name an in-tree path outside the scope",
+  )
+  h.restore()
+  console.log("  ok   判据是工作树：树内但范围外的路径对 bash 放行")
+}
+
+// 119. 设备与系统信息仍豁免：`/etc` 下的路径不是任务文件，是系统状态，放行。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["sed"] } },
+    }),
+    cwd: workdir,
+  })
+  assert.equal(
+    await h.call("bash", { command: "sed -n '1,5p' /etc/hosts" }),
+    undefined,
+    "a system information path stays exempt",
+  )
+  h.restore()
+  console.log("  ok   设备与系统信息目录（/etc 等）仍豁免")
+}
+
+// 120. 引号包住整个路径时整 token 跳过：已知漏放，钉住现状。
+//      抽取按 token 走，引号进了 token 就整个不算路径 —— 里面是什么内容不再判断。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["rg"] } },
+    }),
+    cwd: workdir,
+  })
+  assert.deepEqual(pathCandidates('rg foo "/home/other/x"'), [], "a quoted whole token is not a candidate")
+  assert.equal(
+    await h.call("bash", { command: 'rg foo "/home/other/x"' }),
+    undefined,
+    "a path wrapped in quotes passes",
+  )
+  h.restore()
+  console.log("  ok   引号包住的整 token 被跳过（已知漏放）")
+}
+
+// 121. `~user` 不展开：只有 `~/` 会展开，`~root/...` 被当成树内相对路径 —— 已知缺口，钉住现状。
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["rg"] } },
+    }),
+    cwd: workdir,
+  })
+  assert.deepEqual(pathCandidates("rg foo ~root/.ssh/id_rsa"), ["~root/.ssh/id_rsa"], "the token is a candidate")
+  assert.equal(
+    await h.call("bash", { command: "rg foo ~root/.ssh/id_rsa" }),
+    undefined,
+    "a ~user path is not expanded and resolves inside the tree",
+  )
+  h.restore()
+  console.log("  ok   `~user` 不展开（已知缺口）")
 }
 
 rmSync(workdir, { recursive: true, force: true })
