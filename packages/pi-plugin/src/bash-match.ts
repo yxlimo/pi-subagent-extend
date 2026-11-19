@@ -883,7 +883,9 @@ function packageManagerItem(
 	}
 	// `bun test` 跑的是 bun 自带的测试运行器：不看 `scripts.test`，也不需要 `package.json`。
 	// 把它判成「没有 manifest 所以跑不起来」是误报 —— 它在空目录里照样能跑。
-	if (head === "bun" && tokens(entry)[1] === "test") return undefined;
+	// 找第一个非旗标词，`bun --bun test` 与 `bun test --watch` 都要认出来；`bun run test` 不走这条路
+	// （`run` 在前，它是包脚本）。
+	if (head === "bun" && tokens(entry).slice(1).find((word) => !word.startsWith("-")) === "test") return undefined;
 	// 不需要 manifest 的子命令（`pnpm store path`）与判不了的旗标（`pnpm -r test`）：不判。
 	if (hasExemptSubcommand(entry) || hasExemptFlag(entry)) return undefined;
 	// manifest 向上找：cwd 是子目录时，祖先有 package.json 就说明跑得起来。

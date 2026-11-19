@@ -5075,6 +5075,9 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	const empty = mkdtempSync(join(tmpdir(), "pi-subagents-extend-bun-test-"))
 	assert.deepEqual(unreachableEntries(["bun test"], empty), [], "`bun test` runs without any manifest, so it is never reported")
 	assert.equal(unreachableEntries(["bun run test"], empty).length, 1, "but `bun run test` is a package script and still needs one")
+	// 旗标不是子命令：`bun --bun test`、`bun test --watch` 跑的仍是自带 runner。
+	assert.deepEqual(unreachableEntries(["bun --bun test"], empty), [], "a leading flag does not hide the builtin runner")
+	assert.deepEqual(unreachableEntries(["bun test --watch"], empty), [], "and neither does a trailing one")
 	rmSync(empty, { recursive: true, force: true })
 	console.log("  ok   bun test 不判不可达；bun run test 仍按脚本判")
 }
