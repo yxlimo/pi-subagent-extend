@@ -408,12 +408,25 @@ export default profile("writer");
 }
 ```
 
-Merging rules:
+Merging rules — per field, never one layer over another:
 
-- The call's bindings override the profile per key, and `bash` overrides as a whole object; arrays
-  are never merged, so a grant cannot be widened by accident.
-- `bash.deny` is a union **no caller can relax**. That is what makes a project's structural
-  prohibition different from an ordinary allowlist.
+- **union** — `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths`. The base
+  entries come first and the call's are appended, so a dispatch adds an authorisation instead of
+  restating the list, and cannot drop one it did not name.
+- **union, hard floor** — `bash.deny`: **no caller can relax it**. That is what makes a project's
+  structural prohibition different from an ordinary allowlist.
+- **replaced** — `scope`, `writeScope`. A task range has to be able to be *narrower* than the role
+  default; a union would widen file access on every dispatch and would make "narrower than the role"
+  inexpressible.
+- **the call wins** — the remaining scalars and switches (`readOnly`, `maxReads`, `maxDenies`,
+  `maxWriteDenies`, `tools`, `probe`, `bash.writable`, `bash.network`, `bash.dependencyGate`,
+  `bash.cpuStallSeconds`, `bash.scratchPaths`); `bash.env` merges per variable name.
+- `bash.reset: true` in the call drops the profile's `bash.read` / `bash.write` / `bash.allow` before
+  the call's own lists are applied — "only these entries this time". `bash.deny` is still unioned, so
+  narrowing an allowlist never lifts a prohibition.
+- The merged policy reports both layers in `source:` (`profile impl
+  (.pi/subagent-bindings.json) + extensionBindings`); a refusal is the one place the model reads that
+  string, and the entry that answered may live in either file.
 - A profile may omit `scope`, since a role does not know a task's paths. File access is then
   refused entirely while the bash allowlist still applies, so a forgotten binding fails loudly on
   the first read instead of silently permitting everything.

@@ -11,9 +11,10 @@
  *    激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
  *    之后父进程环境被恢复，所以不能在 tool_call 里懒读。
  * 2. agent profile（src/profile.ts）：agent 定义里声明一份两行 loader，角色默认值
- *    写在项目 .pi/subagent-bindings.json。调用方的 bindings 按 key 覆盖默认值，但
- *    bash.deny 取并集、不可放宽。profile 是文件，按会话 cwd 读，所以在 session_start
- *    解析。
+ *    写在项目 .pi/subagent-bindings.json。调用方的 bindings 按字段合并：白名单
+ *    （bash.read / bash.write / allowTools）与 bash.deny 取并集、deny 不可放宽；
+ *    scope / writeScope 替换（任务范围可以比角色默认更窄）；其余标量调用方优先。
+ *    profile 是文件，按会话 cwd 读，所以在 session_start 解析。
  *
  * 两条都没有时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
@@ -46,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, parseBashRule, pathCandidates, type BashRule } from "./bash-match.ts";
+import { allEntries, classifyCommand, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -395,31 +396,34 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
-/** bash 里的 deny 条目（字符串且非空）。 */
-function bashDenyEntries(bash: unknown): string[] {
-	const cfg = asObject(bash);
-	const deny = cfg?.deny;
-	if (!Array.isArray(deny)) return [];
-	return deny.filter((d): d is string => typeof d === "string" && d.trim() !== "").map((d) => d.trim());
-}
-
 /**
- * 合并两层配置（profile 默认值与本次调用的 bindings）：调用方的键覆盖默认值的键，
- * `bash` 整个对象覆盖。但 `bash.deny` 取并集——deny 是限制，调用方不能靠重写 bash
- * 把项目禁掉的命令要回来。
+ * 合并两层配置（profile 默认值与本次调用的 bindings）。
+ *
+ * 语义按字段区分，不是一层盖住另一层：
+ * - 并集（调用方只能往上加，不能悄悄删掉底层已经放行的）：`bash.read` / `bash.write`、
+ *   `allowTools`。`bash.deny` 也是并集，且是硬底线 —— 任何一层都拆不掉它。
+ * - 替换：`scope`、`writeScope`。任务范围必须能比角色默认更窄；并集会把文件访问放大，
+ *   方向是错的。
+ * - 其余标量调用方优先：`readOnly`、`maxDenies`、`maxWriteDenies`、`maxReads` 等。
+ * - `bash` 内部逐字段合并，见 `mergeBashConfig`；`bash.reset: true` 表示「这次只给这几条」。
+ *
+ * 整块覆盖 `bash` 的旧做法有个实测后果：profile 的 coder 有 27 条白名单，派单只写一条
+ * `bash.read`，那 27 条就整块消失 —— 「想加一条授权」被迫变成「把全部重抄一遍」，
+ * 派单反而不能放宽权限。
  */
-function mergeConfig(
+export function mergeConfig(
 	base: Record<string, unknown> | undefined,
 	over: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
 	if (!base) return over;
 	if (!over) return base;
 	const merged: Record<string, unknown> = { ...base, ...over };
-	const deny = [...new Set([...bashDenyEntries(base.bash), ...bashDenyEntries(over.bash)])];
-	if (deny.length > 0) {
-		const bash = asObject(over.bash) ?? asObject(base.bash) ?? {};
-		merged.bash = { ...bash, deny };
-	}
+	// allowTools 并集：底层已经放行的工具不会因为这次派单而消失。
+	const allowTools = [...new Set([...stringList(base.allowTools), ...stringList(over.allowTools)])];
+	if (allowTools.length > 0) merged.allowTools = allowTools;
+	// bash 逐字段合并，不整块覆盖。
+	const bash = mergeBashConfig(base.bash, over.bash);
+	if (bash) merged.bash = bash;
 	return merged;
 }
 
@@ -1578,6 +1582,60 @@ function reportHiddenGrants(dropped: string[]): void {
 	);
 }
 
+/**
+ * 把「授权写了却永远命中不了」这件事告诉父代理一次。
+ *
+ * 命中不了指的不是语法不匹配（那种情况命令会被拒，拒绝文案里会说清），而是这条命令在会话的
+ * 工作目录下**根本跑不起来**：仓库根没有 package.json，`pnpm run x` 只会报
+ * "No package.json found"。子代理没有 `cd`、也没有 `&&`，于是这条授权永远用不上，它只能
+ * 自己找一个等价写法 —— 那正是要避免的坑。
+ *
+ * 聚合成一条发出去：一条警告说清全部，比 N 条各说一条更容易被父代理一次读完。
+ */
+function reportUnreachableEntries(rule: BashRule, cwd: string): void {
+	const unreachable = unreachableEntries(allEntries(rule), cwd);
+	if (unreachable.length === 0) return;
+	const list = unreachable.map((item) => `${item.entry} (${item.why})`).join(", ");
+	// 改法按条目给：每条建议里带着自己的脚本名，读者能对上是哪一条。
+	const fixes = unreachable.map((item) => item.fix).filter((fix): fix is string => fix !== undefined);
+	const tail = fixes.length > 0 ? ` Use the package-relative form instead: ${fixes.join("; ")}` : "";
+	uiWarning?.(
+		`pi-subagents-extend: ${unreachable.length} allowlist entries can never match from ${cwd}: ${list}. Commands run in the session's working directory; there is no \`cd\`.${tail}`
+	);
+}
+
+/**
+ * 拒绝文案里的「同首 token 条目」提示。
+ *
+ * 命令被拒时，子代理最想知道的是「为什么没匹配上、该改哪里」。同首 token 的条目就是它该看的
+ * 地方：条目按词前缀匹配，`pnpm run lint` 放行 `pnpm run lint --x`，但不放行
+ * `pnpm run typecheck`。首 token 不同的条目与此无关，不写进来（不臆测）。
+ *
+ * 这些条目里若有永远命中不了的（见 `unreachableEntries`），把「为什么」与「改成什么」一起
+ * 写进这条拒绝文案：撞墙的原因和出路在同一条消息里，子代理不必再猜。
+ */
+function headEntriesHint(rule: BashRule, command: string, cwd: string): string {
+	// 前缀赋值先剥掉：匹配时剥得掉，这里也得剥，否则 `HOME=/tmp/x pnpm test` 的首 token
+	// 会算成 `HOME=/tmp/x`，与白名单里的 `pnpm` 对不上。
+	const head = firstToken(leadingAssignments(command).rest);
+	if (!head) return "";
+	const siblings = allEntries(rule)
+		.filter((entry) => !entry.startsWith("re:") && firstToken(entry) === head)
+		.slice(0, 3);
+	if (siblings.length === 0) return "";
+	const unreachable = unreachableEntries(allEntries(rule), cwd);
+	const details = siblings.map((entry) => {
+		const bad = unreachable.find((item) => item.entry === entry);
+		if (!bad) return entry;
+		return bad.fix ? `${entry} (${bad.why}; use instead: ${bad.fix})` : `${entry} (${bad.why})`;
+	});
+	// 被拒的这条命令本身也可能跑不起来（同一个 cwd、同一个程序名）：那是子代理真正要改的
+	// 东西，所以它的改法也写进去。
+	const own = unreachableEntries([command], cwd)[0];
+	const ownFix = own?.fix ? `; run it as: ${own.fix}` : "";
+	return ` — entries for \`${head}\`: ${details.join(", ")}; a prefix entry matches only if the command starts with it word for word, and there is no \`cd\` — commands run in ${cwd}${ownFix}`;
+}
+
 export function buildSpec(cwd: string, rule: BashRule, policy: Policy) {
 	const scratch = scratchDir(cwd, rule);
 	// 落在私有 tmpfs 之下的授权 helper 一律拒（整份 spec 连带 bash 一起死），所以在这里先剔掉：
@@ -1743,8 +1801,9 @@ function readProfile(
 }
 
 /**
- * profile 定下的策略：默认值打底，本次调用的 bindings 覆盖。本次 bindings 自己
- * 写坏时返回 undefined，由调用方保持全拒——不让 profile 把错误掩盖成「可用」。
+ * profile 定下的策略：默认值打底，本次调用的 bindings 按字段合上去（见 `mergeConfig`）。
+ * 本次 bindings 自己写坏时返回 undefined，由调用方保持全拒——不让 profile 把错误掩盖成
+ * 「可用」。
  */
 function profilePolicy(
 	cwd: string,
@@ -1756,7 +1815,11 @@ function profilePolicy(
 	const resolved = readProfile(cwd, options.profileName, options.profileFile);
 	if (resolved.error) return denyAll(resolved.error);
 	const merged = mergeConfig(resolved.config, call) ?? {};
-	return parsePolicyObject(merged, resolved.source, { requireScope: false });
+	// 来源要说实话：生效的规则是 profile 与本次派单**合成**的，只写 profile 会让父代理
+	// 改错文件（那条授权不在 profile 里）。拒绝文案里的 `source:` 是父代理判断
+	// 「该改哪个文件」的唯一线索，所以合成时必须把两层都写出来。
+	const source = call ? `${resolved.source} + extensionBindings` : resolved.source;
+	return parsePolicyObject(merged, source, { requireScope: false });
 }
 
 export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
@@ -2188,7 +2251,12 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		// 提示状态按会话重置：一个进程可能服务多个会话，模块级的 set 留到下一个会话就会把
 		// 本该发出的告警吞掉（那是「lost, not duplicated」的一种，且完全没有痕迹）。
 		reportedHiddenGrants.clear();
-		uiWarning = undefined;
+		// UI 提示通道在这里接上会话的 ctx：`judgeToolCall` 只在工具调用时绑定，session_start
+		// 里的告警要发得出去，就不能等第一次工具调用。
+		uiWarning = (message) => {
+			const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
+			ui?.notify?.(message, "warning");
+		};
 		const cwd = ctx.cwd ?? process.cwd();
 		// profile 只在声明了它的入口里生效：agent 的 subagentOnlyExtensions 会加载
 		// 那份两行 loader，主会话不会加载，所以主会话不会被项目默认值误锁。
@@ -2221,6 +2289,8 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		if (policy.bash) {
 			const blocker = bashBlocker(helperPath());
 			if (blocker) ctx.ui.notify(`pi-subagents-extend: ${blocker}`, "warning");
+			// 授权写了却永远命中不了：告诉父代理一次（走 UI，不进模型上下文）。
+			reportUnreachableEntries(policy.bash, cwd);
 		}
 	});
 
@@ -2354,8 +2424,10 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 					: "";
 				// 点名被拒的**命令**，再列允许项。只印允许列表时，读起来像「列表里那条命令不被接受」：
 				// 实测真有人把 `command not in the allowlist: ls` 读成「ls 被拒」，而实际拒的是别的命令。
+				// 同首 token 的条目：让子代理知道**为什么**没匹配上、该改哪里。
+				const headHint = headEntriesHint(rule, command, cwd);
 				return bail(
-					`pi-subagents-extend: command not in the allowlist: "${preview([command])}" — allowed: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}`,
+					`pi-subagents-extend: command not in the allowlist: "${preview([command])}" — allowed: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}${headHint}`,
 				);
 			}
 			// 只读类命令的参数路径：沙箱读面是 `/`（工具链要读 /nix/store），所以路径引导放在插件层。

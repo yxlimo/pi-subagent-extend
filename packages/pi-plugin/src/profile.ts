@@ -35,10 +35,14 @@
  *      `src/index.ts` beside it works but is redundant — the copy loaded without a
  *      profile name stays inactive and passes every call through.
  *
- * Merge rules: the call's `extensionBindings` keys override the profile's keys
- * (`bash` is replaced as a whole object), except `bash.deny` which is unioned — a deny
- * entry can never be re-allowed by the caller. A profile that supplies no `scope`
- * leaves all file access denied (loud failure) while its bash allowlist still works.
+ * Merge rules: the call's `extensionBindings` are merged with the profile's field by
+ * field, not applied as a second whole layer — the allowlists (`bash.read`,
+ * `bash.write`, `allowTools`) and `bash.deny` are unioned, so a deny entry can never
+ * be re-allowed by the caller and the call can add an authorization without
+ * restating the whole list; `scope` / `writeScope` are replaced, so a task can be
+ * narrower than the role default; the remaining scalars take the call's value.
+ * A profile that supplies no `scope` leaves all file access denied (loud failure)
+ * while its bash allowlist still works.
  *
  * A declared profile whose file, JSON, or role key is missing fails closed: every
  * tool call is denied with a message naming the profile, rather than silently running

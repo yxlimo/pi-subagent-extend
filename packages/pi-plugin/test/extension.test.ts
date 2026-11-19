@@ -960,8 +960,10 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   console.log("  ok   profile 与 bindings 按 key 合并")
 }
 
-// 30. The call's bash replaces the profile's bash as a whole object (documented, so that
-// a caller never silently inherits commands it did not write).
+// 30. The call's bash is unioned with the profile's, field by field — not applied as a whole
+// object. Merging as a whole object failed in the direction that matters: a dispatch that added
+// one grant made every grant in the profile disappear, so "authorise one more command" became
+// "restate the whole list", and a delegation could never widen anything at all.
 {
   const proj = join(workdir, "proj-profile")
   const h = await handler({
@@ -971,12 +973,18 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
       "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, bash: { read: ["pnpm test"] } },
     }),
   })
-  const input = { command: "pnpm test" }
-  assert.equal(await h.call("bash", input), undefined, "the call's allowlist wins")
-  const replaced = await h.call("bash", { command: "mise run test" })
-  assert.equal(replaced?.block, true, "the profile's command is replaced, not merged")
+  const added = { command: "pnpm test" }
+  assert.equal(await h.call("bash", added), undefined, "the entry this dispatch added runs")
+  const inherited = { command: "mise run test" }
+  assert.equal(await h.call("bash", inherited), undefined, "the profile's read entry survives the call's bash")
+  const inheritedDefault = { command: "mise run typecheck" }
+  assert.equal(await h.call("bash", inheritedDefault), undefined, "the entry the default layer supplied survives too")
+  const inheritedWrite = { command: "mise run fix" }
+  assert.equal(await h.call("bash", inheritedWrite), undefined, "the union is per column: the profile's write list survives")
+  const outside = await h.call("bash", { command: "curl https://example.com" })
+  assert.equal(outside?.block, true, "a command in neither layer is still refused")
   h.restore()
-  console.log("  ok   调用方的 bash 整体覆盖 profile 的 bash")
+  console.log("  ok   调用方的 bash 与 profile 并集，不是整体覆盖")
 }
 
 // 31. `bash.deny` is a restriction: it unions across layers and no allowlist re-allows it.
@@ -3863,11 +3871,25 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // pathCandidates 的纯抽取用例（101–107、115）与接线用例（108–114）共用这一个导入。
 const bashMatch = (await import(join(repo, "src", "bash-match.ts"))) as unknown as {
   pathCandidates?: (command: string) => string[]
+  unreachableEntries?: (entries: string[], cwd: string) => UnreachableEntry[]
+}
+
+/** `src/bash-match.ts` 判出的「不可达条目」：本文件只用它断言判定结果。 */
+interface UnreachableEntry {
+  entry: string
+  why: string
+  fix?: string
 }
 /** 调纯抽取函数；导出缺失时给一句可读的失败，而不是 TypeError。 */
 function pathCandidates(command: string): string[] {
   assert.equal(typeof bashMatch.pathCandidates, "function", "src/bash-match.ts must export pathCandidates")
   return (bashMatch.pathCandidates as (command: string) => string[])(command)
+}
+
+/** 调「不可达条目」判定；导出缺失时给一句可读的失败，而不是 TypeError。 */
+function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] {
+  assert.equal(typeof bashMatch.unreachableEntries, "function", "src/bash-match.ts must export unreachableEntries")
+  return (bashMatch.unreachableEntries as (entries: string[], cwd: string) => UnreachableEntry[])(entries, cwd)
 }
 
 // 101. 绝对路径候选：选项与引号里的碎片不是路径。
@@ -4184,6 +4206,260 @@ function pathCandidates(command: string): string[] {
   h.restore()
   console.log("  ok   `~user` 不展开（已知缺口）")
 }
+
+// 122. 授权里写了 `pnpm run typecheck`、工作目录却没有 package.json 时，这条授权永远命中不了：
+//      子代理没有 `cd`，它只能自己找一个等价写法。判据是 cwd 本身，改法必须指向真正装着包的
+//      目录，并且用这家包管理器自己的旗标 —— 给 npm 建议 `--dir`，那条建议自己就跑不起来。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-"))
+  mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
+  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), "{}")
+
+  const found = unreachableEntries(["pnpm run typecheck"], tree)
+  assert.equal(found.length, 1, "an entry whose cwd has no package.json can never match")
+  assert.equal(found[0].entry, "pnpm run typecheck", "the entry is reported verbatim")
+  assert.match(found[0].why, /no package\.json/, "the reason is the checkable fact, not advice")
+  assert.ok(found[0].fix?.includes("--dir"), `the fix uses this manager's own flag, got: ${found[0].fix}`)
+  assert.ok(
+    found[0].fix?.includes(join("packages", "pi-plugin")),
+    `the fix points at the directory that really has a package.json, got: ${found[0].fix}`,
+  )
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   cwd 没有 package.json 的包管理器条目判为不可达，改法指回真正的包目录")
+}
+
+// 123. 条目自己带包目录旗标时判的是那个目录：它是上一条的对照组 —— 判定看事实，
+//      不许把「cwd 没有 package.json」一律当成不可达，否则一条正确的授权会被建议改掉。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-reach-"))
+  mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
+  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), "{}")
+
+  assert.deepEqual(
+    unreachableEntries(["pnpm --dir packages/pi-plugin run typecheck"], tree),
+    [],
+    "an entry that names its own package directory is reachable",
+  )
+  assert.deepEqual(
+    unreachableEntries(["npm --prefix=packages/pi-plugin run build"], tree),
+    [],
+    "the --flag=value form is honoured too",
+  )
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   条目自带包目录旗标且目录有 package.json 时判为可达")
+}
+
+// 124. `cargo` 条目看 cwd 的 Cargo.toml；条目自己用 `--manifest-path` 指名了包时判不了，
+//      跳过不判 —— 猜错方向会让一条本来跑得起来的命令被建议改掉。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-cargo-"))
+  const before = unreachableEntries(["cargo test"], tree)
+  assert.equal(before.length, 1, "cargo with no Cargo.toml in the cwd can never match")
+  assert.match(before[0].why, /no Cargo\.toml/, "the reason names the missing manifest")
+  assert.equal(before[0].fix, undefined, "no fix is invented for cargo")
+  assert.deepEqual(
+    unreachableEntries(["cargo --manifest-path ../helper/Cargo.toml test"], tree),
+    [],
+    "an entry that names its own manifest is not judged",
+  )
+  writeFileSync(join(tree, "Cargo.toml"), "[package]\nname = \"x\"\n")
+  assert.deepEqual(unreachableEntries(["cargo test"], tree), [], "with a Cargo.toml in the cwd the entry is reachable")
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   cargo 条目看 cwd 的 Cargo.toml；--manifest-path 条目不判")
+}
+
+// 125. 程序位写成绝对路径的条目可以静态核对：文件不在，这条授权永远命中不了。
+//      对照组是同一函数对着真实存在的文件，防止「一律判不可达」也能过这一条。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-abs-"))
+  const missing = join(tree, "missing-tool")
+  const present = join(tree, "present-tool")
+  writeFileSync(present, "")
+  const gone = unreachableEntries([missing], tree)
+  assert.equal(gone.length, 1, "an absolute-path entry whose file does not exist can never match")
+  assert.equal(gone[0].why, `${missing} does not exist`, "the reason is the fact, with the path in it")
+  assert.equal(gone[0].fix, undefined, "no fix is invented for a missing binary")
+  assert.deepEqual(unreachableEntries([present], tree), [], "the same entry with an existing file is reachable")
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   绝对路径条目按文件是否存在判定，存在即可达")
+}
+
+// 126. 不猜：工作目录语义到处都杂的程序名（git、rg）与 `re:` 正则条目一律不判。
+//      误报会让父代理改掉一条本来正确的授权，比漏报糟。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-skip-"))
+  assert.deepEqual(
+    unreachableEntries(["git status", "rg foo", "re:^git .*", "re:pnpm run .*"], tree),
+    [],
+    "only entries whose facts can be checked are judged",
+  )
+  assert.deepEqual(unreachableEntries([], tree), [], "an empty allowlist reports nothing")
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   工具链通用程序名与 re: 条目不判，空列表不报")
+}
+
+// 127. 接线一：开场把「授权写了却永远命中不了」说一次，走 UI 而不是模型上下文。
+//      没有这一条，子代理只能撞几次墙再自己推断，父代理也看不到自己配错了。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-ui-"))
+  mkdirSync(join(tree, "packages", "pi-plugin"), { recursive: true })
+  writeFileSync(join(tree, "packages", "pi-plugin", "package.json"), "{}")
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run typecheck"] } } }),
+  })
+  const notices = h.ui.join("\n")
+  assert.match(notices, /can never match/, "session_start warns about entries that can never match")
+  assert.match(notices, /pnpm run typecheck/, "the warning names the entry")
+  assert.ok(notices.includes("--dir"), `the warning carries the usable form, got: ${notices}`)
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   开场警告点出永远命中不了的条目，并给出带 --dir 的可用形态")
+}
+
+// 128. 接线二：与命令同首 token 的条目写进拒绝文案 —— 撞墙的原因和出路在同一段里。
+//      那条条目自己不可达时，`why` 也要跟着写进去，否则读者会以为改个参数就行。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-deny-"))
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run lint"] } } }),
+  })
+  const refused = await h.call("bash", { command: "pnpm run typecheck" })
+  assert.equal(refused?.block, true, "a command missing from the allowlist is refused")
+  const reason = String(refused?.reason)
+  assert.match(reason, /entries for `pnpm`/, "the refusal lists the entries with the same program")
+  assert.match(reason, /pnpm run lint/, "and names the entry that is close")
+  assert.match(reason, /no package\.json/, "the entry's own unreachability is stated too")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   拒绝文案点名同首 token 的条目，并带上它不可达的原因")
+}
+
+// 129. 反例：首 token 不同的条目与此无关，不写进文案。猜「你可能想跑那个」比不说更糟：
+//      子代理会照着一条不相干的授权去改命令，然后再撞一次。
+{
+  const tree = mkdtempSync(join(tmpdir(), "pi-subagents-extend-unreach-other-"))
+  const h = await handler({
+    cwd: tree,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], bash: { read: ["pnpm run typecheck"] } } }),
+  })
+  const refused = await h.call("bash", { command: "rg foo x.ts" })
+  assert.equal(refused?.block, true, "a command missing from the allowlist is refused")
+  const reason = String(refused?.reason)
+  assert.match(reason, /allowed:/, "the refusal still lists what is allowed")
+  assert.doesNotMatch(reason, /entries for/, "no entries hint for a different program name")
+  h.restore()
+  rmSync(tree, { recursive: true, force: true })
+  console.log("  ok   首 token 不同时不臆测：文案里不出现同首 token 条目提示")
+}
+
+// 130. `bash.reset: true` says "only these entries this time": the profile's `bash.read` /
+//      `bash.write` are dropped before the call's own are applied. Pinned because a union on every
+//      layer leaves no way to narrow — a role that lists 27 commands would be a floor, not a
+//      default, and a dispatch that has to be tighter could not say so.
+{
+  const proj = join(workdir, "proj-reset")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  mkdirSync(join(proj, "src"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({
+      default: { bash: { read: ["git status"] } },
+      impl: { bash: { read: ["mise run test"], write: ["mise run fix"] } },
+    }),
+  )
+  const h = await handler({
+    cwd: proj,
+    profile: "impl",
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        maxDenies: 0,
+        bash: { reset: true, read: ["pnpm test"] },
+      },
+    }),
+  })
+  assert.equal(await h.call("bash", { command: "pnpm test" }), undefined, "the entry this dispatch named runs")
+  const droppedRoleRead = await h.call("bash", { command: "mise run test" })
+  assert.equal(droppedRoleRead?.block, true, "reset drops the role's read column")
+  assert.match(
+    String(droppedRoleRead?.reason),
+    /command not in the allowlist/,
+    "a dropped entry is refused as not allowed, not as forbidden by the project",
+  )
+  const droppedDefaultRead = await h.call("bash", { command: "git status" })
+  assert.equal(droppedDefaultRead?.block, true, "reset drops the default layer's read column as well")
+  const droppedWrite = await h.call("bash", { command: "mise run fix" })
+  assert.equal(droppedWrite?.block, true, "reset drops the write column too, not only read")
+  h.restore()
+  console.log("  ok   bash.reset 丢弃 profile 的白名单，只留本次派单给的条目")
+}
+
+// 131. `scope` is replaced, not unioned. Unioning scopes would grow file access on every dispatch —
+//      the opposite of what a narrower task range is for — so the call's scope wins whole and a path
+//      only the profile's scope covered is refused. Both files exist, so the refusal is about the
+//      scope and not about a missing target.
+{
+  const proj = join(workdir, "proj-scope-replace")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  mkdirSync(join(proj, "src"), { recursive: true })
+  mkdirSync(join(proj, "docs"), { recursive: true })
+  writeFileSync(join(proj, "src", "a.ts"), "")
+  writeFileSync(join(proj, "docs", "x.md"), "")
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({ impl: { scope: ["src/**", "docs/**"] } }),
+  )
+  const h = await handler({
+    cwd: proj,
+    profile: "impl",
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0 } }),
+  })
+  assert.equal(await h.call("read", { path: "src/a.ts" }), undefined, "the call's narrower scope still covers what it named")
+  const outside = await h.call("read", { path: "docs/x.md" })
+  assert.equal(outside?.block, true, "a path only the profile's scope covered is refused")
+  assert.match(String(outside?.reason), /outside the read scope/, "the refusal is the scope rule, not a usage error")
+  h.restore()
+  console.log("  ok   scope 仍是替换：派单的范围可以比 profile 更窄")
+}
+
+// 132. `bash.deny` stays a union under `bash.reset: true` too. Reset narrows the allowlists; it is
+//      not a way to dissolve a project prohibition — deny is the hard floor, and the dispatch that
+//      names the forbidden command in its own write column still does not get it.
+{
+  const proj = join(workdir, "proj-reset-deny")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({
+      default: { bash: { deny: ["git stash"] } },
+      review: { bash: { read: ["git diff"] } },
+    }),
+  )
+  const h = await handler({
+    cwd: proj,
+    profile: "review",
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        maxDenies: 0,
+        bash: { reset: true, read: ["git diff"], write: ["git stash"] },
+      },
+    }),
+  })
+  const stash = await h.call("bash", { command: "git stash" })
+  assert.equal(stash?.block, true, "reset does not drop the profile's deny entries")
+  assert.match(
+    String(stash?.reason),
+    /blocked by the project profile/,
+    "the refusal still says the project forbids it, so the reader knows which file to change",
+  )
+  assert.equal(await h.call("bash", { command: "git diff" }), undefined, "a command outside the deny list still runs")
+  h.restore()
+  console.log("  ok   bash.deny 在 reset 之后仍然并集：禁令不随白名单一起丢")
+}
+
 
 rmSync(workdir, { recursive: true, force: true })
 restoreState()

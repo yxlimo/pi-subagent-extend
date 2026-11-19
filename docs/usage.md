@@ -45,12 +45,13 @@ subagent(
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `bash.read` / `bash.write` | `string[]` | Commands allowed to only read or to write, matched per token as a prefix, or `re:` regexes (which see the command exactly as written). A leading `NAME=value` assignment is stripped before matching — `HOME=/tmp/x node a.ts` matches an entry `node` — so an entry must start with the program name: `HOME=/tmp node` is a rule that can never fire. Names that change which program runs or load code into it (`LD_*`, `NODE_*`, `GIT_*`, `PYTHON*`, `PATH`, `IFS`, `PAGER`, `BASH_ENV`, …) are refused instead, because they would turn an allowlisted command into arbitrary code. |
+| `bash.reset` | `boolean` | Only meaningful in a call next to a profile: drop the profile's `bash.read`, `bash.write` and `bash.allow` before this dispatch's lists are applied — "only these entries this time", so a task can be tighter than its role. `bash.deny` is not dropped. See [Profiles](#profiles). |
 | `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directories and `node_modules` are added, so `git add`/`commit` and an install work. Only scope entries that cover a whole subtree open a directory; file-level entries open just the files they match. In a linked worktree git's grant excludes `.git/hooks` and `.git/config`; in a plain checkout it cannot. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
-| `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one. |
+| `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one, and `bash.reset` does not lift them. |
 | `bash.dependencyGate` | `boolean \| string[]` | Defaults to `true`. Before a write-classified command or a package-manager invocation runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also show an install — `node_modules/.bin`, or `.pnp.cjs` for a Yarn PnP project; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. An array lists directory prefixes to skip, for a lockfile nobody installs — a `fixtures/` sample, a vendored example: a plain path covers that directory and everything below it (the same reading as a `scope` entry), resolved against the working directory, but the match stops at a path boundary, so `fixtures` does not cover `fixtures-old`. Entries are literal paths, not globs; a glob is named in the refusal rather than silently matching nothing. `[]` skips nothing, the same as `true`. `false` turns the check off. |
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. When set, the helper samples the CPU time of the whole command tree — it is PID 1 of a private PID namespace, so the tree is what `/proc` shows — and kills it once the tree has used **no** CPU for that many seconds, printing why and exiting `79`. The point is to separate a deadlock from a slow build, which a wall-clock limit cannot: a compiling tree gains CPU in every sample, a tree waiting on a lock, a socket, or an orphaned child gains none. Two limits to know before turning it on: a command that deliberately waits (`sleep 300`, a backoff loop) also uses no CPU and will be killed, and the helper cannot see output because stdio is inherited rather than piped, so "no output" cannot corroborate the reading. That is why nothing is armed by default — pick a number well above your slowest quiet gap between CPU bursts. The kill is annotated with `[sandbox]` in the result, saying a retry will stall the same way. |
 
@@ -214,8 +215,41 @@ import { profile } from "/path/to/pi-subagents-extend/packages/pi-plugin/src/pro
 export default profile("review")
 ```
 
-Merging favours the stricter side: a call overrides a profile per key, except `bash.deny`, which no
-caller can relax. A dispatch to a role that has a profile passes only `agent`, `model` and `task` —
+Merging is **per field** — never one layer replacing another — and the field list is the whole rule:
+
+| Category | Fields | Why |
+| --- | --- | --- |
+| **union** | `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths` | the profile's entries stay and the call's are appended (base first, duplicates dropped), so a dispatch can authorise one more command without restating the list it already has |
+| **union, hard floor** | `bash.deny` | a deny entry is a restriction, not a grant, and no layer can lift one: "structurally forbidden" has to survive a dispatch that rewrites the allowlist |
+| **replaced** | `scope`, `writeScope` | a task's range has to be able to be **narrower** than the role default. A union would grow file access on every dispatch — the wrong direction for the one field that decides what may be read, and it would make "narrower than the role" inexpressible |
+| **the call wins** | `readOnly`, `maxReads`, `maxDenies`, `maxWriteDenies`, `probe`, `tools`, `bash.writable`, `bash.network`, `bash.dependencyGate`, `bash.cpuStallSeconds`, `bash.scratchPaths` | these describe *this* task, so the dispatch's value is the value. `probe` and `tools` are replaced whole, not deep-merged. `bash.env` merges per variable name, the call winning on a collision |
+
+Why `deny` can never be anything but a union: a profile's deny list is where a project writes what must
+not happen at all (`git push`, `git reset`). If a call could replace it, every dispatch would have to
+restate the whole list, and the one that forgets silently opens the command.
+
+`bash.reset: true` says "only these entries this time": the profile's `bash.read`, `bash.write` and
+`bash.allow` are dropped before the call's own lists are applied, so a task can be tighter than its
+role:
+
+```json
+{
+  "pi-subagents-extend/1": {
+    "scope": ["src/auth/**"],
+    "bash": { "reset": true, "read": ["pnpm run typecheck"] }
+  }
+}
+```
+
+That dispatch may run `pnpm run typecheck` and nothing else, however many commands the role's profile
+lists. `bash.deny` is **not** reset — the project's prohibitions still apply, which is the point of it
+being a floor rather than a default.
+
+When both layers are in play the refusal's `source:` names both —
+`profile impl (.pi/subagent-bindings.json) + extensionBindings` — because the entry that answered may
+have come from either file.
+
+A dispatch to a role that has a profile passes only `agent`, `model` and `task` —
 the three pieces a new role needs are in the usage skill
 [`pi-subagents-extend`](../packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#call-template).
 

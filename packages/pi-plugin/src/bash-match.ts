@@ -12,6 +12,9 @@
  * write 为准，保守方向）。
  */
 
+import { existsSync, readdirSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+
 export type BashAccess = "read" | "write";
 
 export interface BashRule {
@@ -323,13 +326,23 @@ export function deniedEntry(rule: BashRule, command: string): string | undefined
 	return rule.deny.find((entry) => commandMatches(entry, command));
 }
 
-function stringList(value: unknown): string[] {
+export function stringList(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return (value as unknown[])
 		.filter((v): v is string => typeof v === "string" && v.trim() !== "")
 		.map((v) => v.trim());
 }
 
+/** 配置对象；不是对象（含数组）时返回 undefined。 */
+function configObject(value: unknown): Record<string, unknown> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	return value as Record<string, unknown>;
+}
+
+/** 去重且保序：先到的在前，底层的条目排在调用方新增的前面。 */
+function unique(values: string[]): string[] {
+	return [...new Set(values)];
+}
 function stringMap(value: unknown): Record<string, string> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const out: Record<string, string> = {};
@@ -368,6 +381,85 @@ export function parseBashRule(raw: unknown): BashRule | undefined {
 	};
 }
 
+/**
+ * 合并两层 bash 配置（profile 默认值与本次调用的 bindings）。
+ *
+ * 语义按字段区分，不是整块覆盖 —— 整块覆盖的后果是：派单只要写一条 `bash.read`，
+ * profile 里那几十条授权就整块消失，于是「想加一条授权」变成「把全部重抄一遍」，
+ * 派单反而不能放宽权限。
+ *
+ * - 白名单（read / write / allow）取并集：调用方只能往上加，不能悄悄删掉底层已放行的。
+ * - deny 取并集，且是硬底线：任何一层都拆不掉它（拆掉禁令与放宽权限是两件事）。
+ * - 其余字段调用方优先（写了的以调用方为准，没写的沿用底层的值）：network、writable、
+ *   gitExcludes、dependencyGate、cpuStallSeconds、scratchPaths。
+ * - writablePaths 取并集（多一条是保住底层已经给的授权，不是放宽）；env 按键合并，
+ *   同名键以调用方为准。
+ *
+ * `reset: true`（只可能出现在调用方这一层）表示「这次只给这几条」：先把底下那层的
+ * read / write / allow 丢掉，再套用调用方的白名单。deny 仍然并集 —— 收窄白名单不等于
+ * 拆掉项目禁令。
+ *
+ * 纯函数：不改传入的两个对象，返回新对象。`reset` 键不会进结果，它是控制合并的，
+ * 不是给 `parseBashRule` 的字段。
+ */
+export function mergeBashConfig(base: unknown, over: unknown): Record<string, unknown> | undefined {
+	const lower = configObject(base);
+	const upper = configObject(over);
+	if (!lower && !upper) return undefined;
+	const bottom = lower ?? {};
+	const top = upper ?? {};
+	// reset 只认调用方这一层：它的意思是「丢掉下面那层的白名单」，底层自己写没有意义。
+	const reset = top.reset === true;
+	// 底层整体搬过来（`reset` 不搬：它是控制合并的，不是给 parseBashRule 的字段）。
+	const inherited: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(bottom)) {
+		if (key === "reset") continue;
+		inherited[key] = value;
+	}
+	return {
+		...inherited,
+		...bashLists(bottom, top, reset),
+		...bashSwitches(bottom, top),
+	};
+}
+
+/**
+ * 白名单与禁令：并集。底层在前，调用方新增的在后。
+ *
+ * reset 时底下那层的白名单整个丢掉（调用方只给这几条），但 deny 仍然并集 ——
+ * 收窄白名单不等于拆掉项目禁令。
+ */
+function bashLists(bottom: Record<string, unknown>, top: Record<string, unknown>, reset: boolean): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key of ["read", "write", "allow"] as const) {
+		const list = unique([...(reset ? [] : stringList(bottom[key])), ...stringList(top[key])]);
+		// reset 时即使为空也要写进去：否则底层那份白名单还留在结果里，reset 就白写了。
+		if (list.length > 0 || reset) out[key] = list;
+	}
+	// deny 是硬底线：两层并集，任何一层都拆不掉。
+	const deny = unique([...stringList(bottom.deny), ...stringList(top.deny)]);
+	if (deny.length > 0) out.deny = deny;
+	// 可写区并集：多一条是保住底层已经给的授权，不是放宽。
+	const writablePaths = unique([...stringList(bottom.writablePaths), ...stringList(top.writablePaths)]);
+	if (writablePaths.length > 0) out.writablePaths = writablePaths;
+	return out;
+}
+
+/**
+ * 开关与标量：调用方写了以调用方为准，没写沿用底层的值。
+ *
+ * env 按键合并：底层的保留，同名键以调用方为准。
+ */
+function bashSwitches(bottom: Record<string, unknown>, top: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key of ["network", "writable", "gitExcludes", "dependencyGate", "cpuStallSeconds", "scratchPaths"] as const) {
+		if (Object.hasOwn(top, key)) out[key] = top[key];
+	}
+	const env = { ...stringMap(bottom.env), ...stringMap(top.env) };
+	if (Object.keys(env).length > 0) out.env = env;
+	return out;
+}
+
 /** `cpuStallSeconds`：未写、写坏、`false`、小于等于 0 一律当关闭。 */
 function stallSeconds(value: unknown): number | false {
 	// 先 floor 再判断：否则 0.5 会得到 0，而 0 !== false 会把 `stallSeconds: 0` 写进 spec ——
@@ -377,4 +469,208 @@ function stallSeconds(value: unknown): number | false {
 	const n = Math.floor(value);
 	if (n <= 0) return false;
 	return n;
+}
+
+/**
+ * 「授权写了却永远命中不了」的判定。
+ *
+ * 这里说的「命中不了」不是语法不匹配（那种情况命令会被拒，拒绝文案里会说清），而是这条命令
+ * 在会话的工作目录下**根本跑不起来**：仓库根没有 package.json，`pnpm run x` 只会报
+ * "No package.json found"。子代理没有 `cd`、也没有 `&&`，于是这条授权永远用不上，
+ * 它只能自己找一个等价写法 —— 那正是要避免的坑。
+ *
+ * 只判能确定的事实，不猜：
+ * - `re:` 正则条目无法静态判断，跳过；
+ * - 程序名是工具链里到处都有的（`git`、`rg`、`node`）时，工作目录语义太杂，一律不判：
+ *   误报比漏报糟；
+ * - 判据是 cwd 本身，不看祖先目录 —— 理由文本写的就是 cwd，判据与文本必须一致。
+ */
+export interface UnreachableEntry {
+	/** 条目原文。 */
+	entry: string;
+	/** 为什么命中不了：一句可核对的事实。 */
+	why: string;
+	/** 改成什么：拿不到可靠改法时没有这个字段。 */
+	fix?: string;
+}
+
+/**
+ * 包管理器与「换包目录」的旗标。
+ *
+ * 建议里必须用**这家自己的**旗标：给 npm 建议 `--dir`，那条建议自己就跑不起来。
+ */
+const PACKAGE_MANAGERS: Record<string, string | undefined> = {
+	pnpm: "--dir",
+	npm: "--prefix",
+	yarn: "--cwd",
+	bun: "--cwd",
+};
+
+/** 能把包目录改掉的旗标。判定看全部，建议给各家自己的那个。 */
+const PACKAGE_DIR_FLAGS = ["--dir", "--prefix", "-C", "--cwd"];
+
+/** 首个词：条目与命令的程序位。 */
+export function firstToken(text: string): string {
+	const head = tokens(text.trim())[0];
+	return head && head !== "" ? head : "";
+}
+
+/** 条目里指定的包目录（`--dir <p>` / `--prefix <p>` / `-C <p>` / `--cwd <p>`）。 */
+interface PackageDir {
+	/** 旗标原文。 */
+	flag: string;
+	/** 条目里写的路径。 */
+	path: string;
+	/** 旗标在条目里的位置：`<p>` 与旗标分写时，值在下一个位置。 */
+	index: number;
+}
+
+/** 找出条目里那个「换包目录」的旗标；判不了时返回 undefined（不猜）。 */
+function packageDirFlag(entry: string): PackageDir | undefined {
+	const words = tokens(entry);
+	for (let i = 0; i < words.length; i += 1) {
+		const word = words[i] as string;
+		for (const flag of PACKAGE_DIR_FLAGS) {
+			if (word === flag) {
+				const value = words[i + 1] as string | undefined;
+				// 旗标后面没有值：判不了，不猜。
+				if (value === undefined) return undefined;
+				return { flag, path: value, index: i };
+			}
+			if (word.startsWith(`${flag}=`)) {
+				const value = word.slice(flag.length + 1);
+				if (!value) return undefined;
+				return { flag, path: value, index: i };
+			}
+		}
+	}
+	return undefined;
+}
+
+/** 找包目录时最多往下走几层。 */
+const MAX_PACKAGE_SEARCH_DEPTH = 4;
+
+/**
+ * cwd 下面第一个带 package.json 的目录（相对 cwd 的路径）。
+ *
+ * 往下找而不是只看一层：仓库根没有 package.json、包在 `packages/pi-plugin/` 才是常见布局，
+ * 只看一层就找不到真正该建议的那个目录。深度封顶、跳过 `node_modules` 与隐藏目录，
+ * 判定因此便宜，也不会在依赖树里乱找。
+ */
+function packageDirUnder(cwd: string): string | undefined {
+	let frontier = [""];
+	for (let depth = 0; depth < MAX_PACKAGE_SEARCH_DEPTH; depth += 1) {
+		const next: string[] = [];
+		for (const rel of frontier) {
+			const abs = rel === "" ? cwd : join(cwd, rel);
+			let names: string[];
+			try {
+				names = readdirSync(abs, { withFileTypes: true })
+					.filter(
+						(entry) =>
+							(entry.isDirectory() || entry.isSymbolicLink()) &&
+							!entry.name.startsWith(".") &&
+							entry.name !== "node_modules",
+					)
+					.map((entry) => entry.name)
+					.sort();
+			} catch {
+				continue;
+			}
+			for (const name of names) {
+				const childRel = rel === "" ? name : join(rel, name);
+				if (existsSync(join(cwd, childRel, "package.json"))) return childRel;
+				next.push(childRel);
+			}
+		}
+		frontier = next;
+	}
+	return undefined;
+}
+
+/**
+ * 包管理器的改法：`pnpm --dir <pkg> run <script>` 这类形态。
+ *
+ * 原条目里的换目录旗标被换掉：那个路径正是失效的原因。
+ */
+function packageFix(head: string, managerFlag: string, pkgDir: string, entry: string, dir?: PackageDir): string {
+	const words = tokens(entry);
+	const rest: string[] = [];
+	for (let i = 1; i < words.length; i += 1) {
+		const word = words[i] as string;
+		if (dir && i === dir.index) {
+			// `--dir <p>`：旗标与值一起跳过；`--dir=<p>` 只跳过旗标本身。
+			if (word === dir.flag) i += 1;
+			continue;
+		}
+		rest.push(word);
+	}
+	return [head, managerFlag, pkgDir, ...rest].join(" ");
+}
+
+/**
+ * 扫出永远命中不了的条目。
+ *
+ * 判据只有「这条命令在 cwd 下跑不起来」这一类事实：语法不匹配的条目不在这里（那条命令
+ * 本来就会被拒，拒绝文案里会说）。判不出来的（正则、工具链里到处都有的程序名）一律放过。
+ */
+export function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] {
+	const out: UnreachableEntry[] = [];
+	// 包目录只找一次：多个包管理器条目指向同一个候选目录，找一次就够。
+	let pkgDir: string | undefined;
+	let pkgDirKnown = false;
+	const findPkgDir = (): string | undefined => {
+		if (!pkgDirKnown) {
+			pkgDir = packageDirUnder(cwd);
+			pkgDirKnown = true;
+		}
+		return pkgDir;
+	};
+	for (const raw of entries) {
+		const entry = raw.trim();
+		if (!entry) continue;
+		// 正则条目无法静态判断：跳过，不猜。
+		if (entry.startsWith(RE_PREFIX)) continue;
+		const head = firstToken(entry);
+		if (!head) continue;
+		const managerFlag = PACKAGE_MANAGERS[head];
+		if (managerFlag !== undefined) {
+			const dir = packageDirFlag(entry);
+			if (dir) {
+				// 条目自己指了包目录：那个目录里没有 package.json 才算命中不了。
+				const target = isAbsolute(dir.path) ? dir.path : resolve(cwd, dir.path);
+				if (!existsSync(join(target, "package.json"))) {
+					const item: UnreachableEntry = { entry, why: `no package.json in ${dir.path}` };
+					const pkg = findPkgDir();
+					// 找不到带 package.json 的目录就不给改法：给一条跑不通的建议比不给更糟。
+					if (pkg) item.fix = packageFix(head, managerFlag, pkg, entry, dir);
+					out.push(item);
+				}
+				continue;
+			}
+			if (existsSync(join(cwd, "package.json"))) continue;
+			const item: UnreachableEntry = { entry, why: `no package.json in ${cwd}` };
+			const pkg = findPkgDir();
+			if (pkg) item.fix = packageFix(head, managerFlag, pkg, entry);
+			out.push(item);
+			continue;
+		}
+		if (head === "cargo") {
+			// `cargo --manifest-path <p>` 指了别的包：判不了，不判。
+			if (entry.includes("--manifest-path")) continue;
+			if (!existsSync(join(cwd, "Cargo.toml"))) {
+				out.push({ entry, why: `no Cargo.toml in ${cwd}` });
+			}
+			continue;
+		}
+		if (head.startsWith("/")) {
+			// 程序位写成绝对路径：这个可以静态核对。
+			if (!existsSync(head)) {
+				out.push({ entry, why: `${head} does not exist` });
+			}
+			continue;
+		}
+		// 其它程序名一律不判：`git`、`rg`、`node` 的工作目录语义太杂，误报比漏报糟。
+	}
+	return out;
 }
