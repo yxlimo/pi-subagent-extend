@@ -60,6 +60,9 @@ const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 /** agent 角色默认 bindings 的默认位置（相对会话 cwd）。 */
 const PROFILE_FILE = ".pi/subagent-bindings.json";
 
+/** 老一代 agent profile 目录（相对会话 cwd），仅用于兼容层提示。 */
+const AGENT_PROFILES_DIR = ".pi/agent-profiles";
+
 /** Phase 3 output.deliverable: the real file in the main checkout, for write grants and refusals. */
 let deliverableTargetPath: string | undefined;
 const DELIVERABLE_SECTION = "pi_subagents_extend_deliverable";
@@ -1608,6 +1611,11 @@ const reportedHiddenGrants = new Set<string>();
 const reportedUntrackedWorktreeProfiles = new Set<string>();
 /** 迁移告警：legacy bash.read / bash.write 只说一次（session_start 清空）。 */
 const warnedLegacyBashColumns = new Set<string>();
+
+/** 兼容层文件提示按绝对路径去重，整进程只说一次；不在 session_start 清空。 */
+const warnedCompatLayer = new Set<string>();
+/** 派单版本号写错的提示整进程只说一次；不在 session_start 清空。 */
+let warnedDispatchVersion = false;
 /**
  * UI 提示通道，由 `judgeToolCall` 绑定的会话上下文注入：模块级函数拿不到 `ctx`，而这条告警是给
  * 父代理看的配置问题，不该写进模型上下文，所以只走 UI。
@@ -2041,6 +2049,27 @@ function warnLegacyBashColumns(config: Record<string, unknown> | undefined, sour
 	uiWarning?.(
 		`pi-subagents-extend: ${source} still spells bash.${legacy.join(" and bash.")}, which are legacy columns; bash.allow is the single allowlist column now and read/write is judged internally. The legacy columns keep working until the compatibility layer is removed.`
 	);
+}
+
+/**
+ * 老的 .pi 配置文件还在时各提示一次：新配置写在角色 md 的 extend 块，老文件暂时继续可用。
+ * 只按 existsSync 的可判定事实说话，不猜项目里有没有别的配置入口。
+ */
+function warnCompatLayer(cwd: string): void {
+	const bindingsFile = resolve(cwd, PROFILE_FILE);
+	if (existsSync(bindingsFile) && !warnedCompatLayer.has(bindingsFile)) {
+		warnedCompatLayer.add(bindingsFile);
+		uiWarning?.(
+			`pi-subagents-extend: ${PROFILE_FILE} is from the older configuration layer; put configuration in the role md's extend: block instead. The old file keeps working meanwhile.`
+		);
+	}
+	const profilesDir = resolve(cwd, AGENT_PROFILES_DIR);
+	if (existsSync(profilesDir) && !warnedCompatLayer.has(profilesDir)) {
+		warnedCompatLayer.add(profilesDir);
+		uiWarning?.(
+			`pi-subagents-extend: ${AGENT_PROFILES_DIR}/*.ts is from the older configuration layer; put configuration in the role md's extend: block instead. The old files keep working meanwhile.`
+		);
+	}
 }
 /**
  * 补 worktree 默认值时，若策略来自磁盘 profile 而该文件没被 git 跟踪，告诉父代理一次：
@@ -2855,6 +2884,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			ui?.notify?.(message, "warning");
 		};
 		const cwd = ctx.cwd ?? process.cwd();
+		warnCompatLayer(cwd);
 		// profile 只在声明了它的入口里生效：agent 的 subagentOnlyExtensions 会加载
 		// 那份两行 loader，主会话不会加载，所以主会话不会被项目默认值误锁。
 		const resolved = profilePolicy(cwd, options, call.config, Boolean(call.error));
@@ -2991,6 +3021,21 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 					candidate.worktree = true;
 					if (strategy.fromProfile) warnUntrackedWorktreeProfile(cwd, options);
 				}
+			}
+		}
+		// 只有这个扩展被装进主会话时才看得到派单载荷（默认并非如此）：子会话在 session_start
+		// 就消费掉 bindings，tool_call 里根本没有。别把「这里没告警」当成坏掉来报。
+		if (!warnedDispatchVersion && (event.toolName === "subagent" || event.toolName === "subagent_launch")) {
+			const candidate = event.input as { extensionBindings?: unknown } | undefined;
+			const incoming = asObject(candidate?.extensionBindings);
+			const wrongKey = incoming && Object.keys(incoming).find(
+					(key) => key.startsWith(`${BINDING_NAMESPACE}/`) && key !== bindingKey(),
+			);
+			if (wrongKey) {
+				warnedDispatchVersion = true;
+				uiWarning?.(
+					`pi-subagents-extend: a ${event.toolName} dispatch declares binding "${wrongKey}", but this build supports "${bindingKey()}"; use the matching key or the dispatch will be refused.`,
+				);
 			}
 		}
 		if (!policy.active) return;
@@ -3195,6 +3240,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			const lines = policy.active
 				? [
 					`Source: ${policy.source}`,
+					`Bindings: ${bindingKey()}`,
 					`Mode: ${policy.readOnly ? "read-only" : "read-write"}`,
 					policy.readOnly || [...policy.writeGlobs, ...policy.absoluteWrite].join("\n") === policy.globs.join("\n")
 						? undefined
@@ -3202,9 +3248,11 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 					`Read scope: ${policy.globs.join(" | ") || "(none)"}`,
 					`Read denials: ${denyCounter.status()} · write denials: ${writeDenyCounter.status()}`,
 					policy.bash
-						? `bash read: ${policy.bash.read.join(" | ") || "(none)"}`
+						? `bash allow: ${[...policy.bash.write, ...policy.bash.read, ...policy.bash.allow].join(" | ") || "(none)"}`
 						: "bash: off",
-					policy.bash ? `bash write: ${policy.bash.write.join(" | ") || "(none)"}` : undefined,
+					policy.bash && (policy.bash.read.length > 0 || policy.bash.write.length > 0)
+						? `bash (legacy columns, migrate to allow): read ${policy.bash.read.join(" | ") || "(none)"} | write ${policy.bash.write.join(" | ") || "(none)"}`
+						: undefined,
 					policy.bash && policy.bash.deny.length > 0
 						? `bash deny (cannot be lifted): ${policy.bash.deny.join(" | ")}`
 						: undefined,

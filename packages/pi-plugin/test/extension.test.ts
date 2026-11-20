@@ -7098,6 +7098,118 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   run.restore()
   console.log("  ok   a main session is excluded from role wiring")
 }
+
+// 258. /permission must name the binding namespace and version, taken from bindingKey().
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { allow: ["ls"] } } }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const lines = notified.join("\n").split("\n")
+  const sourceAt = lines.findIndex((line) => line.startsWith("Source: "))
+  assert.ok(sourceAt >= 0, "the command prints the source line")
+  assert.equal(lines[sourceAt + 1], `Bindings: ${rc.bindingKey()}`, "the binding key from bindingKey() follows the source line")
+  h.restore()
+  console.log("  ok   /permission prints the binding namespace and version")
+}
+
+// 259. /permission shows one bash allow column in enforcement order, plus a legacy line.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { read: ["cat r"], write: ["cat w"], allow: ["cat a"] },
+      },
+    }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const text = notified.join("\n")
+  assert.match(text, /bash allow: cat w \| cat r \| cat a/, "the allow column joins write, read, allow in enforcement order")
+  assert.match(text, /bash \(legacy columns, migrate to allow\): read cat r \| write cat w/, "the legacy line names read and write")
+  assert.doesNotMatch(text, /bash read: |bash write: /, "the retired two-column display is gone")
+  h.restore()
+  console.log("  ok   /permission shows one bash allow column plus the legacy line")
+}
+
+// 260. The legacy line is absent when only the allow column is populated.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { allow: ["ls a"] } } }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const text = notified.join("\n")
+  assert.match(text, /bash allow: ls a/, "the allow column shows the allow entry")
+  assert.doesNotMatch(text, /legacy columns, migrate to allow/, "an allow-only config gets no legacy line")
+  h.restore()
+  console.log("  ok   /permission prints the legacy line only when a legacy column is set")
+}
+
+// 261. A project .pi/subagent-bindings.json warns once per process about the compat layer.
+{
+  const proj = join(workdir, "compat-bindings-258")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(join(proj, ".pi/subagent-bindings.json"), "{}")
+  const first = await handler({ cwd: proj })
+  const warns = first.ui.filter((m) => m.includes("older configuration layer"))
+  assert.equal(warns.length, 1, "one compat warning naming the bindings file")
+  assert.match(warns[0], /\.pi\/subagent-bindings\.json/, "the file is named")
+  assert.match(warns[0], /extend:/, "the md extend block is named as the new home")
+  assert.match(warns[0], /keeps working meanwhile/, "it says the old file still works")
+  first.restore()
+
+  const second = await handler({ cwd: proj })
+  assert.equal(second.ui.filter((m) => m.includes("older configuration layer")).length, 0, "a second session_start is silent")
+  second.restore()
+  console.log("  ok   a project .pi/subagent-bindings.json warns once per process")
+}
+
+// 262. .pi/agent-profiles/*.ts warns once; a project with neither warns nothing.
+{
+  const proj = join(workdir, "compat-profiles-258")
+  mkdirSync(join(proj, ".pi/agent-profiles"), { recursive: true })
+  writeFileSync(join(proj, ".pi/agent-profiles/x.ts"), "export default {}")
+  const first = await handler({ cwd: proj })
+  const warns = first.ui.filter((m) => m.includes("older configuration layer"))
+  assert.equal(warns.length, 1, "one compat warning naming the profiles directory")
+  assert.match(warns[0], /agent-profiles/, "the directory is named")
+  assert.match(warns[0], /extend:/, "the md extend block is named as the new home")
+  first.restore()
+
+  const second = await handler({ cwd: proj })
+  assert.equal(second.ui.filter((m) => m.includes("older configuration layer")).length, 0, "a second session_start is silent")
+  second.restore()
+
+  const bare = join(workdir, "compat-none-258")
+  mkdirSync(bare, { recursive: true })
+  const clean = await handler({ cwd: bare })
+  assert.equal(clean.ui.filter((m) => m.includes("older configuration layer")).length, 0, "no compat file means no warning")
+  clean.restore()
+  console.log("  ok   .pi/agent-profiles warns once; a project with neither is silent")
+}
+
+// 263. A dispatch carrying a foreign /2 binding key warns once with both keys.
+{
+  const matching = await handler()
+  await matching.call("subagent", { extensionBindings: { "pi-subagents-extend/1": {} } })
+  assert.equal(matching.ui.filter((m) => m.includes("declares binding")).length, 0, "the current version warns nothing")
+  matching.restore()
+
+  const h = await handler()
+  const wrong = { "pi-subagents-extend/2": {} }
+  await h.call("subagent", { extensionBindings: wrong })
+  const warns = h.ui.filter((m) => m.includes("declares binding"))
+  assert.equal(warns.length, 1, "exactly one warning for the wrong version")
+  assert.match(warns[0], /pi-subagents-extend\/2/, "the received key is named")
+  assert.match(warns[0], /pi-subagents-extend\/1/, "the correct key is named")
+  await h.call("subagent", { extensionBindings: wrong })
+  assert.equal(h.ui.filter((m) => m.includes("declares binding")).length, 1, "a second dispatch stays silent")
+  h.restore()
+  console.log("  ok   a wrong dispatch version warns once with both keys")
+}
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")
