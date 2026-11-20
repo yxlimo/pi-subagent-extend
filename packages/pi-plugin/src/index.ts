@@ -41,8 +41,8 @@
  */
 
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, type Dirent } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Dirent } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -53,11 +53,16 @@ import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
 import { Probe, STOP_NOTICE, parseProbeConfig } from "./probe.ts";
 import { shouldDefaultWorktree, WORKTREE_TOOLS } from "./worktree-default.ts";
-import { BINDING_NAMESPACE, bindingKey, agentMdDirs, parseRoleName, resolveAgentFile, readExtendBlock, policyFromBlock, type RolePolicy } from "./role-config.ts";
+import { BINDING_NAMESPACE, bindingKey, agentMdDirs, parseRoleName, resolveRoleFromPrompt, resolveAgentFile, readExtendBlock, policyFromBlock, outputFromBlock, setupFromBlock, worktreeFromBlock, type RolePolicy } from "./role-config.ts";
+import { deliverableTarget, ensureDeliverableLink, mainRepoRoot } from "./deliverable.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 /** agent 角色默认 bindings 的默认位置（相对会话 cwd）。 */
 const PROFILE_FILE = ".pi/subagent-bindings.json";
+
+/** Phase 3 output.deliverable: the real file in the main checkout, for write grants and refusals. */
+let deliverableTargetPath: string | undefined;
+const DELIVERABLE_SECTION = "pi_subagents_extend_deliverable";
 /**
  * 随包发布的用法 skill 目录，经 resources_discover 注册，扩展加载即生效。
  * 三个：范围与 bash 白名单、探针判据与停机语义、上下文隔离（AGENTS.md 标记与主代理专属文件）。
@@ -1246,7 +1251,7 @@ function toolchainCacheDir(): string | undefined {
  * cwd 本身不在其中：整棵授权等于把整个 checkout 打开，读范围的宽窄不该自动变成写权限。
  * 各项都以 bash.writable 为前提：false 是角色自己定下的上限，任何一层都不该把它放宽。
  */
-function sandboxWritableDirs(
+export function sandboxWritableDirs(
 	policy: Policy,
 	cwd: string,
 	rule: BashRule,
@@ -1282,6 +1287,8 @@ function sandboxWritableDirs(
 			const abs = expandPath(cwd, raw);
 			if (abs && abs !== "/" && existsSync(abs)) dirs.add(abs);
 		}
+		// 交付物是文件级授权：只放真实文件，不打开它所在的目录。
+		if (deliverableTargetPath) dirs.add(deliverableTargetPath);
 	}
 	return [...dirs];
 }
@@ -2051,6 +2058,238 @@ function warnUntrackedWorktreeProfile(cwd: string, options: ActivateOptions): vo
 	);
 }
 
+/**
+ * 交付物授权只给主检出里的一个普通文件：目录会把整棵子树变成写面，软链会把授权指到树外。
+ * 不存在时用 wx 落位——检查和落位之间被换成软链就宁可失败，绝不跟着链接写。
+ * 落位前后都按 canonical 的主检出根做边界检查：先挡住软链父目录，再校验最终授权。
+ */
+function deliverableGrant(target: string, root: string, warn: (message: string) => void): string | undefined {
+	let stat: ReturnType<typeof lstatSync> | undefined;
+	try {
+		stat = lstatSync(target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			warn(`pi-subagents-extend: cannot inspect deliverable ${target}: ${error instanceof Error ? error.message : String(error)}; granting nothing`);
+			return undefined;
+		}
+	}
+	if (stat) {
+		if (stat.isSymbolicLink() || !stat.isFile()) {
+			const kind = stat.isSymbolicLink() ? "a symbolic link" : "a directory or special file";
+			warn(`pi-subagents-extend: deliverable ${target} is not a regular file (${kind}); granting nothing (a directory would open its whole subtree, a link could point outside the main checkout)`);
+			return undefined;
+		}
+	}
+
+	const rootCanonical = canonical(root);
+	const insideCheckout = (candidate: string): boolean =>
+		candidate === rootCanonical || candidate.startsWith(rootCanonical + sep);
+
+	// 落位前先解析父目录（取最深已存在祖先）：软链父目录会把新文件写到主检出之外。
+	// 旧的 realpathSync(grant) !== resolve(grant) 是空操作——grant 已由 canonical 解析，两边必然相等。
+	const parentCanonical = canonical(dirname(target));
+	if (!insideCheckout(parentCanonical)) {
+		warn(`pi-subagents-extend: deliverable ${target} resolves outside the main checkout (${join(parentCanonical, basename(target))}); granting nothing`);
+		return undefined;
+	}
+
+	if (!stat) {
+		try {
+			// helper 只接受已存在的路径；空文件先落位，真正的写入仍交给子代理。
+			mkdirSync(dirname(target), { recursive: true });
+			closeSync(openSync(target, "wx"));
+		} catch (error) {
+			warn(`pi-subagents-extend: unable to create deliverable file ${target}: ${error instanceof Error ? error.message : String(error)}; granting nothing`);
+			return undefined;
+		}
+	}
+
+	const grant = canonical(target);
+	if (!insideCheckout(grant)) {
+		warn(`pi-subagents-extend: deliverable ${target} resolves outside the main checkout (${grant}); granting nothing`);
+		return undefined;
+	}
+	return grant;
+}
+
+/**
+ * output.deliverable 的接线：建软链、把真实文件加进写授权、并给子代理一条提示段落。
+ * 抽成具名函数是为了让阶段 3 的测试能直接走同一条路径，而不是复制一份判定。
+ */
+export function wireDeliverable(
+	cwd: string,
+	block: Record<string, unknown> | undefined,
+	policy: { absoluteWrite: string[] },
+	options: { sections?: Record<string, string> } | undefined,
+	warn: (message: string) => void,
+): { link?: ReturnType<typeof ensureDeliverableLink>; target?: string } {
+	deliverableTargetPath = undefined;
+	const { output, problems } = outputFromBlock(block ?? {});
+	for (const problem of problems) warn(`pi-subagents-extend: ${problem}`);
+	if (!output?.deliverable) return {};
+	const deliverable = output.deliverable;
+	const anchor = mainRepoRoot(cwd);
+	if (anchor.root === null) {
+		warn(`pi-subagents-extend: cannot locate the main repository from ${cwd}; tried: ${anchor.tried.join(" | ")}`);
+		return {};
+	}
+	const link = ensureDeliverableLink(cwd, anchor.root, deliverable);
+	if ("warning" in link) warn(`pi-subagents-extend: ${link.warning}`);
+	const target = deliverableTarget(anchor.root, deliverable);
+	const grant = deliverableGrant(target, anchor.root, warn);
+	if (!grant) return { link, target };
+	if (!policy.absoluteWrite.includes(grant)) policy.absoluteWrite.push(grant);
+	deliverableTargetPath = grant;
+	if (options) {
+		options.sections = {
+			...(options.sections ?? {}),
+			[DELIVERABLE_SECTION]: `Write the deliverable to \`${deliverable}\`. Name the file in your final message; the parent reads it at \`${grant}\`.`,
+		};
+	}
+	return { link, target };
+}
+
+
+/** 会话级记住 nodeModules 的选择；写在拒绝文案里的提示只在 keep / 缺席时给，remove 后给就是假提示。 */
+let worktreeNodeModules: "keep" | "remove" = "keep";
+
+/** 写目标是否穿过 cwd/node_modules 这条软链，包括子代理直接写出主检出的真实路径。 */
+export function nodeModulesWriteHint(cwd: string, target: string): string {
+	if (worktreeNodeModules !== "keep") return "";
+	const link = resolve(cwd, "node_modules");
+	let absolute: string;
+	try {
+		if (!lstatSync(link).isSymbolicLink()) return "";
+		absolute = resolve(cwd, target);
+	} catch {
+		return "";
+	}
+	if (absolute !== link && !absolute.startsWith(link + sep)) {
+		try {
+			const real = realpathSync(link);
+			if (!absolute.startsWith(real + sep)) return "";
+		} catch {
+			return "";
+		}
+	}
+	return " Set worktree.nodeModules: remove in the role md to unlink the shared node_modules link.";
+}
+
+/** worktree.nodeModules: remove 只解掉工作树侧的软链，目标（主检出里的依赖）必须留下。 */
+export function wireWorktree(
+	cwd: string,
+	block: Record<string, unknown> | undefined,
+	warn: (message: string) => void,
+): { action: "none" | "removed" | "skipped" } {
+	const { worktree, problems } = worktreeFromBlock(block ?? {});
+	for (const problem of problems) warn(`pi-subagents-extend: ${problem}`);
+	worktreeNodeModules = worktree?.nodeModules ?? "keep";
+	if (worktree?.nodeModules !== "remove") return { action: "none" };
+
+	const link = resolve(cwd, "node_modules");
+	let target: string;
+	let stat: ReturnType<typeof lstatSync>;
+	try {
+		stat = lstatSync(link);
+	} catch {
+		return { action: "none" };
+	}
+	if (!stat.isSymbolicLink()) {
+		warn(`pi-subagents-extend: ${link} is a real directory; left it untouched`);
+		return { action: "skipped" };
+	}
+	try {
+		target = resolve(dirname(link), readlinkSync(link));
+	} catch (error) {
+		warn(`pi-subagents-extend: unable to read link ${link}: ${error instanceof Error ? error.message : String(error)}`);
+		return { action: "skipped" };
+	}
+	const anchor = mainRepoRoot(cwd);
+	if (anchor.root === null || (target !== anchor.root && !target.startsWith(anchor.root + sep))) {
+		warn(`pi-subagents-extend: ${link} points to ${target}, outside the main checkout; left it untouched`);
+		return { action: "skipped" };
+	}
+	try {
+		unlinkSync(link);
+	} catch (error) {
+		warn(`pi-subagents-extend: unable to unlink ${link}: ${error instanceof Error ? error.message : String(error)}`);
+		return { action: "skipped" };
+	}
+	warn(`pi-subagents-extend: removed ${link}; the target ${target} was left untouched`);
+	return { action: "removed" };
+}
+
+/** setup.preExec 每个子会话跑一次；失败只告警，绝不让派单半路停下。 */
+export async function wirePreExec(
+	cwd: string,
+	block: Record<string, unknown> | undefined,
+	warn: (message: string) => void,
+): Promise<{ ran: boolean; status?: number | null }> {
+	const { setup, problems } = setupFromBlock(block ?? {});
+	for (const problem of problems) warn(`pi-subagents-extend: ${problem}`);
+	const command = setup?.preExec;
+	if (!command) return { ran: false };
+
+	// 冷工作树里装依赖常常要好几分钟，所以给足 10 分钟。这里故意不走 helper：命令要往
+	// 工作树（以及包管理器缓存）里写，而 helper 的可写面只覆盖本次写授权，天然罩不住安装。
+	let child: ReturnType<typeof spawn>;
+	try {
+		// detached 让命令自带进程组；超时杀整组，不留装依赖时 fork 出去的孙进程。
+		child = spawn(command, { shell: true, cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+	} catch (error) {
+		warn(`pi-subagents-extend: setup.preExec could not start: ${error instanceof Error ? error.message : String(error)}; continuing`);
+		return { ran: true };
+	}
+
+	const pid = child.pid;
+	const maxOutput = 4 * 1024 * 1024;
+	let output = "";
+	const collect = (chunk: Buffer | string): void => {
+		output = (output + chunk.toString("utf8")).slice(-maxOutput);
+	};
+	child.stdout?.on("data", collect);
+	child.stderr?.on("data", collect);
+
+	let timedOut = false;
+	const timer = setTimeout(() => {
+		timedOut = true;
+		if (pid !== undefined) {
+			try {
+				process.kill(-pid, "SIGKILL");
+			} catch {
+				// 进程组已经退出；组杀失败无需处理。
+			}
+		}
+	}, 600_000);
+	// 子进程及其 stdout/stderr 管道会撑住事件循环，超时对运行中的子进程照样生效；unref 只防止
+	// 会话先结束时被这个十分钟的定时器吊住（进程退出时 clearTimeout 会把它摘掉）。
+	timer.unref();
+
+	const outcome = await new Promise<{ status: number | null; error?: Error }>((resolve) => {
+		child.once("error", (error) => {
+			clearTimeout(timer);
+			resolve({ status: null, error });
+		});
+		child.once("close", (status) => {
+			clearTimeout(timer);
+			resolve({ status });
+		});
+	});
+
+	if (outcome.error || outcome.status !== 0) {
+		const tail = output.split(/\r?\n/).slice(-20).join("\n").slice(-2000) || "(no output)";
+		const code = outcome.error
+			? `no exit code (${outcome.error.message})`
+			: timedOut
+				? "no exit code (timed out after 600000ms; killed the process group)"
+				: outcome.status === null
+					? "no exit code (killed by signal)"
+					: String(outcome.status);
+		warn(`pi-subagents-extend: setup.preExec exited with code ${code}; continuing. Output tail:\n${tail}`);
+	}
+	return { ran: true, status: outcome.status };
+}
+
 export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// bindings 在激活时定格：前台子代理的 bindings 环境变量只在会话启动前存在，
 	// tool_call 里读不到，必须在这里取。profile 的文件反过来——要按会话 cwd 读，
@@ -2061,6 +2300,9 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	let roleBaseline: RolePolicy | undefined;
 	let roleSource: string | undefined;
 	let roleResolved = false;
+	// before_agent_start 可能在 preExec 等待期间再次触发；同一个键的发射者 await 在飞的接线，
+	// 不同键（另一个子会话）各走各的。失败时 finally 删键，下一轮可重试，不缓存 rejected promise。
+	const roleWirings = new Map<string, Promise<void>>();
 	let baseConfig = call.config;
 	let baseSource = `extensionBindings ${bindingKey()}`;
 	let baseRequireScope = Boolean(call.config);
@@ -2429,12 +2671,12 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				}
 			} else if (!writable(sourcePath)) {
 				return writeBail(
-					`pi-subagents-extend: ${event.toolName} changes the source file "${sourcePath}" (a move deletes the lines it takes), and that file is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Copy instead of moving if the source may only be read.`,
+					`pi-subagents-extend: ${event.toolName} changes the source file "${sourcePath}" (a move deletes the lines it takes), and that file is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Copy instead of moving if the source may only be read.${nodeModulesWriteHint(cwd, sourcePath)}`,
 				);
 			}
 			if (!writable(destPath)) {
 				return writeBail(
-					`pi-subagents-extend: "${destPath}" is readable but not writable, so ${event.toolName} cannot place the block there — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+					`pi-subagents-extend: "${destPath}" is readable but not writable, so ${event.toolName} cannot place the block there — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.${nodeModulesWriteHint(cwd, destPath)}`,
 				);
 			}
 			const junk = probe?.checkWriteTarget(destPath);
@@ -2445,6 +2687,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		}
 
 		const target = raw || ".";
+		const writeHint = isWrite ? nodeModulesWriteHint(cwd, target) : "";
 		if (event.toolName === READ_TOOL && policy.maxReads > 0 && allowedReads >= policy.maxReads) {
 			return bail(`pi-subagents-extend: read budget exhausted (${policy.maxReads} reads).`);
 		}
@@ -2456,7 +2699,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			// 处境：放宽读范围解决不了，所以走写预算。出路是改成交报告，而不是去求援——记到授权
 			// 预算上会让子代理连撞 5 次、还被指去 contact_supervisor，而它求不到任何东西。
 			return writeBail(
-				`pi-subagents-extend: this session has no write grant; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+				`pi-subagents-extend: this session has no write grant; ${event.toolName} is refused (source: ${policy.source}). Deliver the finding as a report instead of writing a file; use contact_supervisor if it really has to be written.${writeHint}`,
 			);
 		}
 		// 写操作没有 path 就无法判断目标：直接说清，不要报成「路径不在范围内」。
@@ -2477,11 +2720,11 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				// 并给出正解——回报告——而不是「换个路径再试」。
 				if (readOk) {
 					return writeBail(
-						`pi-subagents-extend: "${target}" is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.`,
+						`pi-subagents-extend: "${target}" is readable but not writable — the write scope is ${preview(policy.writeGlobs)} (source: ${policy.source}). Deliver a report instead of writing a file; use contact_supervisor if it really has to be written.${writeHint}`,
 					);
 				}
 				return bail(
-					`pi-subagents-extend: "${target}" is outside the scope — neither readable nor writable (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}\nWrite scope: ${preview(policy.writeGlobs)}`,
+					`pi-subagents-extend: "${target}" is outside the scope — neither readable nor writable (source: ${policy.source}). Do not retry outside paths; if you need this one, say what and why.\nRead scope: ${preview(policy.globs)}\nWrite scope: ${preview(policy.writeGlobs)}${writeHint}`,
 				);
 			}
 		} else if (!readOk) {
@@ -2514,39 +2757,86 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 
 	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: SKILL_DIRS }));
 	pi.on("before_agent_start", async (event, ctx) => {
-		if (process.env.PI_SUBAGENT_CHILD !== "1" || roleResolved) return;
-		const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
-		uiWarning = (message) => { ui?.notify?.(message, "warning"); };
 		const raw = (event as { systemPrompt?: unknown }).systemPrompt;
-		const tag = parseRoleName(typeof raw === "string" ? raw : "");
-		if (!tag) {
-			uiWarning?.(
-				policy.active
-					? `pi-subagents-extend: no active_agent role was found in the system prompt, so the role md limits are NOT applied; the only configuration in effect is ${policy.source}.`
-					: "pi-subagents-extend: no active_agent role was found in the system prompt, so the role md limits are NOT applied; no configuration is in effect, so tool calls in this child are unconstrained."
-			);
-			roleResolved = true;
-			return;
-		}
+		const prompt = typeof raw === "string" ? raw : "";
 		const cwd = ctx.cwd ?? process.cwd();
-		const home = homedir();
-		const file = resolveAgentFile(tag, cwd, home);
-		if (!file) {
-			uiWarning?.(
-				`pi-subagents-extend: no role md was found for role "${tag}"; the role md limits are NOT applied. Looked in: ${agentMdDirs(cwd, home).join(", ")}`,
-			);
-			roleResolved = true;
+		// 实测：前台子代理的 process.env.PI_SUBAGENT_CHILD 是 null —— pi-subagents 只为
+		// host === "runner" 的后台子代理设它，前台在父进程里 restoreProcessEnv。
+		// 所以子会话另看 bindings 载荷与提示里的角色身份；别把这行简化回只看 PI_SUBAGENT_CHILD。
+		const child =
+			process.env.PI_SUBAGENT_CHILD === "1" ||
+			call.config !== undefined ||
+			call.error !== undefined ||
+			parseRoleName(prompt) !== null ||
+			resolveRoleFromPrompt(prompt, cwd, homedir()).role !== null;
+		if (!child || roleResolved) return;
+		const tag = parseRoleName(prompt);
+		const wiringKey = `${cwd}\u0000${tag}`;
+		const inFlight = roleWirings.get(wiringKey);
+		if (inFlight) {
+			await inFlight;
 			return;
 		}
-		const read = readExtendBlock(file);
-		const converted = read.block ? policyFromBlock(read.block) : { problems: [] as string[] };
-		for (const problem of [...read.problems, ...converted.problems]) {
-			uiWarning?.(`pi-subagents-extend: ${tag} (${file}): ${problem}`);
-		}
-		if (converted.policy && Object.keys(converted.policy).length > 0) {
-			roleBaseline = converted.policy;
-			roleSource = `role md ${file}`;
-			applyRoleBaseline();
+		let finishWiring!: () => void;
+		const wiring = new Promise<void>((resolve) => { finishWiring = resolve; });
+		roleWirings.set(wiringKey, wiring);
+		try {
+			// 模块级状态在子会话开始时清零，不依赖 session_start 与 before_agent_start 的先后顺序。
+			deliverableTargetPath = undefined;
+			worktreeNodeModules = "keep";
+			const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
+			uiWarning = (message) => { ui?.notify?.(message, "warning"); };
+			if (call.config && Object.hasOwn(call.config, "setup")) {
+				uiWarning?.("pi-subagents-extend: setup in extensionBindings is ignored; put setup.preExec in the role md");
+			}
+			const home = homedir();
+			// 标签找不到时再用正文探针认角色（systemPromptMode: replace 会丢标签）。
+			// 扫描只在这里发生：前面的 roleResolved / roleWirings 闸门保证每轮接线最多跑一次。
+			const resolved = resolveRoleFromPrompt(prompt, cwd, home);
+			for (const warning of resolved.warnings) uiWarning?.(warning);
+			const role = resolved.role;
+			if (!role) {
+				let warning = policy.active
+					? `pi-subagents-extend: no active_agent role was found in the system prompt, so the role md limits are NOT applied; the only configuration in effect is ${policy.source}.`
+					: "pi-subagents-extend: no active_agent role was found in the system prompt, so the role md limits are NOT applied; no configuration is in effect, so tool calls in this child are unconstrained.";
+				if (resolved.extendMdSeen) {
+					// 有 md 声明了 extend 却没认出身份，点明最可能的成因与改法，免得反复撞限制。
+					warning += `\npi-subagents-extend: a role md declares an extend block, but the prompt has no <active_agent> tag and no md body matched; systemPromptMode: replace drops the tag — use append (or keep the md body intact) so the role can be identified.`;
+				}
+				uiWarning?.(warning);
+				roleResolved = true;
+				return;
+			}
+			const file = resolveAgentFile(role, cwd, home);
+			if (!file) {
+				uiWarning?.(
+					`pi-subagents-extend: no role md was found for role "${role}"; the role md limits are NOT applied. Looked in: ${agentMdDirs(cwd, home).join(", ")}`,
+				);
+				roleResolved = true;
+				return;
+			}
+			const read = readExtendBlock(file);
+			const converted = read.block ? policyFromBlock(read.block) : { problems: [] as string[] };
+			for (const problem of [...read.problems, ...converted.problems]) {
+				uiWarning?.(`pi-subagents-extend: ${role} (${file}): ${problem}`);
+			}
+			if (converted.policy && Object.keys(converted.policy).length > 0) {
+				roleBaseline = converted.policy;
+				roleSource = `role md ${file}`;
+				applyRoleBaseline();
+			}
+			wireDeliverable(
+				cwd,
+				read.block,
+				policy,
+				(event as { systemPromptOptions?: { sections?: Record<string, string> } }).systemPromptOptions,
+				(message) => uiWarning?.(message),
+			);
+			wireWorktree(cwd, read.block, (message) => uiWarning?.(message));
+			await wirePreExec(cwd, read.block, (message) => uiWarning?.(message));
+		} finally {
+			roleWirings.delete(wiringKey);
+			finishWiring();
 		}
 		roleResolved = true;
 	});

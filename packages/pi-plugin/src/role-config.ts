@@ -3,11 +3,11 @@
  * 转换成扩展已有的策略字段。这里只做解析与转换，不参与工具判定。
  *
  * 本阶段接 permissions 下的 scope / write / readOnly / allowTools / budgets / bash；
- * worktree、setup、output 一律报出来而不是静默丢掉 —— 配置看起来生效其实没接线，
- * 比明确的告警难查得多。
+ * worktree、setup、output 也各有类型化解析入口；各块的接线在 index.ts 里完成，
+ * policyFromBlock 只对真正不认识的块名报错。
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parse } from "yaml";
 
@@ -35,6 +35,22 @@ export interface RolePolicy {
 	bash?: RoleBashPolicy;
 }
 
+
+/** md 里的工作树策略：块缺席表示不介入；块存在但没写 nodeModules 时默认 keep。 */
+export interface RoleWorktreeConfig {
+	enabled?: boolean;
+	nodeModules?: "keep" | "remove";
+}
+
+/** md 里的执行前脚本。 */
+export interface RoleSetupConfig {
+	preExec?: string;
+}
+
+/** md 里的交付物相对路径。 */
+export interface RoleOutputConfig {
+	deliverable?: string;
+}
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
 	value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 
@@ -98,6 +114,102 @@ export function resolveAgentFile(role: string, cwd: string, home: string): strin
 	return null;
 }
 
+/** 一次 md 扫描得到的候选：角色名、文件、正文探针，以及 frontmatter 是否声明了 extend。 */
+interface RoleMdCandidate {
+	role: string;
+	file: string;
+	probe: string;
+	declaresExtend: boolean;
+}
+
+/** 探针长度：够长以避开「# reviewer」这类通用开头，够短以容忍宿主截掉正文尾部。 */
+const BODY_PROBE_LENGTH = 120;
+/** 一次扫描最多看多少个 md，异常目录不该把接线拖慢。 */
+const MAX_ROLE_MD_FILES = 32;
+
+const collapseWhitespace = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/**
+ * 扫描角色 md 目录，取正文（去掉 frontmatter）归一化后的前 120 字符当探针。
+ * 读不到、frontmatter 没闭合、正文为空的文件都跳过；同一路径只算一次，否则重复目录会误报歧义。
+ */
+function scanRoleMdCandidates(cwd: string, home: string): RoleMdCandidate[] {
+	const candidates: RoleMdCandidate[] = [];
+	const seen = new Set<string>();
+	for (const dir of agentMdDirs(cwd, home)) {
+		let names: string[];
+		try {
+			names = readdirSync(dir);
+		} catch {
+			continue; // 目录不存在或不可读：跳过
+		}
+		for (const name of names) {
+			if (!name.endsWith(".md") || candidates.length >= MAX_ROLE_MD_FILES) continue;
+			const file = join(dir, name);
+			const key = resolve(file);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			let text: string;
+			try {
+				text = readFileSync(file, "utf8");
+			} catch {
+				continue; // 角色 md 可能不可读：静默跳过
+			}
+			const lines = text.split(/\r?\n/);
+			let body = text;
+			let frontmatter: string | undefined;
+			if (lines[0]?.trim() === "---") {
+				const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+				if (end < 0) continue; // frontmatter 没闭合：不拿它判身份
+				frontmatter = lines.slice(1, end).join("\n");
+				body = lines.slice(end + 1).join("\n");
+			}
+			const normalised = collapseWhitespace(body);
+			if (!normalised) continue; // 空正文不参与匹配，否则空探针会命中所有提示
+			let declaresExtend = false;
+			if (frontmatter !== undefined) {
+				try {
+					declaresExtend = asRecord(parse(frontmatter))?.extend !== undefined;
+				} catch {
+					// frontmatter 不是合法 YAML：不算声明了 extend
+				}
+			}
+			candidates.push({ role: name.slice(0, -3), file, probe: normalised.slice(0, BODY_PROBE_LENGTH), declaresExtend });
+		}
+	}
+	return candidates;
+}
+
+export interface RoleResolution {
+	role: string | null;
+	warnings: string[];
+	extendMdSeen: boolean;
+}
+
+/**
+ * 先找 <active_agent> 标签；找不到（如 systemPromptMode: replace 丢了标签）再用每个 md 的正文
+ * 探针匹配提示。唯一命中才认角色；零命中交回调用方按原样告警；多命中一律当没身份并点名候选，
+ * 绝不猜一个。标签优先保证原有宿主行为不变，也保证正文误命中时标签仍能定案。
+ */
+export function resolveRoleFromPrompt(systemPrompt: string, cwd: string, home: string): RoleResolution {
+	const tag = parseRoleName(systemPrompt);
+	if (tag) return { role: tag, warnings: [], extendMdSeen: false };
+
+	const candidates = scanRoleMdCandidates(cwd, home);
+	const extendMdSeen = candidates.some((candidate) => candidate.declaresExtend);
+	const normalisedPrompt = collapseWhitespace(systemPrompt);
+	const matches = candidates.filter((candidate) => normalisedPrompt.includes(candidate.probe));
+	if (matches.length === 1) return { role: matches[0].role, warnings: [], extendMdSeen };
+	if (matches.length > 1) {
+		const names = matches.map((candidate) => `${candidate.role} (${candidate.file})`).join(", ");
+		return {
+			role: null,
+			warnings: [`pi-subagents-extend: the prompt body matches more than one role md, so no role was selected; candidates: ${names}. Add a <active_agent> tag to disambiguate.`],
+			extendMdSeen,
+		};
+	}
+	return { role: null, warnings: [], extendMdSeen };
+}
 /** 读 frontmatter 里的 extend 对象；没有 frontmatter 或没有 extend 都不算问题。 */
 export function readExtendBlock(file: string): { block?: Record<string, unknown>; problems: string[] } {
 	const problems: string[] = [];
@@ -139,7 +251,6 @@ export function policyFromBlock(block: Record<string, unknown>): { policy?: Role
 
 	for (const key of Object.keys(block)) {
 		if (!TOP_LEVEL_KEYS.has(key)) problems.push(`${key}: unknown block`);
-		else if (key !== "permissions") problems.push(`${key}: not wired in this phase`);
 	}
 
 	const permissions = asRecord(block.permissions);
@@ -232,4 +343,79 @@ export function policyFromBlock(block: Record<string, unknown>): { policy?: Role
 	}
 
 	return { policy, problems };
+}
+
+/** 取 extend 下的一个子块；类型不对就报出来并当作缺席。 */
+const subBlock = (
+	block: Record<string, unknown>,
+	key: "worktree" | "setup" | "output",
+	problems: string[],
+): Record<string, unknown> | undefined => {
+	const value = block[key];
+	if (value === undefined) return undefined;
+	const record = asRecord(value);
+	if (!record) problems.push(`${key} must be an object`);
+	return record;
+};
+
+/** extend.worktree → 工作树策略；缺席时不返回 worktree 字段。 */
+export function worktreeFromBlock(block: Record<string, unknown>): { worktree?: RoleWorktreeConfig; problems: string[] } {
+	const problems: string[] = [];
+	const raw = subBlock(block, "worktree", problems);
+	if (!raw) return { problems };
+	const worktree: RoleWorktreeConfig = { nodeModules: "keep" };
+	if (raw.enabled !== undefined) {
+		if (typeof raw.enabled === "boolean") worktree.enabled = raw.enabled;
+		else problems.push("worktree.enabled must be a boolean");
+	}
+	if (raw.nodeModules !== undefined) {
+		if (raw.nodeModules === "keep" || raw.nodeModules === "remove") worktree.nodeModules = raw.nodeModules;
+		else problems.push('worktree.nodeModules must be "keep" or "remove"');
+	}
+	for (const key of Object.keys(raw)) {
+		if (key !== "enabled" && key !== "nodeModules") problems.push(`worktree.${key}: unknown key`);
+	}
+	return { worktree, problems };
+}
+
+/** extend.setup → 派单前要执行的命令。 */
+export function setupFromBlock(block: Record<string, unknown>): { setup?: RoleSetupConfig; problems: string[] } {
+	const problems: string[] = [];
+	const raw = subBlock(block, "setup", problems);
+	if (!raw) return { problems };
+	const setup: RoleSetupConfig = {};
+	if (raw.preExec !== undefined) {
+		if (typeof raw.preExec === "string") setup.preExec = raw.preExec;
+		else problems.push("setup.preExec must be a string");
+	}
+	for (const key of Object.keys(raw)) {
+		if (key !== "preExec") problems.push(`setup.${key}: unknown key`);
+	}
+	return { setup, problems };
+}
+
+/** extend.output → 交付物；越界路径报出来并省掉，不让配置变成一个越权的链接。 */
+export function outputFromBlock(block: Record<string, unknown>): { output?: RoleOutputConfig; problems: string[] } {
+	const problems: string[] = [];
+	const raw = subBlock(block, "output", problems);
+	if (!raw) return { problems };
+	const output: RoleOutputConfig = {};
+	if (raw.deliverable !== undefined) {
+		if (typeof raw.deliverable !== "string") {
+			problems.push("output.deliverable must be a string");
+		} else if (
+			raw.deliverable.length === 0 ||
+			raw.deliverable.startsWith("/") ||
+			/^[a-zA-Z]:[\\/]/.test(raw.deliverable) ||
+			raw.deliverable.split(/[\\/]/).includes("..")
+		) {
+			problems.push("output.deliverable must be a relative path inside the worktree");
+		} else {
+			output.deliverable = raw.deliverable;
+		}
+	}
+	for (const key of Object.keys(raw)) {
+		if (key !== "deliverable") problems.push(`output.${key}: unknown key`);
+	}
+	return { output, problems };
 }

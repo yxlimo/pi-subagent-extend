@@ -19,6 +19,7 @@ import type {
   ExtensionModule,
   FakeExtensionApi,
   HandlerOptions,
+  PromptOptions,
   Harness,
   AnnotatedMessages,
   Outcome,
@@ -5799,14 +5800,11 @@ const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typ
   console.log("  ok   permissions.bash reports the legacy spelling and points to bindings")
 }
 
-// 194. Each unwired top-level block gets its own problem.
+// 194. Wired top-level blocks are no longer reported; unknown ones still are.
 {
   const out = rc.policyFromBlock({ worktree: {}, setup: {}, output: {} })
-  assert.equal(out.problems.filter((p) => p.includes("not wired in this phase")).length, 3)
-  for (const key of ["worktree", "setup", "output"]) {
-    assert.ok(out.problems.some((p) => p.startsWith(`${key}:`)), `${key} is named`)
-  }
-  console.log("  ok   worktree, setup and output each get a problem")
+  assert.deepEqual(out.problems, [])
+  console.log("  ok   wired blocks are silent")
 }
 
 // 195. Unknown keys are reported by name.
@@ -5854,7 +5852,7 @@ const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typ
 }
 
 // A child run: activate, fire session_start, then before_agent_start with a role tag.
-const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; profile?: string; profileFile?: string }) => {
+const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; profile?: string; profileFile?: string; order?: "normal" | "hostile"; beforeStartEmissions?: number; beforeStartDelayMs?: number; beforeStartCwds?: string[]; foreground?: boolean; systemPromptOptions?: PromptOptions }) => {
   const prev = {
     bindings: process.env.PI_SUBAGENT_EXTENSION_BINDINGS,
     child: process.env.PI_SUBAGENT_CHILD,
@@ -5862,7 +5860,8 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   }
   if (opts.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = opts.bindings
-  process.env.PI_SUBAGENT_CHILD = "1"
+  if (opts.foreground) delete process.env.PI_SUBAGENT_CHILD
+  else process.env.PI_SUBAGENT_CHILD = "1"
   process.env.HOME = opts.home
   const handlers: Record<string, EventHandler> = {}
   const ui: string[] = []
@@ -5872,8 +5871,24 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   }
   ext.activate(api, opts.profile ? { profileName: opts.profile, profileFile: opts.profileFile } : {})
   const ctx: SessionContext = { cwd: opts.cwd, ui: { notify: (message) => ui.push(message) } }
-  await handlers.session_start?.({ type: "session_start" }, ctx)
-  await handlers.before_agent_start?.({ type: "before_agent_start", systemPrompt: opts.systemPrompt }, ctx)
+  if (opts.order === "hostile") {
+    // A hostile host could emit session_start after the role wiring; the grant must survive it.
+    await handlers.before_agent_start?.({ type: "before_agent_start", systemPrompt: opts.systemPrompt, systemPromptOptions: opts.systemPromptOptions }, ctx)
+    await handlers.session_start?.({ type: "session_start" }, ctx)
+  } else {
+    await handlers.session_start?.({ type: "session_start" }, ctx)
+    const emitBeforeStart = (cwd?: string) => handlers.before_agent_start?.({ type: "before_agent_start", systemPrompt: opts.systemPrompt, systemPromptOptions: opts.systemPromptOptions }, cwd ? { ...ctx, cwd } : ctx)
+    if (opts.beforeStartEmissions && opts.beforeStartEmissions > 1) {
+      await Promise.all(
+        Array.from({ length: opts.beforeStartEmissions }, async (_, i) => {
+          if (i > 0 && opts.beforeStartDelayMs) await new Promise((r) => setTimeout(r, opts.beforeStartDelayMs))
+          return emitBeforeStart(opts.beforeStartCwds?.[i])
+        }),
+      )
+    } else {
+      await emitBeforeStart()
+    }
+  }
   return {
     call: async (tool: string, input?: Record<string, unknown>): Promise<Outcome> =>
       (await handlers.tool_call({ type: "tool_call", toolName: tool, input, toolCallId: "r1" }, ctx)) as Outcome,
@@ -6709,6 +6724,379 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
     "and still refuses a different verb"
   )
   console.log("  ok   allowlist matching is unchanged by the verdict tokenizer switch")
+}
+
+// 246. preExec runs once per child session from the role md; failures keep the session alive.
+{
+  const home = join(workdir, "role-home-246")
+  const md = join(home, ".agents", "phase3-setup.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["."]\n  setup:\n    preExec: printf "ran\\n" >> marker.txt\n---\n# phase3-setup\n')
+  const proj = join(workdir, "role-proj-246")
+  mkdirSync(proj, { recursive: true })
+  const marker = join(proj, "marker.txt")
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="phase3-setup"/>\nhello' })
+  assert.equal(readFileSync(marker, "utf8"), "ran\n", "exactly one run")
+  assert.equal(await run.call("read", { path: marker }), undefined, "the session proceeds after preExec")
+  run.restore()
+
+  const failMd = join(home, ".agents", "phase3-fail.md")
+  writeFileSync(failMd, '---\nextend:\n  permissions:\n    scope: ["."]\n  setup:\n    preExec: printf "boom\\n" >&2; exit 7\n---\n# phase3-fail\n')
+  const failing = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="phase3-fail"/>\nhello' })
+  assert.ok(failing.ui.some((m) => m.includes("setup.preExec exited with code 7") && m.includes("boom")), failing.ui.join("\n"))
+  assert.equal(await failing.call("read", { path: marker }), undefined, "a failing preExec does not block the child")
+  failing.restore()
+
+  const ignoredMd = join(home, ".agents", "phase3-ignored.md")
+  writeFileSync(ignoredMd, '---\nextend:\n  permissions:\n    scope: ["."]\n---\n# phase3-ignored\n')
+  const payloadMarker = join(proj, "payload-marker.txt")
+  const ignored = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="phase3-ignored"/>\nhello',
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["."], setup: { preExec: `printf ran > ${payloadMarker}` } } }),
+  })
+  assert.ok(ignored.ui.some((m) => m.includes("setup in extensionBindings is ignored")), ignored.ui.join("\n"))
+  assert.equal(existsSync(payloadMarker), false, "a payload setup is never executed")
+  ignored.restore()
+  console.log("  ok   preExec runs once from the md; failures warn; payload setup is ignored")
+}
+
+// 247. The nodeModules hint appears only on the refusal that goes through the link.
+{
+  const home = join(workdir, "role-home-247")
+  const md = join(home, ".agents", "phase3-keep.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["."]\n    write: []\n  worktree:\n    nodeModules: keep\n---\n# phase3-keep\n')
+  const proj = join(workdir, "role-proj-247")
+  const target = join(proj, "deps", "shared")
+  mkdirSync(target, { recursive: true })
+  mkdirSync(join(proj, "src"), { recursive: true })
+  symlinkSync(target, join(proj, "node_modules"), "dir")
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="phase3-keep"/>\nhello' })
+  const linked = await run.call("write", { path: join(proj, "node_modules", "pkg", "x.js"), content: "x" })
+  assert.ok(linked && linked.block && linked.reason.includes("readable but not writable"), "the write is refused")
+  assert.match(linked.reason, /worktree\.nodeModules: remove/, "the refusal names the fix")
+  const plain = await run.call("write", { path: join(proj, "src", "x.js"), content: "x" })
+  assert.ok(plain && plain.block, "an ordinary write is also refused")
+  assert.ok(!plain.reason.includes("worktree.nodeModules"), "but gets no nodeModules hint")
+  assert.equal(existsSync(join(proj, "node_modules")), true, "keep leaves the link alone")
+  run.restore()
+  console.log("  ok   the readable-but-not-writable hint is limited to the node_modules link")
+}
+// 248. The deliverable grant must survive a session_start emitted after the wiring (P1-3).
+{
+  const home = join(workdir, "role-home-248")
+  const md = join(home, ".agents", "phase3-order.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["."]\n    write: []\n  output:\n    deliverable: report.md\n---\n# phase3-order\n')
+  const proj = join(workdir, "role-proj-248")
+  mkdirSync(proj, { recursive: true })
+  const bindings = JSON.stringify({
+    "pi-subagents-extend/1": {
+      scope: ["."],
+      bash: { read: ["git status"], writable: true },
+    },
+  })
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="phase3-order"/>\nhello',
+    bindings,
+    order: "hostile",
+  })
+  const target = join(proj, "report.md")
+  assert.equal(existsSync(target), true, "the deliverable file was created")
+  const input = { command: "git status" }
+  assert.equal(await run.call("bash", input), undefined, "the bash command passes")
+  const spec = specOf(input.command)
+  assert.ok(
+    spec.write.some((dir) => dir === target || dir.endsWith("/report.md")),
+    `the deliverable grant survives the later session_start, got: ${spec.write.join(", ")}`,
+  )
+  run.restore()
+  console.log("  ok   the deliverable grant survives a session_start after the wiring")
+}
+
+// 249. The nodeModules hint reaches the neither-readable-nor-writable refusal (P1-1).
+{
+  const home = join(workdir, "role-home-249")
+  const md = join(home, ".agents", "phase3-hint.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["src/**"]\n    write: []\n  worktree:\n    nodeModules: keep\n---\n# phase3-hint\n')
+  const proj = join(workdir, "role-proj-249")
+  const main = join(workdir, "role-main-249")
+  mkdirSync(join(proj, "src"), { recursive: true })
+  mkdirSync(main, { recursive: true })
+  symlinkSync(main, join(proj, "node_modules"), "dir")
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="phase3-hint"/>\nhello' })
+  const refused = await run.call("write", { path: join(proj, "node_modules", "pkg", "x.js"), content: "x" })
+  assert.ok(refused && refused.block, "the write is refused")
+  assert.match(refused.reason, /neither readable nor writable/, "the refusal is the no-scope branch")
+  assert.match(refused.reason, /worktree\.nodeModules: remove/, "the refusal names the fix")
+  const plain = await run.call("write", { path: join(proj, "src", "x.js"), content: "x" })
+  assert.ok(plain && plain.block, "an ordinary write is still refused")
+  assert.ok(!plain.reason.includes("worktree.nodeModules"), "and gets no false hint")
+  run.restore()
+  console.log("  ok   the nodeModules hint reaches the neither-readable-nor-writable refusal")
+}
+
+// 250. P1-2: a second before_agent_start arriving mid-preExec must await the in-flight wiring.
+{
+  const home = join(workdir, "role-home-250")
+  const md = join(home, ".agents", "phase3-double.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["."]\n  setup:\n    preExec: sleep 0.3; printf \'ran\\n\' >> count.txt\n  output:\n    deliverable: report.md\n---\n# phase3-double\n')
+  const proj = join(workdir, "role-proj-250")
+  mkdirSync(proj, { recursive: true })
+  const count = join(proj, "count.txt")
+  const bindings = JSON.stringify({
+    "pi-subagents-extend/1": {
+      scope: ["."],
+      bash: { read: ["git status"], writable: true },
+    },
+  })
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="phase3-double"/>\nhello',
+    bindings,
+    beforeStartEmissions: 2,
+    beforeStartDelayMs: 50,
+  })
+  assert.equal(readFileSync(count, "utf8"), "ran\n", "preExec ran exactly once across two emissions")
+  assert.equal(existsSync(join(proj, "report.md")), true, "the deliverable was wired")
+  const input = { command: "git status" }
+  assert.equal(await run.call("bash", input), undefined, "the bash command still passes")
+  const spec = specOf(input.command)
+  assert.ok(
+    spec.write.some((dir) => dir === join(proj, "report.md") || dir.endsWith("/report.md")),
+    `the deliverable grant survives the second emission, got: ${spec.write.join(", ")}`,
+  )
+  run.restore()
+  console.log("  ok   a mid-preExec before_agent_start awaits the in-flight wiring")
+}
+
+// 251. P2-2: the transfer read refusal must not carry the write-only nodeModules hint.
+{
+  const home = join(workdir, "role-home-251")
+  const md = join(home, ".agents", "phase3-xfer-hint.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["src/**", "docs/**"]\n    write: ["docs/**"]\n  worktree:\n    nodeModules: keep\n---\n# phase3-xfer-hint\n')
+  const proj = join(workdir, "role-proj-251")
+  const real = join(workdir, "role-real-251")
+  mkdirSync(join(proj, "src"), { recursive: true })
+  mkdirSync(join(proj, "docs"), { recursive: true })
+  mkdirSync(join(real, "pkg"), { recursive: true })
+  symlinkSync(real, join(proj, "node_modules"), "dir")
+
+  const hl = mkdtempSync(join(tmpdir(), "pi-subagents-extend-xfer-hint-hl-"))
+  const sessionFile = join(hl, "session.jsonl")
+  const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 24)
+  mkdirSync(join(hl, "sessions"), { recursive: true })
+  const srcAbs = join(proj, "src", "a.ts")
+  const docAbs = join(proj, "docs", "b.md")
+  const modSrc = join(proj, "node_modules", "pkg", "src.js")
+  const modDest = join(proj, "node_modules", "pkg", "dest.js")
+  writeFileSync(
+    join(hl, "sessions", `${key}.registry.jsonl`),
+    [
+      JSON.stringify({ kind: "session", sessionFile }),
+      ...Object.entries({ [srcAbs]: "srcA", [docAbs]: "docB", [modSrc]: "modSrc", [modDest]: "modDest" }).map(([path, anchor]) =>
+        JSON.stringify({ kind: "allocate", path, rows: [[anchor, "line"]] }),
+      ),
+      "",
+    ].join("\n"),
+  )
+  const previous = { dir: process.env.PI_HASHLINE_DIR, session: process.env.PI_SESSION_FILE }
+  process.env.PI_HASHLINE_DIR = hl
+  process.env.PI_SESSION_FILE = sessionFile
+
+  const transferTools = [
+    { name: "copy", parameters: { properties: { anchor: { type: "string" }, source_from: { type: "string" }, source_to: { type: "string" } } } },
+    { name: "move", parameters: { properties: { anchor: { type: "string" }, source_from: { type: "string" }, source_to: { type: "string" } } } },
+  ]
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="phase3-xfer-hint"/>\nhello' })
+  try {
+    const readRefusal = await run.call("copy", { source_from: "modSrc", source_to: "modSrc", anchor: "docB", direction: "after" })
+    assert.ok(readRefusal && readRefusal.block, "the transfer read is refused")
+    assert.match(String(readRefusal.reason), /read scope/, "it is the read-side refusal")
+    assert.ok(!readRefusal.reason.includes("worktree.nodeModules"), "a read refusal carries no write-only hint")
+
+    const moveRefusal = await run.call("move", { source_from: "modSrc", source_to: "modSrc", anchor: "docB", direction: "after" })
+    assert.ok(moveRefusal && moveRefusal.block, "the move is refused on its source")
+    assert.match(String(moveRefusal.reason), /worktree\.nodeModules: remove/, "the source write refusal keeps the hint")
+
+    const destRefusal = await run.call("copy", { source_from: "srcA", source_to: "srcA", anchor: "modDest", direction: "after" })
+    assert.ok(destRefusal && destRefusal.block, "the destination write is refused")
+    assert.match(String(destRefusal.reason), /worktree\.nodeModules: remove/, "the destination write refusal keeps the hint")
+  } finally {
+    run.restore()
+    if (previous.dir === undefined) delete process.env.PI_HASHLINE_DIR
+    else process.env.PI_HASHLINE_DIR = previous.dir
+    if (previous.session === undefined) delete process.env.PI_SESSION_FILE
+    else process.env.PI_SESSION_FILE = previous.session
+  }
+  console.log("  ok   the transfer read refusal has no write-only nodeModules hint")
+}
+
+// 252. P2-1: a second child session with a different cwd must get its own wiring, not be skipped.
+{
+  const home = join(workdir, "role-home-252")
+  const md = join(home, ".agents", "phase3-two-sessions.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["."]\n  setup:\n    preExec: sleep 0.05; printf \'ran\\n\' >> count.txt\n---\n# phase3-two-sessions\n')
+  const projA = join(workdir, "role-proj-252a")
+  const projB = join(workdir, "role-proj-252b")
+  mkdirSync(projA, { recursive: true })
+  mkdirSync(projB, { recursive: true })
+  const bindings = JSON.stringify({
+    "pi-subagents-extend/1": {
+      scope: ["."],
+      bash: { read: ["git status"] },
+    },
+  })
+  const countA = join(projA, "count.txt")
+  const countB = join(projB, "count.txt")
+  const run = await childRun({
+    cwd: projA,
+    home,
+    systemPrompt: '<active_agent name="phase3-two-sessions"/>\nhello',
+    bindings,
+    beforeStartEmissions: 2,
+    beforeStartCwds: [projA, projB],
+  })
+  assert.equal(existsSync(countA), true, "the first session wired its preExec")
+  assert.equal(existsSync(countB), true, "the second session with a different cwd was not skipped")
+  assert.equal(readFileSync(countA, "utf8"), "ran\n", "the first session's preExec ran once")
+  assert.equal(readFileSync(countB, "utf8"), "ran\n", "the second session's preExec ran once")
+  run.restore()
+  console.log("  ok   a second child session with a different cwd is wired independently")
+}
+
+// 253. A tagless prompt still applies the md scope through its body (systemPromptMode: replace host).
+{
+  const home = join(workdir, "role-home-253")
+  const md = join(home, ".agents", "body-match-253.md")
+  mkdirSync(dirname(md), { recursive: true })
+  const body = "BODY MATCH ROLE MARKER a distinctive child prompt body carried through systemPromptMode replace that identifies this role without any active_agent tag at all"
+  writeFileSync(md, `---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n---\n${body}\n`)
+  const proj = join(workdir, "role-proj-253")
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: `rewritten prompt\n${body}\ntail` })
+  assert.equal(await run.call("read", { path: join(proj, "allowed", "x.ts") }), undefined, "the md scope is applied from the body match")
+  const outside = await run.call("write", { path: join(proj, "outside", "x.ts"), content: "x" })
+  assert.ok(outside && outside.block, "a write outside the md scope is refused")
+  assert.ok(
+    outside.reason.includes(`(source: role md ${md})`),
+    `the refusal must name the md as the source, got: ${outside.reason}`,
+  )
+  run.restore()
+  console.log("  ok   a tagless prompt applies the md scope through its body")
+}
+
+// 254. False-positive control: an md body that is NOT in the prompt contributes nothing.
+{
+  const home = join(workdir, "role-home-254")
+  const matchedMd = join(home, ".agents", "present-254.md")
+  const decoyMd = join(home, ".agents", "absent-254.md")
+  mkdirSync(dirname(matchedMd), { recursive: true })
+  const presentBody = "PRESENT ROLE BODY that appears in the child prompt and must supply the scope while the absent decoy contributes nothing"
+  const decoyBody = "ABSENT ROLE BODY that never appears in the prompt and must not grant the outside directory to this child under any circumstance"
+  writeFileSync(matchedMd, `---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n---\n${presentBody}\n`)
+  writeFileSync(decoyMd, `---\nextend:\n  permissions:\n    scope: ["outside/**"]\n---\n${decoyBody}\n`)
+  const proj = join(workdir, "role-proj-254")
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: `rewritten prompt\n${presentBody}\ntail` })
+  assert.equal(await run.call("read", { path: join(proj, "allowed", "x.ts") }), undefined, "the matched md's scope is applied")
+  const outside = await run.call("read", { path: join(proj, "outside", "x.ts") })
+  assert.ok(outside && outside.block, "the decoy's outside/** scope is not applied")
+  assert.match(outside.reason, /outside the read scope/)
+  assert.ok(!outside.reason.includes(decoyMd), "the decoy md is not named as a source")
+  run.restore()
+  console.log("  ok   a role md whose body is absent from the prompt contributes nothing")
+}
+
+// 255. No tag and no body match still warns, with the systemPromptMode: replace hint when an extend md exists.
+{
+  const home = join(workdir, "role-home-255")
+  const md = join(home, ".agents", "unknown-255.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["."]\n---\n# a role body that is not in the prompt\n')
+  const proj = join(workdir, "role-proj-255")
+  mkdirSync(proj, { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: "UNMATCHED PROMPT 255 with no role tag and no role body markers" })
+  const joined = run.ui.join("\n")
+  assert.match(joined, /no active_agent role was found/, "the existing no-role warning stays")
+  assert.match(joined, /systemPromptMode: replace/, "the likely cause is named")
+  assert.match(joined, /append/, "the fix is named")
+  run.restore()
+  console.log("  ok   a tagless unmatched prompt warns about systemPromptMode: replace")
+}
+
+// 256. A foreground child has no PI_SUBAGENT_CHILD (measured: pi-subagents sets it only for
+// host === "runner"; a foreground child runs in the parent with restoreProcessEnv). Its bindings
+// payload is the child signal, so the role md extend must still be applied there.
+{
+  const home = join(workdir, "role-home-256")
+  const md = join(home, ".agents", "fg-coder-256.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n  output:\n    deliverable: report.md\n---\n# fg-coder-256\n')
+  const proj = join(workdir, "role-proj-256")
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  const options: PromptOptions = {}
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="fg-coder-256"/>\nhello',
+    bindings: JSON.stringify({ "pi-subagents-extend/1": {} }),
+    foreground: true,
+    systemPromptOptions: options,
+  })
+  assert.equal(await run.call("read", { path: join(proj, "allowed", "x.ts") }), undefined, "the md scope allows its subtree in a foreground child")
+  const outside = await run.call("write", { path: join(proj, "outside", "x.ts"), content: "x" })
+  assert.ok(outside && outside.block, "a write outside the md scope is refused in a foreground child")
+  assert.ok(
+    outside.reason.includes(`role md ${md}`),
+    `the refusal must name the md as a source, got: ${outside.reason}`,
+  )
+  assert.ok(
+    Object.keys(options.sections ?? {}).some((name) => name.includes("deliverable")),
+    `the md's deliverable must be wired into the prompt sections, got: ${Object.keys(options.sections ?? {}).join(", ")}`,
+  )
+  run.restore()
+  console.log("  ok   a foreground child applies the role md extend from its bindings payload")
+}
+
+// 257. The main session is not a child: no bindings payload and no role identity in the prompt
+// must keep the role-md layer inert (no warning, no wiring).
+{
+  const home = join(workdir, "role-home-257")
+  const md = join(home, ".agents", "main-excluded-257.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n  output:\n    deliverable: report.md\n---\n# MAIN EXCLUDED ROLE BODY 257 distinctive marker\n')
+  const proj = join(workdir, "role-proj-257")
+  mkdirSync(proj, { recursive: true })
+  const options: PromptOptions = {}
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: "ORDINARY MAIN SESSION PROMPT 257 with no active_agent tag and no role body marker",
+    foreground: true,
+    bindings: undefined,
+    systemPromptOptions: options,
+  })
+  const joined = run.ui.join("\n")
+  assert.ok(
+    !joined.includes("role md limits are NOT applied") && !joined.includes("no active_agent role was found"),
+    `a main session must not emit role-md warnings, got: ${joined}`,
+  )
+  assert.deepEqual(Object.keys(options.sections ?? {}), [], "a main session must have no role deliverable wiring")
+  run.restore()
+  console.log("  ok   a main session is excluded from role wiring")
 }
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
