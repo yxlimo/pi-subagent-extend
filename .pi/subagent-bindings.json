@@ -126,7 +126,7 @@
       ]
     },
     "writeScope": [
-      "/tmp/pi-review-reports"
+      ".pi/review-reports"
     ]
   }
 }
