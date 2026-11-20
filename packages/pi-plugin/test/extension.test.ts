@@ -136,13 +136,42 @@ function specOf(command: string): SandboxSpec {
 const ext = (await import(join(repo, "src", "index.ts"))) as unknown as ExtensionModule
 
 /**
+ * The documented dispatch payload nests policy under `permissions`. Most cases in this suite
+ * predate that contract and pass the policy fields flat, so the harness lifts them into the
+ * documented shape; cases that pin the contract itself pass `rawBindings` to opt out.
+ */
+const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
+  if (!raw) return raw
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return raw
+  const table = parsed as Record<string, unknown>
+  let changed = false
+  for (const [key, value] of Object.entries(table)) {
+    if (!key.startsWith("pi-subagents-extend/")) continue
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue
+    const ns = value as Record<string, unknown>
+    if (Object.hasOwn(ns, "permissions")) continue
+    table[key] = { permissions: ns }
+    changed = true
+  }
+  return changed ? JSON.stringify(table) : raw
+}
+
+type HandlerArgs = HandlerOptions & { rawBindings?: boolean }
+
+/**
  * Activate the extension with the given bindings env and return its tool_call handler.
  * Pass `profile` to activate through the profile loader (per-role defaults).
  */
-async function handler({ bindings, cwd = workdir, profile, profileFile, piTools }: HandlerOptions = {}): Promise<Harness> {
+async function handler({ bindings, rawBindings, cwd = workdir, profile, profileFile, piTools }: HandlerArgs = {}): Promise<Harness> {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
-  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = rawBindings ? bindings : wrapDispatchBindings(bindings)
 
   const handlers: Record<string, EventHandler> = {}
   const commands: Record<string, CommandSpec> = {}
@@ -420,7 +449,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 // 11. A scoped session does not advertise the delegation skill.
 {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
-  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } })
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = JSON.stringify({ "pi-subagents-extend/1": { permissions: { scope: ["src/**"] } } })
   const handlers: Record<string, EventHandler> = {}
   const api: FakeExtensionApi = {
     on(event, fn) {
@@ -5852,14 +5881,14 @@ const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typ
 }
 
 // A child run: activate, fire session_start, then before_agent_start with a role tag.
-const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; profile?: string; profileFile?: string; order?: "normal" | "hostile"; beforeStartEmissions?: number; beforeStartDelayMs?: number; beforeStartCwds?: string[]; foreground?: boolean; systemPromptOptions?: PromptOptions }) => {
+const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; profile?: string; profileFile?: string; order?: "normal" | "hostile"; beforeStartEmissions?: number; beforeStartDelayMs?: number; beforeStartCwds?: string[]; foreground?: boolean; rawBindings?: boolean; systemPromptOptions?: PromptOptions }) => {
   const prev = {
     bindings: process.env.PI_SUBAGENT_EXTENSION_BINDINGS,
     child: process.env.PI_SUBAGENT_CHILD,
     home: process.env.HOME,
   }
   if (opts.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
-  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = opts.bindings
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = opts.rawBindings ? opts.bindings : wrapDispatchBindings(opts.bindings)
   if (opts.foreground) delete process.env.PI_SUBAGENT_CHILD
   else process.env.PI_SUBAGENT_CHILD = "1"
   process.env.HOME = opts.home
@@ -7209,6 +7238,100 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   assert.equal(h.ui.filter((m) => m.includes("declares binding")).length, 1, "a second dispatch stays silent")
   h.restore()
   console.log("  ok   a wrong dispatch version warns once with both keys")
+}
+
+// 264. The documented dispatch payload puts the policy under `permissions`.
+{
+  const h = await handler({
+    rawBindings: true,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { permissions: { scope: ["src/**"] } } }),
+  })
+  assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "the wrapped scope is enforced")
+  const outside = await h.call("read", { path: "docs/x.md" })
+  assert.equal(outside?.block, true, "files outside the wrapped scope are refused")
+  assert.match(outside.reason, /extensionBindings/, "the refusal names the bindings layer")
+  h.restore()
+  console.log("  ok   a dispatch payload with permissions is accepted and its scope enforced")
+}
+
+// 265. A flat payload is another contract, not a shorter spelling of the wrapped one.
+{
+  const h = await handler({
+    rawBindings: true,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } }),
+  })
+  const blocked = await h.call("read", { path: "src/auth/login.ts" })
+  assert.equal(blocked?.block, true, "a flat payload grants no scope")
+  assert.match(blocked.reason, /permissions/, "the refusal names the missing object")
+  assert.ok(
+    blocked.reason.includes('"permissions":{"scope":["src/**"]}'),
+    `the minimal correct payload is shown inline, got: ${blocked.reason}`,
+  )
+  assert.doesNotMatch(blocked.reason, /scope is missing/, "the complaint is about the wrapper, not the field")
+  h.restore()
+  console.log("  ok   a flat dispatch payload is refused with the permissions wrapper shown")
+}
+
+// 266. `setup` at either level is ignored once and never executed.
+{
+  const home = join(workdir, "role-home-266")
+  const md = join(home, ".agents", "phase4-setup.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["src/**"]\n---\n# phase4-setup\n')
+  const proj = join(workdir, "role-proj-266")
+  mkdirSync(join(proj, "src"), { recursive: true })
+  const marker = join(proj, "payload-marker.txt")
+  const command = `printf ran > ${marker}`
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="phase4-setup"/>\nhello',
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        setup: { preExec: command },
+        permissions: { scope: ["src/**"], setup: { preExec: command } },
+      },
+    }),
+  })
+  const warns = run.ui.filter((m) => m.includes("setup in extensionBindings is ignored"))
+  assert.equal(warns.length, 1, `setup warns once even at both levels, got: ${run.ui.join("\n")}`)
+  assert.equal(existsSync(marker), false, "payload setup is never executed")
+  assert.equal(await run.call("read", { path: join(proj, "src/a.ts") }), undefined, "the scope is unchanged")
+  const outside = await run.call("read", { path: join(proj, "outside.ts") })
+  assert.equal(outside?.block, true, "the ignored key does not widen the scope")
+  run.restore()
+  console.log("  ok   setup in a dispatch payload warns once at either level and changes nothing")
+}
+
+// 267. `output` at either level is ignored once and cannot grant a deliverable path.
+{
+  const home = join(workdir, "role-home-267")
+  const md = join(home, ".agents", "phase4-output.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["src/**"]\n---\n# phase4-output\n')
+  const proj = join(workdir, "role-proj-267")
+  mkdirSync(join(proj, "src"), { recursive: true })
+  const deliverable = "report.md"
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="phase4-output"/>\nhello',
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        output: { deliverable },
+        permissions: { scope: ["src/**"], output: { deliverable } },
+      },
+    }),
+  })
+  const warns = run.ui.filter((m) => m.includes("output in extensionBindings is ignored"))
+  assert.equal(warns.length, 1, `output warns once even at both levels, got: ${run.ui.join("\n")}`)
+  assert.equal(await run.call("read", { path: join(proj, "src/a.ts") }), undefined, "the scope is unchanged")
+  const report = await run.call("read", { path: join(proj, deliverable) })
+  assert.equal(report?.block, true, "a payload output does not widen the read scope")
+  run.restore()
+  console.log("  ok   output in a dispatch payload warns once at either level and changes nothing")
 }
 rmSync(workdir, { recursive: true, force: true })
 restoreState()

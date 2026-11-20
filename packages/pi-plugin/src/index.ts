@@ -373,8 +373,17 @@ function positiveInt(value: unknown): number {
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+/** `extensionBindings` 里的这两个键属于角色 md，不该影响本次派单的策略。 */
+const PAYLOAD_IGNORED_KEYS = ["setup", "output"] as const;
+
 /** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace 配置对象；版本不匹配一律拒绝。 */
-function extractCallConfig(raw: string | undefined): { config?: Record<string, unknown>; error?: string } {
+interface CallConfigResult {
+	config?: Record<string, unknown>;
+	error?: string;
+	/** 命名空间层或 permissions 层出现的、必须只告警一次的键。 */
+	ignored?: string[];
+}
+function extractCallConfig(raw: string | undefined): CallConfigResult {
 	if (!raw?.trim()) return {};
 	let parsed: unknown;
 	try {
@@ -403,7 +412,29 @@ function extractCallConfig(raw: string | undefined): { config?: Record<string, u
 	if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
 		return { error: `extensionBindings ${key}: the configuration is not an object; everything is refused` };
 	}
-	return { config: cfg as Record<string, unknown> };
+	const namespace = cfg as Record<string, unknown>;
+	const expected = `{"extensionBindings":{"${key}":{"permissions":{"scope":["src/**"]}}}}`;
+	// 派单载荷和角色 md 的 extend.permissions 是同一个对象；扁平写法不是「少一层语法糖」，
+	// 而是另一份契约。放过它会在用户照文档写对时反而拒绝，所以这里只认一层 permissions。
+	if (!Object.hasOwn(namespace, "permissions")) {
+		return {
+			error: `extensionBindings ${key}: missing "permissions" object; the namespace key must contain a permissions object; expected ${expected}; everything is refused`,
+		};
+	}
+	const perms = asObject(namespace.permissions);
+	if (!perms) {
+		return {
+			error: `extensionBindings ${key}.permissions must be an object; expected ${expected}; everything is refused`,
+		};
+	}
+	const config: Record<string, unknown> = {};
+	for (const [name, value] of Object.entries(perms)) {
+		if (!(PAYLOAD_IGNORED_KEYS as readonly string[]).includes(name)) config[name] = value;
+	}
+	const ignored = PAYLOAD_IGNORED_KEYS.filter(
+		(name) => Object.hasOwn(namespace, name) || Object.hasOwn(perms, name),
+	);
+	return { config, ignored: [...ignored] };
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -2815,8 +2846,9 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			worktreeNodeModules = "keep";
 			const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
 			uiWarning = (message) => { ui?.notify?.(message, "warning"); };
-			if (call.config && Object.hasOwn(call.config, "setup")) {
-				uiWarning?.("pi-subagents-extend: setup in extensionBindings is ignored; put setup.preExec in the role md");
+			for (const name of call.ignored ?? []) {
+				const mdKey = name === "setup" ? "setup.preExec" : "output.deliverable";
+				uiWarning?.(`pi-subagents-extend: ${name} in extensionBindings is ignored; put ${mdKey} in the role md`);
 			}
 			const home = homedir();
 			// 标签找不到时再用正文探针认角色（systemPromptMode: replace 会丢标签）。

@@ -151,7 +151,7 @@ function assistantText(events: PiEvent[] | undefined): string {
 	return parts.join("\n");
 }
 
-const SCOPE = { "pi-subagents-extend/1": { scope: ["src/**"] } };
+const SCOPE = { "pi-subagents-extend/1": { permissions: { scope: ["src/**"] } } };
 
 // 1. 两次越界读完 → 硬停：第二次拒绝带 denial budget，且脚本第三段（收尾文本）没有被消费。
 {
@@ -161,7 +161,7 @@ const SCOPE = { "pi-subagents-extend/1": { scope: ["src/**"] } };
 			{ calls: [{ name: "read", args: { path: "outside.md" } }] },
 			{ text: MARKER },
 		],
-		bindings: { "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 1 } },
+		bindings: { "pi-subagents-extend/1": { permissions: { scope: ["src/**"], maxDenies: 1 } } },
 	});
 	const denials = run1.results.filter((r) => /outside the read scope|denial budget/.test(r.text));
 	assert.equal(denials.length, 2, `two refusals expected, saw ${denials.length}. stderr: ${run1.stderr.slice(-500)}`);
@@ -237,7 +237,7 @@ const SCOPE = { "pi-subagents-extend/1": { scope: ["src/**"] } };
 			{ calls: [{ name: "read", args: { path: "src/a.ts" } }] },
 			{ text: MARKER },
 		],
-		bindings: { "pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 1 } },
+		bindings: { "pi-subagents-extend/1": { permissions: { scope: ["src/**"], maxDenies: 1 } } },
 	});
 	const denials = run4.results.filter((r) => /outside the read scope|denial budget|stopped earlier/.test(r.text));
 	assert.equal(denials.length, 3, `expected warn, stop, then the latched stop; saw ${denials.length}`);
@@ -260,7 +260,7 @@ const SCOPE = { "pi-subagents-extend/1": { scope: ["src/**"] } };
 	const handoffPath = "/tmp/pi-subagents/async-subagent-runs/run-mock/handoff.json";
 	const run5 = await run({
 		steps: [{ calls: [{ name: "subagent", args: {} }] }, { text: MARKER }],
-		bindings: { "pi-subagents-extend/1": { scope: ["src/**"], allowTools: ["subagent"] } },
+		bindings: { "pi-subagents-extend/1": { permissions: { scope: ["src/**"], allowTools: ["subagent"] } } },
 		extraEnv: { PI_MOCK_HANDOFF_PATH: handoffPath },
 	});
 	const result = run5.results.find((r) => r.tool === "subagent");
