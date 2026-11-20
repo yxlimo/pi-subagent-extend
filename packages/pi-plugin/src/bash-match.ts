@@ -8,8 +8,8 @@
  * 不自动探测正则：命令参数本身就常含 `*`、`.`、`(`（glob 输入、shell 分支），
  * 猜错方向是误授权，比误拒绝危险得多。
  *
- * 读写归类供探针使用：命令只在 read 列 = 读；任一 write 列命中 = 写（两侧都命中以
- * write 为准，保守方向）。
+ * 读写归类供探针使用：legacy 的 read / write 列按列定读写（两侧都命中以 write 为准，
+ * 保守方向）；新的 allow 单列用 commandAccess 从命令本身判读写，read / write 留作兼容列。
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
@@ -20,6 +20,8 @@ export type BashAccess = "read" | "write";
 export interface BashRule {
 	read: string[];
 	write: string[];
+	/** 新的单列白名单：读写由 commandAccess 从命令本身判，不再预先分列。 */
+	allow: string[];
 	/** 允许网络（默认关闭，沙箱内使用私有网络命名空间）。 */
 	network: boolean;
 	/** scope 命中的目录在沙箱里可写（默认只读根）。 */
@@ -66,6 +68,8 @@ export interface BashRule {
 
 export interface BashMatch {
 	access: BashAccess;
+	/** 命中哪一列：legacy 的 read / write，或是新的 allow。 */
+	column: "read" | "write" | "allow";
 	/** 命中的条目原文，用于拒绝文案与诊断。 */
 	entry: string;
 }
@@ -347,6 +351,14 @@ const WRAPPER_FLAGS: Record<string, WrapperFlags> = {
 	stdbuf: {
 		withArg: ["-i", "-o", "-e", "--input", "--output", "--error"],
 	},
+	// xargs 的旗标按「吃不吃下一个 token」分组；判不准就剥不到程序位，宁可按 write 处理。
+	xargs: {
+		noArg: ["-t", "-r", "-0"],
+		withArg: [
+			"-n", "--max-args", "-I", "--replace", "-P", "--max-procs",
+			"-d", "--delimiter", "-E", "-L", "-s", "-a", "--arg-file",
+		],
+	},
 };
 const WRAPPERS = new Set(Object.keys(WRAPPER_FLAGS));
 const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
@@ -357,11 +369,12 @@ const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
  * 带值旗标吃掉下一个 token（或等号右边），没列出的旗标一律当判不准而放行。
  * `command -v/-V` 只查询不执行，直接放弃判断。套得太深也放弃。
  */
-function peelWrappers(words: string[]): string[] | null {
+function peelWrappers(words: string[], seenWrappers?: Set<string>): string[] | null {
 	let rest = words;
 	for (let depth = 0; depth < 8; depth += 1) {
 		const wrapper = rest[0];
 		if (!wrapper || !WRAPPERS.has(wrapper)) return rest;
+		seenWrappers?.add(wrapper);
 		// `command -v curl` / `command -V curl` 只报路径不运行，不能算它要联网。
 		if (wrapper === "command" && (rest[1] === "-v" || rest[1] === "-V")) return null;
 		const flags = WRAPPER_FLAGS[wrapper] as WrapperFlags;
@@ -425,15 +438,26 @@ function curlOnlyReadsFiles(args: string[]): boolean {
 // curl 的查询旗标打印完本地信息就退出；放在任何 URL 之前都成立，不能当成要出网而误拒。
 const CURL_LOCAL_QUERY_FLAGS = new Set(["--version", "-V", "--help", "-h"]);
 
+interface GitSubcommand {
+	/** 子命令所在的 token 下标。 */
+	index: number;
+	/** 全局旗标都认得、位置可靠时为 true；认不全时调用方必须按 write 处理。 */
+	certain: boolean;
+}
+
 /**
  * git 的全局旗标排在子命令前面；跳过它们才知道真正要跑的子命令。
- * 只认下面这些确定的全局旗标，遇到别的就把它当子命令（不在网络名单里 → 放行）。
+ *
+ * 调用方用 quote-aware 的 shellTokens 切词：带引号的旗标值（`core.pager='rm x'`）是单个 token，
+ * 吃掉值之后直接就到子命令，不必再把引号残片拼回去。
+ * 没列进来的旗标（例如带参数的 `--namespace`）吃不吃值判不准，返回 `certain: false`：
+ * 此时子命令位置不可靠，写判定必须落到 write，而不是顺着错位置把它当 read。
  */
-function gitSubcommandIndex(words: string[]): number {
+function gitSubcommandIndex(words: string[]): GitSubcommand {
 	let i = 1;
 	for (;;) {
 		const word = words[i];
-		if (word === undefined) return i;
+		if (word === undefined) return { index: i, certain: true };
 		if (word === "-C" || word === "--git-dir" || word === "--work-tree" || word === "-c") {
 			i += 2; // 吃一个参数
 			continue;
@@ -442,17 +466,31 @@ function gitSubcommandIndex(words: string[]): number {
 			word.startsWith("--git-dir=") ||
 			word.startsWith("--work-tree=") ||
 			word === "--no-pager" ||
-			word === "--progress"
+			word === "--progress" ||
+			// 这些没有参数（或只用 = 形式带参数），吃一个 token 就到子命令。
+			word === "-p" ||
+			word === "--paginate" ||
+			word === "-P" ||
+			word === "--exec-path" ||
+			word === "--literal-pathspecs" ||
+			word === "--no-replace-objects" ||
+			word === "--no-optional-locks" ||
+			word === "--bare" ||
+			word === "--version" ||
+			word === "--help" ||
+			word === "-h"
 		) {
 			i += 1;
 			continue;
 		}
-		return i;
+		// 没见过的短/长旗标：不知道它吃不吃下一个 token，子命令位置判不准。
+		if (word.startsWith("-") && word !== "-") return { index: i, certain: false };
+		return { index: i, certain: true };
 	}
 }
 
 export function requiresNetwork(command: string): string | null {
-	const words = tokens(leadingAssignments(command).rest);
+	const words = shellTokens(leadingAssignments(command).rest);
 	const effective = peelWrappers(words);
 	if (!effective || effective.length === 0) return null;
 	// 绝对路径也要认：`/usr/bin/curl` 与 `curl` 是同一个程序。
@@ -471,13 +509,15 @@ export function requiresNetwork(command: string): string | null {
 		return program;
 	}
 	if (program === "git") {
-		const at = gitSubcommandIndex(effective);
-		const sub = effective[at];
+		const located = gitSubcommandIndex(effective);
+		// 子命令位置认不全时网络也认不出：沿用本层「拿不准就放行」的口径，不误拒本地命令。
+		if (!located.certain) return null;
+		const sub = effective[located.index];
 		if (sub && GIT_NETWORK_SUBCOMMANDS.has(sub)) return `git ${sub}`;
-		const next = effective[at + 1];
+		const next = effective[located.index + 1];
 		// `git remote -v` / `git submodule update` 只看本地；带上 update 才去网络上取。
 		if (sub === "remote" && next === "update") return "git remote update";
-		if (sub === "submodule" && next === "update" && effective.slice(at + 2).includes("--remote")) {
+		if (sub === "submodule" && next === "update" && effective.slice(located.index + 2).includes("--remote")) {
 			return "git submodule update --remote";
 		}
 		return null;
@@ -487,6 +527,235 @@ export function requiresNetwork(command: string): string | null {
 	const sub = effective[1];
 	const list = NETWORK_SUBCOMMANDS[program] as string[];
 	return sub && list.includes(sub) ? `${program} ${sub}` : null;
+}
+
+
+/**
+ * 命令的固有写能力判定：给 `allow` 列归类用，只看命令本身，不看路径与白名单。
+ *
+ * 只认下面这些写得确定的程序与子命令，其余一律 read。把拿不准的程序判成 write 是误授权，
+ * 反方向（判成 read）只是少给一点权限，所以这里一律取后者。
+ *
+ * 四种容易漏的形态都在这一层剥掉或判掉：
+ * - 前置赋值（`FOO=1 rm x`）：先剥赋值，程序位是 `rm`，不是 `FOO=1`；
+ * - 直通包装器（`env` / `sudo` / `nice` / `timeout` / `xargs`）：剥到真正跑的程序；
+ * - 程序写成路径（`/usr/bin/rm`、`./rm`）：取 basename，和裸程序名落同一张表；
+ * - `;` / `|` / `&&` 链：逐段判，任一段的程序会写，整条就算写 —— 只看第一段会把
+ *   `cat x; rm y` 放过去，而它后半句确实会删文件。
+ *
+ * `writableCeiling` 是外部的写上限（role 的 `bash.writable`）：false 时表里怎么写都返回
+ * read —— 没有写授权，判成 write 也拿不到写权限。要问「这个程序本身会不会写」时传 true。
+ */
+const WRITE_PROGRAMS = new Set([
+	"mkdir", "cp", "mv", "rm", "touch", "chmod", "chown", "ln", "tee", "dd",
+	"truncate", "install", "rsync",
+]);
+const READ_PROGRAMS = new Set([
+	"cat", "ls", "rg", "find", "grep", "head", "tail", "wc", "file", "stat",
+	"diff", "cmp", "du", "df", "echo", "pwd", "which", "type",
+]);
+const WRITE_GIT_SUBCOMMANDS = new Set([
+	"add", "commit", "switch", "stash", "init", "worktree", "rm", "mv", "apply",
+	"cherry-pick", "merge", "rebase", "tag",
+	// 会改写工作树、索引或仓库历史的子命令：漏一个就会静默按 read 跑。
+	"checkout", "restore", "reset", "clean", "revert", "pull", "fetch", "clone",
+	"gc", "prune", "update-index", "submodule", "notes", "am", "sparse-checkout",
+]);
+const READ_GIT_SUBCOMMANDS = new Set([
+	"status", "diff", "log", "show", "rev-parse", "branch", "remote", "blame", "describe",
+]);
+// branch / remote 平时只读，带上这些参数就改写分支或远端配置。
+const WRITE_GIT_BRANCH_FLAGS = new Set(["-d", "-D", "-m", "-M", "-C", "-c", "-f", "--move", "--delete", "--copy", "--force", "--unset-upstream", "--set-upstream-to", "--edit-description"]);
+const WRITE_GIT_REMOTE_ARGS = new Set(["add", "remove", "rename", "set-url", "set-head", "prune", "set-branches", "update"]);
+// tag 平时算写（会打标签），纯列举的旗标与无标签名时才是读。
+const GIT_TAG_LISTING_FLAGS = new Set(["-l", "--list", "--contains", "--points-at", "--sort", "--format"]);
+const GIT_TAG_WRITE_FLAGS = new Set(["-d", "-a", "-f"]);
+// find 默认只读，这些动作参数会改文件（find 自己就能删、能跑任意命令）。
+const WRITE_FIND_ARGS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"]);
+const ACCESS_PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn", "bun"]);
+// 包管理器只有这些子命令只读；run/exec/test/...
+// 都会执行任意代码，没列进来的按 write（少一个误放比少一个误拒严重）。
+const READ_ONLY_PACKAGE_SUBCOMMANDS = new Set(["list", "ls", "why", "view", "info", "show", "outdated"]);
+// 这些子命令会执行代码或改文件；位置不确定时定位到它们，名字本身仍是子命令的强证据。
+const WRITE_PACKAGE_SUBCOMMANDS = new Set(["run", "exec", "dlx", "test", "start", "create", "install", "add", "remove", "uninstall", "update", "ci", "publish"]);
+// config / store 本身不写，但第二 token 决定动作：get/path 查询，set/prune 会改文件。
+const READ_ONLY_PACKAGE_CONFIG_ARGS = new Set(["get", "list", "ls"]);
+const READ_ONLY_PACKAGE_STORE_ARGS = new Set(["path", "status"]);
+const INTERPRETERS = new Set(["node", "python", "python3", "sh", "bash", "zsh", "ruby", "perl"]);
+
+type WriteVerdict = "write" | "read" | "unknown";
+
+/** 按 shell 控制符切段；引号内与反斜杠转义的字符不当分隔符。 */
+function commandSegments(command: string): string[] {
+	const out: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | undefined;
+	for (let i = 0; i < command.length; i += 1) {
+		const ch = command[i] as string;
+		if (quote === "'") {
+			current += ch;
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === '"') {
+			current += ch;
+			if (ch === "\\" && i + 1 < command.length) {
+				current += command[i + 1] as string;
+				i += 1;
+				continue;
+			}
+			if (ch === '"') quote = undefined;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			current += ch;
+			continue;
+		}
+		if (ch === "\\" && i + 1 < command.length) {
+			current += ch + (command[i + 1] as string);
+			i += 1;
+			continue;
+		}
+		if (ch === ";" || ch === "|" || ch === "\n" || ch === "&") {
+			out.push(current);
+			current = "";
+			if (ch === "&" && command[i + 1] === "&") i += 1;
+			continue;
+		}
+		current += ch;
+	}
+	out.push(current);
+	return out.map((segment) => segment.trim()).filter((segment) => segment !== "");
+}
+
+interface PackageSubcommand {
+	/** 子命令所在的 token 下标。 */
+	index: number;
+	/** 位置可靠时为 true（前置旗标都认得，或定位到已知子命令）；否则调用方必须按 write 处理。 */
+	certain: boolean;
+}
+
+// 包管理器的全局旗标里，这些要吃掉下一个 token 才到子命令。等号形式自己带值，另按单 token 处理。
+const PACKAGE_VALUE_FLAGS = new Set(["-C", "--dir", "--prefix", "-F", "--filter", "--registry", "--reporter", "--loglevel"]);
+// 这些旗标自己不带值（workspace-root 是布尔旗标；global 是 config 的作用域开关），跳一个就到子命令。
+const PACKAGE_NO_ARG_FLAGS = new Set(["--version", "-v", "--help", "-h", "--global", "-g", "--workspace-root"]);
+
+/**
+ * 跳过包管理器的全局旗标，定位真正的子命令。没列进来的旗标只跳它自己，并记下位置已不确定：
+ * 若其后定位到的是已知子命令（只读表或会写的那张），名字本身就是位置的强证据，照它判；
+ * 若定位到的 token 也不认识，就不猜 read，交给调用方按 write 处理。
+ */
+function packageSubcommandIndex(words: string[]): PackageSubcommand {
+	let i = 1;
+	let uncertain = false;
+	for (;;) {
+		const word = words[i];
+		if (word === undefined) return { index: i, certain: true };
+		if (!word.startsWith("-") || word === "-") {
+			// 位置不确定时只有已知子命令的名字能坐实它，否则维持「不可靠」。
+			const known = READ_ONLY_PACKAGE_SUBCOMMANDS.has(word) || WRITE_PACKAGE_SUBCOMMANDS.has(word);
+			return { index: i, certain: !uncertain || known };
+		}
+		// `--dir=x`、`--config.foo=bar` 这类值就在同一个 token 里。
+		if (word.includes("=")) {
+			i += 1;
+			continue;
+		}
+		if (PACKAGE_VALUE_FLAGS.has(word)) {
+			i += 2;
+			continue;
+		}
+		if (PACKAGE_NO_ARG_FLAGS.has(word)) {
+			i += 1;
+			continue;
+		}
+		// 没见过的旗标：不知道它吃不吃下一个 token，只跳它自己并记下位置不确定。
+		i += 1;
+		uncertain = true;
+	}
+}
+
+/** 单个程序的写判定：只认表里的，子命令按子命令表，其余 unknown。 */
+function programWriteVerdict(words: string[]): WriteVerdict {
+	const program = basename(words[0] as string);
+	const args = words.slice(1);
+	if (WRITE_PROGRAMS.has(program) || INTERPRETERS.has(program)) return "write";
+	if (program === "sed") {
+		return args.some((arg) => arg === "-i" || arg.startsWith("-i") || arg.startsWith("--in-place")) ? "write" : "read";
+	}
+	if (program === "find") {
+		return args.some((arg) => WRITE_FIND_ARGS.has(arg)) ? "write" : "read";
+	}
+	if (program === "git") {
+		const located = gitSubcommandIndex(words);
+		// 全局旗标认不全就定位不到子命令：按 write 处理，不能顺着错位置静默判 read。
+		if (!located.certain) return "write";
+		const sub = words[located.index];
+		const subArgs = words.slice(located.index + 1);
+		// tag 的例外要先于整张写表：列举标签不写任何东西。
+		if (sub === "tag") {
+			if (subArgs.some((arg) => GIT_TAG_WRITE_FLAGS.has(arg))) return "write";
+			const listing = subArgs.some((arg) =>
+				GIT_TAG_LISTING_FLAGS.has(arg) || [...GIT_TAG_LISTING_FLAGS].some((flag) => arg.startsWith(`${flag}=`))
+			);
+			if (listing) return "read";
+			// 没有标签名也没有列举旗标（`git tag`）只是列全部。
+			return subArgs.some((arg) => !arg.startsWith("-")) ? "write" : "read";
+		}
+		if (sub && WRITE_GIT_SUBCOMMANDS.has(sub)) return "write";
+		if (sub === "branch" && subArgs.some((arg) => WRITE_GIT_BRANCH_FLAGS.has(arg))) return "write";
+		if (sub === "remote" && subArgs.some((arg) => WRITE_GIT_REMOTE_ARGS.has(arg))) return "write";
+		if (sub && READ_GIT_SUBCOMMANDS.has(sub)) return "read";
+		return "unknown";
+	}
+	if (ACCESS_PACKAGE_MANAGERS.has(program)) {
+		// 前置旗标可能吃掉自己的值；位置认不全时按 write，不能猜一个 token 当子命令。
+		const located = packageSubcommandIndex(words);
+		if (!located.certain) return "write";
+		const sub = words[located.index];
+		// 只有旗标（`pnpm --version`、`npm --help`）：打印完就退出，不写。
+		if (sub === undefined) return "read";
+		if (READ_ONLY_PACKAGE_SUBCOMMANDS.has(sub)) return "read";
+		// config / store / version 第二 token 才定读写：`npm version patch` 会改包文件。
+		const second = words.slice(located.index + 1).find((arg) => !arg.startsWith("-"));
+		if (sub === "config") return second !== undefined && READ_ONLY_PACKAGE_CONFIG_ARGS.has(second) ? "read" : "write";
+		if (sub === "store") return second !== undefined && READ_ONLY_PACKAGE_STORE_ARGS.has(second) ? "read" : "write";
+		if (sub === "version") return second === undefined ? "read" : "write";
+		return "write";
+	}
+	if (READ_PROGRAMS.has(program)) return "read";
+	return "unknown";
+}
+
+/**
+ * 一段命令的写判定。`xargs` 是拿来跑程序的：剥完旗标仍判不出程序时按 write，
+ * 不能因为表外就静默按 read 跑（那样它真的会写，而模型什么都不知道）。
+ */
+function segmentWriteVerdict(segment: string): WriteVerdict {
+	const words = shellTokens(leadingAssignments(segment).rest);
+	if (words.length === 0) return "unknown";
+	const seen = new Set<string>();
+	const effective = peelWrappers(words, seen);
+	if (!effective || effective.length === 0) return seen.has("xargs") ? "write" : "unknown";
+	const verdict = programWriteVerdict(effective);
+	if (verdict === "unknown" && seen.has("xargs")) return "write";
+	return verdict;
+}
+
+export function commandAccess(command: string, writableCeiling: boolean): "read" | "write" {
+	if (!writableCeiling) return "read";
+	for (const segment of commandSegments(command)) {
+		if (segmentWriteVerdict(segment) === "write") return "write";
+	}
+	return "read";
+}
+
+/** 任一段的程序不在任何表里就算 unknown：写越界注解要说清「它按 read 跑是因为判不出来」。 */
+export function isUnknownProgram(command: string): boolean {
+	const segments = commandSegments(command);
+	if (segments.length === 0) return false;
+	return segments.some((segment) => segmentWriteVerdict(segment) === "unknown");
 }
 
 /**
@@ -514,18 +783,26 @@ export function commandMatches(pattern: string, command: string): boolean {
 	return want.every((token, i) => have[i] === token);
 }
 
-/** 归类一条命令：write 列优先。不在任何列时返回 undefined。 */
+/**
+ * 归类一条命令。legacy 两列先判且各按原义：write 命中 = write，read 命中 = read；
+ * allow 列最后判，读写由 commandAccess 从命令本身推出来。
+ *
+ * allow 排在 legacy 两列之后是刻意的：同一条命令同时列进 write 与 allow 时，legacy 语义
+ * 必须原样保留（这个兼容阶段不改老配置的行为）；先判 allow 会把它重新判成可能的 read。
+ */
 export function classifyCommand(rule: BashRule, command: string): BashMatch | undefined {
 	const write = rule.write.find((entry) => commandMatches(entry, command));
-	if (write !== undefined) return { access: "write", entry: write };
+	if (write !== undefined) return { access: "write", column: "write", entry: write };
 	const read = rule.read.find((entry) => commandMatches(entry, command));
-	if (read !== undefined) return { access: "read", entry: read };
+	if (read !== undefined) return { access: "read", column: "read", entry: read };
+	const allow = rule.allow.find((entry) => commandMatches(entry, command));
+	if (allow !== undefined) return { access: commandAccess(command, rule.writable), column: "allow", entry: allow };
 	return undefined;
 }
 
-/** 全部条目（供拒绝文案与诊断）。 */
+/** 全部条目（供拒绝文案与诊断），三列都要列。 */
 export function allEntries(rule: BashRule): string[] {
-	return [...rule.read, ...rule.write];
+	return [...rule.read, ...rule.write, ...rule.allow];
 }
 
 /** 命中禁止列表时返回该条目原文，否则 undefined。 */
@@ -562,18 +839,20 @@ function stringMap(value: unknown): Record<string, string> {
 }
 
 /**
- * 解析 bindings 里的 bash 字段。没写、写坏、两列都空都返回 undefined（= 拒绝 bash）。
- * `allow` 是旧字段（单列表，全部按可写对待），保留兼容。
+ * 解析 bindings 里的 bash 字段。没写、写坏、三列都空都返回 undefined（= 拒绝 bash）。
+ * `read` / `write` 是兼容列，含义照旧；`allow` 是新的单列，读写留给 commandAccess 判。
  */
 export function parseBashRule(raw: unknown): BashRule | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
 	const cfg = raw as Record<string, unknown>;
 	const read = stringList(cfg.read);
-	const write = stringList(cfg.write).concat(stringList(cfg.allow));
-	if (read.length === 0 && write.length === 0) return undefined;
+	const write = stringList(cfg.write);
+	const allow = stringList(cfg.allow);
+	if (read.length === 0 && write.length === 0 && allow.length === 0) return undefined;
 	return {
 		read,
 		write,
+		allow,
 		network: cfg.network === true,
 		writable: cfg.writable === true,
 		writablePaths: stringList(cfg.writablePaths),
@@ -656,7 +935,7 @@ function bashLists(bottom: Record<string, unknown>, top: Record<string, unknown>
 		// 显式空列表同理：不写进结果，底层那份就又回来了。
 		if (list.length > 0 || reset || declared) out[key] = list;
 	}
-	// `write` 与 `allow` 是**同一列**的两个拼法（`parseBashRule` 把两者接在一起），所以合并也
+	// `write` 与 `allow` 在**合并层**仍按同一列处理（兼容期保留的两拼法；parseBashRule 已分列），
 	// 必须按列、不能按键：不然「这一列只留 x」会有两种拼法、两种结果 —— 派单写
 	// `{ write: [], allow: ["x"] }` 能清掉 profile 的 `write`，而 `{ allow: [], write: ["x"] }`
 	// 却留着，差别只在 profile 当初用哪个拼法。按列处理：上层**任一**别名显式为空，

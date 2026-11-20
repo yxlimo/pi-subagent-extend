@@ -3730,7 +3730,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-subagents-extend/1": {
         scope: ["src/**"],
-        bash: { read: ["git status"], writablePaths: [grant] },
+        bash: { read: ["git status"], writable: true, writablePaths: [grant] },
       },
     }),
     cwd: outsideTmp,
@@ -3758,7 +3758,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-subagents-extend/1": {
         scope: ["src/**"],
-        bash: { read: ["git status"], writablePaths: [grant] },
+        bash: { read: ["git status"], writable: true, writablePaths: [grant] },
       },
     }),
     cwd: outsideTmp,
@@ -3780,7 +3780,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-subagents-extend/1": {
         scope: ["src/**"],
-        bash: { read: ["git status"], writablePaths: [inside] },
+        bash: { read: ["git status"], writable: true, writablePaths: [inside] },
       },
     }),
     cwd: outsideTmp,
@@ -3811,7 +3811,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-subagents-extend/1": {
         scope: ["src/**"],
-        bash: { read: ["git status"], writablePaths: [grantViaLink] },
+        bash: { read: ["git status"], writable: true, writablePaths: [grantViaLink] },
       },
     }),
     cwd: outsideTmp,
@@ -3852,7 +3852,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
     bindings: JSON.stringify({
       "pi-subagents-extend/1": {
         scope: ["src/**"],
-        bash: { read: ["git status"], writablePaths: [grantInside] },
+        bash: { read: ["git status"], writable: true, writablePaths: [grantInside] },
       },
     }),
     cwd: outsideTmp,
@@ -5794,9 +5794,9 @@ const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typ
 // 193. permissions.bash is reported, not silently dropped.
 {
   const out = rc.policyFromBlock({ permissions: { scope: ["."], bash: { read: ["git status"] } } })
-  assert.ok(out.problems.some((p) => p.includes("bash authorization is not wired in this phase")))
+  assert.ok(out.problems.some((p) => p.includes("the legacy read/write spelling belongs to bindings")))
   assert.deepEqual(out.policy?.scope, ["."], "the other fields still convert")
-  console.log("  ok   permissions.bash gets a not-wired problem")
+  console.log("  ok   permissions.bash reports the legacy spelling and points to bindings")
 }
 
 // 194. Each unwired top-level block gets its own problem.
@@ -6102,6 +6102,614 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   console.log("  ok   an unconfigured child warns that no configuration is in effect and it is unconstrained")
 }
 
+// 209–220. Role-config phase 2: the single bash.allow column, with read/write judged internally.
+const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as typeof import("../src/bash-match.ts")
+
+// 209. commandAccess: every writer in the table classifies as write.
+{
+  const writers = [
+    "mkdir d", "cp a b", "mv a b", "rm f", "touch f", "chmod +x f", "chown u f",
+    "ln -s a b", "tee f", "dd if=a of=b", "truncate -s 0 f", "install a b", "rsync a b",
+    "sed -i s/a/b/ f", "sed --in-place s/a/b/ f",
+    "git add .", "git commit -m x", "git switch x", "git stash", "git init",
+    "git worktree add x", "git rm f", "git mv a b", "git apply p", "git cherry-pick x",
+    "git merge x", "git rebase x", "git tag v1",
+    "pnpm install", "npm add x", "yarn remove x", "bun uninstall x", "pnpm update", "npm ci", "pnpm test",
+    "node a.mjs", "python a.py", "python3 a.py", "sh a.sh", "bash a.sh", "zsh a.sh",
+    "ruby a.rb", "perl a.pl",
+  ]
+  for (const cmd of writers) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `writer must be write: ${cmd}`)
+  }
+  console.log("  ok   commandAccess puts every writer in the write class")
+}
+
+// 210. commandAccess: readers, unknown programs and non-writing subcommands stay read.
+{
+  const readers = [
+    "cat f", "ls", "rg x", "find .", "grep x f", "head f", "tail f", "wc f", "file f",
+    "stat f", "diff a b", "cmp a b", "du .", "df .", "echo hi", "pwd", "which node", "type ls",
+    "git status", "git diff", "git log", "git show HEAD", "git rev-parse HEAD", "git branch",
+    "git remote -v", "git blame f", "git describe",
+    "frobnicate --things",
+  ]
+  for (const cmd of readers) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `reader/unknown must be read: ${cmd}`)
+  }
+  console.log("  ok   commandAccess leaves readers, unknown programs and non-writing subcommands as read")
+}
+
+// 211. commandAccess peels assignments, wrappers and paths, and judges every chain segment.
+{
+  const peeled = [
+    "env rm x", "sudo rm x", "nice rm x", "timeout 5 rm x", "xargs rm x",
+    "/usr/bin/rm x", "./rm x", "FOO=1 rm x", "env FOO=1 rm x",
+  ]
+  for (const cmd of peeled) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `peeled writer must be write: ${cmd}`)
+  }
+  assert.equal(bashApi.commandAccess("cat x; rm y", true), "write", "a chain with a writer writes")
+  assert.equal(bashApi.commandAccess("cat x && rm y", true), "write", "&& with a writer writes")
+  assert.equal(bashApi.commandAccess("cat x | grep y", true), "read", "an all-reader pipe stays read")
+  console.log("  ok   commandAccess peels assignments/wrappers/paths and scans every chain segment")
+}
+
+// 212. commandAccess honours the writable ceiling; isUnknownProgram names unlisted programs.
+{
+  assert.equal(bashApi.commandAccess("rm x", false), "read", "no write grant forces read for a writer")
+  assert.equal(bashApi.commandAccess("cat x; rm y", false), "read", "the ceiling wins even for a chain")
+  assert.equal(bashApi.isUnknownProgram("frobnicate x"), true, "a program outside both tables is unknown")
+  assert.equal(bashApi.isUnknownProgram("rm x"), false, "a listed writer is not unknown")
+  assert.equal(bashApi.isUnknownProgram("cat x"), false, "a listed reader is not unknown")
+  console.log("  ok   writable=false forces read; unknown programs are distinguishable")
+}
+
+// 213. parseBashRule gives allow its own column and keeps legacy read/write unchanged.
+{
+  const only = bashApi.parseBashRule({ allow: ["git status"] })
+  assert.deepEqual(only?.read, [], "allow alone does not populate read")
+  assert.deepEqual(only?.write, [], "allow alone no longer populates write")
+  assert.deepEqual(only?.allow, ["git status"], "allow alone populates allow")
+
+  const legacy = bashApi.parseBashRule({ read: ["cat f"], write: ["rm f"], allow: ["git status"] })
+  assert.deepEqual(legacy?.read, ["cat f"], "legacy read is unchanged")
+  assert.deepEqual(legacy?.write, ["rm f"], "legacy write no longer absorbs allow")
+  assert.deepEqual(legacy?.allow, ["git status"], "allow stays separate")
+
+  assert.equal(bashApi.parseBashRule({}), undefined, "all three columns empty means no bash")
+  assert.equal(bashApi.parseBashRule({ allow: [] }), undefined, "an explicitly empty allow is still no bash")
+  console.log("  ok   parseBashRule keeps allow as its own column")
+}
+
+// 214. classifyCommand takes access from the column that matched; allEntries includes allow.
+{
+  const legacy = bashApi.parseBashRule({ read: ["cat f"], write: ["rm f"] })
+  assert.ok(legacy)
+  assert.equal(bashApi.classifyCommand(legacy, "rm f")?.access, "write", "legacy write is still write")
+  assert.equal(bashApi.classifyCommand(legacy, "rm f")?.column, "write", "and reports the write column")
+  assert.equal(bashApi.classifyCommand(legacy, "cat f")?.access, "read", "legacy read is still read")
+  assert.equal(bashApi.classifyCommand(legacy, "cat f")?.column, "read", "and reports the read column")
+
+  const allowed = bashApi.parseBashRule({ allow: ["rm w", "cat r", "frobnicate u"], writable: true })
+  assert.ok(allowed)
+  const w = bashApi.classifyCommand(allowed, "rm w")
+  assert.equal(w?.access, "write", "allow + writer program is write")
+  assert.equal(w?.column, "allow", "and reports the allow column")
+  assert.equal(bashApi.classifyCommand(allowed, "cat r")?.access, "read", "allow + reader program is read")
+  const unknown = bashApi.classifyCommand(allowed, "frobnicate u")
+  assert.equal(unknown?.access, "read", "allow + unknown program is read")
+  assert.ok(unknown && bashApi.isUnknownProgram("frobnicate u"), "and the program is flagged unknown")
+  assert.deepEqual(bashApi.allEntries(allowed), ["rm w", "cat r", "frobnicate u"], "allow shows up in allEntries")
+
+  const ceiling = bashApi.parseBashRule({ allow: ["rm w"], writable: false })
+  assert.ok(ceiling)
+  assert.equal(bashApi.classifyCommand(ceiling, "rm w")?.access, "read", "writable:false ceilings an allow writer")
+  console.log("  ok   classifyCommand derives allow access from the program, legacy columns untouched")
+}
+
+// 215. An allow-listed writer with writable:false is refused before spawn, on the write budget.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["rm x"], writable: false }, maxWriteDenies: 1 },
+    }),
+  })
+  const input = { command: "rm x" }
+  const outcome = await h.call("bash", input)
+  assert.equal(outcome?.block, true, "the writer is refused")
+  assert.match(outcome?.reason ?? "", /the role may run this command/, "the allow grant is acknowledged")
+  assert.match(outcome?.reason ?? "", /bash\.writable: false gives no write access/, "the cause is named")
+  assert.match(outcome?.reason ?? "", /Write refusal 1 in a row/i, "it counts on the write budget")
+  assert.equal(input.command, "rm x", "the command is not rewritten, so nothing was spawned")
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m) => h.ui.push(m) } })
+  assert.match(h.ui.at(-1) ?? "", /write denials: 1\/1/, "the write budget was consumed")
+  assert.match(h.ui.at(-1) ?? "", /read denials: 0\//i, "the grant budget was untouched")
+  h.restore()
+  console.log("  ok   allow + writer + writable:false is a write-budget refusal before spawn")
+}
+
+// 216. An allow-listed reader runs through the sandbox like any bash call.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["cat src/auth/x.ts"] } } }),
+  })
+  const input = { command: "cat src/auth/x.ts" }
+  assert.equal(await h.call("bash", input), undefined, "the reader is allowlisted and runs")
+  assert.match(input.command, /pi-subagents-extend-helper/, "it goes through the sandbox")
+  assert.deepEqual(specOf(input.command).read, ["/"], "the spec is the usual read-only sandbox")
+  h.restore()
+  console.log("  ok   allow + reader runs under the sandbox")
+}
+
+// 217. The md's permissions.bash accepts the new keys and reports bad/unknown ones.
+{
+  const good = rc.policyFromBlock({
+    permissions: { scope: ["."], bash: { allow: ["cat f", "rm x"], deny: ["rm f"], writable: true, network: false } },
+  })
+  assert.deepEqual(good.problems, [], "a well-formed bash block is accepted")
+  assert.deepEqual(good.policy?.bash, {
+    allow: ["cat f", "rm x"], deny: ["rm f"], writable: true, network: false,
+  }, "the bash keys map onto the role policy")
+
+  const bad = rc.policyFromBlock({
+    permissions: { scope: ["."], bash: { allow: "cat f", writable: "yes", mystery: 1 } },
+  })
+  assert.ok(bad.problems.some((p) => p.includes("permissions.bash.allow")), "a non-array allow is reported")
+  assert.ok(bad.problems.some((p) => p.includes("permissions.bash.writable")), "a non-boolean writable is reported")
+  assert.ok(bad.problems.some((p) => p.includes("mystery")), "unknown keys are still reported")
+  assert.equal(bad.policy?.bash?.allow, undefined, "a bad allow is omitted")
+
+  const legacy = rc.policyFromBlock({ permissions: { scope: ["."], bash: { write: ["rm f"] } } })
+  assert.ok(legacy.problems.some((p) => p.includes('use "allow"')), "the md legacy spelling points to allow")
+  assert.equal(legacy.policy?.bash, undefined, "and is not accepted")
+  console.log("  ok   md permissions.bash takes allow/deny/writable/network and reports bad keys")
+}
+
+// 218. md permissions.bash.allow reaches a child session and gates bash end to end.
+{
+  const home = join(workdir, "role-home-218")
+  const md = join(home, ".agents", "md-bash-coder.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["**"]\n    bash:\n      allow: ["cat src/auth/x.ts"]\n      writable: false\n---\n# md-bash-coder\n')
+  const proj = join(workdir, "role-proj-218")
+  mkdirSync(join(proj, "src", "auth"), { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="md-bash-coder"/>\nhello' })
+  assert.equal(await run.call("bash", { command: "cat src/auth/x.ts" }), undefined, "the md allowlist runs the reader")
+  const blocked = await run.call("bash", { command: "rm src/auth/x.ts" })
+  assert.ok(blocked && blocked.block, "a command outside the md allowlist is refused")
+  run.restore()
+  console.log("  ok   md permissions.bash.allow reaches the child and gates bash")
+}
+
+// 219. A legacy bash.read/bash.write config warns once about the migration.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { read: ["cat f"], write: ["rm f"] } } }),
+  })
+  const warnings = h.ui.filter((m) => m.includes("legacy columns"))
+  assert.equal(warnings.length, 1, "one migration warning for the legacy config")
+  assert.match(warnings[0], /bash\.allow/, "the warning names the new column")
+  assert.match(warnings[0], /read\/write is judged internally/, "it says access is judged internally")
+  const before = h.ui.length
+  await h.call("bash", { command: "cat f" })
+  assert.equal(h.ui.length, before, "no repeat warning on a later call")
+  h.restore()
+  console.log("  ok   a legacy bash.read/write config warns once about bash.allow")
+}
+
+// 220. A failed write by an allow-listed unknown program explains that it ran read-only.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["frobnicate"] } } }),
+  })
+  const input = { command: "frobnicate" }
+  assert.equal(await h.call("bash", input), undefined, "the unknown program is allowlisted and runs")
+  const target = `/var/tmp/pi-extend-${process.pid}/out.txt`
+  const outcome = await h.result("bash", `error: cannot write '${target}': Permission denied`, true)
+  const content: unknown = outcome?.content
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => (part as { text?: string }).text ?? "").join("\n") : ""
+  assert.match(text, /outside the writes the parent granted/, "the ordinary write-refusal note is present")
+  assert.match(text, /could not tell that this program writes, so it was not treated as a write/, "the read-only cause sentence is corrected")
+  assert.doesNotMatch(text, /ran read-only/, "it no longer claims the program ran read-only")
+  assert.match(text, /ask for bash\.writable: true/, "a role without the ceiling is asked for the ceiling")
+  assert.doesNotMatch(text, /ask for writablePaths/, "and not for writablePaths it cannot use")
+  h.restore()
+  console.log("  ok   a failed write by an unknown allow-listed program explains the ceiling, not a read-only run")
+}
+
+// 221. A writablePaths grant must not widen a bash.writable:false role, even for a read command.
+//      The ceiling is the role's own contract: a grant reaches the sandbox spec only when the role
+//      is writable. Put the grant in the repo (not /tmp), where dropHiddenGrants keeps it when it is
+//      present, so its absence pins the writable gate rather than tmpfs filtering.
+{
+  const cwd = mkdtempSync(join(repo, ".test-cwd-"))
+  const grant = join(cwd, "no-write-grant")
+  mkdirSync(grant, { recursive: true })
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { read: ["git status"], writable: false, writablePaths: [grant] },
+      },
+    }),
+    cwd,
+  })
+  const input = { command: "git status" }
+  assert.equal(await h.call("bash", input), undefined, "the read command passes")
+  const spec = specOf(input.command)
+  assert.ok(
+    !spec.write.includes(grant),
+    `a writable:false role must not mount its writablePaths grant, got: ${spec.write.join(", ")}`
+  )
+  h.restore()
+  rmSync(cwd, { recursive: true, force: true })
+  console.log("  ok   a writable:false role does not mount its writablePaths grant")
+}
+
+// 222. The git write table must cover every subcommand that rewrites the work tree or history.
+//      A missed verb is the worst failure: the command runs as a read and nothing says so.
+{
+  const writers = [
+    "git reset --hard", "git clean -fd", "git checkout b", "git restore f",
+    "git pull", "git revert HEAD", "git tag v1",
+    "git branch -d x", "git remote add o u",
+  ];
+  for (const cmd of writers) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `git writer must be write: ${cmd}`)
+  }
+  const readers = ["git status", "git log", "git tag -l", "git branch", "git remote -v"]
+  for (const cmd of readers) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `git reader must be read: ${cmd}`)
+  }
+  console.log("  ok   git write/read subcommands and argument predicates are classified correctly")
+}
+
+// 223. find is a reader until an action argument appears; those arguments write on their own.
+{
+  for (const cmd of ["find . -delete", "find . -exec rm {} +"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `find action must be write: ${cmd}`)
+  }
+  assert.equal(bashApi.commandAccess("find . -name x", true), "read", "a plain find stays a reader")
+  console.log("  ok   find's deleting/executing arguments are write, a plain find is read")
+}
+
+// 224. A package manager runs arbitrary code unless its subcommand is provably read-only.
+{
+  for (const cmd of ["pnpm run build", "pnpm exec rm x", "pnpm test", "npm run build"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `package manager must be write: ${cmd}`)
+  }
+  for (const cmd of ["pnpm list", "npm view x"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `read-only subcommand must be read: ${cmd}`)
+  }
+  console.log("  ok   package managers are write except for the read-only subcommand set")
+}
+
+// 225. xargs flags must be consumed so the program word is judged, not the flags.
+{
+  for (const cmd of ["xargs -0 rm", "xargs -a list rm", "xargs -n1 rm"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `flagged xargs must be write: ${cmd}`)
+  }
+  assert.equal(bashApi.commandAccess("xargs frobnicate", true), "write", "an unknown payload program is still write")
+  // 这两条钉住旗标表本身：旗标吃掉后认出 reader，判 read；没有旗标表就会落到「判不准即 write」。
+  for (const cmd of ["xargs -0 cat", "xargs -a list cat"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `flagged xargs with a reader must be read: ${cmd}`)
+  }
+  console.log("  ok   xargs flag tables expose the program word, and unknown programs are write")
+}
+
+// 226. sed -i takes an optional suffix: -i.bak and -i'' are in-place writes too.
+{
+  assert.equal(bashApi.commandAccess("sed -i.bak s/a/b/ f", true), "write", "a suffixed -i writes")
+  assert.equal(bashApi.commandAccess("sed s/a/b/ f", true), "read", "plain sed stays a reader")
+  console.log("  ok   every -i spelling is a write, plain sed is a read")
+}
+
+// 227. isUnknownProgram checks every segment, and known readers never masquerade as unknown
+//      (otherwise the read side of the tables is unpinned: unknown also falls back to read).
+{
+  for (const cmd of ["git status", "find .", "cat x", "ls"]) {
+    assert.equal(bashApi.isUnknownProgram(cmd), false, `known reader must not be unknown: ${cmd}`)
+  }
+  assert.equal(bashApi.isUnknownProgram("cat x; frobnicate y"), true, "an unknown later segment counts")
+  assert.equal(bashApi.isUnknownProgram("frobnicate y; cat x"), true, "an unknown first segment counts")
+  console.log("  ok   isUnknownProgram scans every segment and keeps known readers known")
+}
+
+// 228. A command granted by `allow` is refused for writable:false even when a legacy write
+//      column also matches it: the gate keys off the allow grant and intrinsic write, not off
+//      which column classifyCommand reported first.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { write: ["rm"], allow: ["rm x"], writable: false }, maxWriteDenies: 1 },
+    }),
+  })
+  const input = { command: "rm x" }
+  const outcome = await h.call("bash", input)
+  assert.equal(outcome?.block, true, "the writer is refused before spawn")
+  assert.match(outcome?.reason ?? "", /the role may run this command/, "the allow grant is acknowledged")
+  assert.match(outcome?.reason ?? "", /bash\.writable: false gives no write access/, "the cause is named")
+  assert.match(outcome?.reason ?? "", /matched the legacy write column, which does not grant writes/, "the shadowing legacy column is named")
+  assert.equal(input.command, "rm x", "the command is not rewritten, so nothing was spawned")
+  h.restore()
+  console.log("  ok   an allow grant is refused for a writer even when a legacy write column matches first")
+}
+
+// 229. The same columns with the write ceiling granted run through the sandbox.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { write: ["rm"], allow: ["rm x"], writable: true }, maxWriteDenies: 1 },
+    }),
+  })
+  const input = { command: "rm x" }
+  assert.equal(await h.call("bash", input), undefined, "the writer runs when the role can write")
+  assert.match(input.command, /pi-subagents-extend-helper/, "it goes through the sandbox")
+  h.restore()
+  console.log("  ok   the same command runs when bash.writable is true")
+}
+
+// 230. An allow-only config with writable:false is still refused, with no legacy clause invented.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["rm x"], writable: false }, maxWriteDenies: 1 },
+    }),
+  })
+  const outcome = await h.call("bash", { command: "rm x" })
+  assert.equal(outcome?.block, true, "an allow-only writer is refused")
+  assert.match(outcome?.reason ?? "", /bash\.writable: false gives no write access/, "the cause is named")
+  assert.doesNotMatch(outcome?.reason ?? "", /matched the legacy/, "and no legacy column is invented")
+  h.restore()
+  console.log("  ok   allow-only + writable:false is still refused, with no legacy clause")
+}
+
+// 231. A legacy-only config with writable:false is NOT refused before spawn: the early refusal
+//      belongs to the new single-column path, not to existing bindings.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { write: ["rm"], writable: false }, maxWriteDenies: 1 },
+    }),
+  })
+  const input = { command: "rm x" }
+  assert.equal(await h.call("bash", input), undefined, "a legacy write command is not refused early")
+  assert.match(input.command, /pi-subagents-extend-helper/, "it still goes through the sandbox")
+  h.restore()
+  console.log("  ok   a legacy-only writer config has no new early refusal")
+}
+
+// 232. A role WITH the write ceiling does not get the "could not tell" sentence: the note's
+//      advice and cause must follow the role's actual grant.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["frobnicate"], writable: true } } }),
+  })
+  const input = { command: "frobnicate" }
+  assert.equal(await h.call("bash", input), undefined, "the unknown program is allowlisted and runs")
+  const target = `/var/tmp/pi-extend-${process.pid}/out-232.txt`
+  const outcome = await h.result("bash", `error: cannot write '${target}': Permission denied`, true)
+  const content: unknown = outcome?.content
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => (part as { text?: string }).text ?? "").join("\n") : ""
+  assert.match(text, /outside the writes the parent granted/, "the ordinary write-refusal note is present")
+  assert.doesNotMatch(text, /could not tell that this program writes|not in the write table/, "no read-only cause sentence is added for a writable role")
+  assert.match(text, /ask for writablePaths/, "a role with the ceiling is still asked for writablePaths")
+  h.restore()
+  console.log("  ok   a writable role's write note keeps the writablePaths advice and drops the cause")
+}
+
+// 233. A legacy column supplied by the project profile warns under that profile's own source,
+//      not under the merged source label.
+{
+  const proj = join(workdir, "proj-legacy-profile-233")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({ coder: { scope: ["src/**"], bash: { read: ["cat f"], write: ["rm f"] } } }),
+  )
+  const h = await handler({
+    cwd: proj,
+    profile: "coder",
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { allow: ["cat g"] } } }),
+  })
+  const warnings = h.ui.filter((m) => m.includes("legacy columns"))
+  assert.equal(warnings.length, 1, "the profile's legacy columns produce one warning")
+  assert.match(
+    warnings[0],
+    /^pi-subagents-extend: profile coder \(\.pi\/subagent-bindings\.json\) still spells/,
+    "the warning is attributed to the profile source alone",
+  )
+  h.restore()
+  console.log("  ok   a legacy column from the project profile warns under the profile's own source")
+}
+
+
+// 234. A quoted value in a git global flag must not hide the verb: whitespace splitting used to
+//      make `x'` the "subcommand", so the real `reset` was never examined.
+{
+  const writer = "git -c core.pager='rm x' reset --hard"
+  assert.equal(bashApi.commandAccess(writer, true), "write", "a quoted global value does not hide reset")
+  // `log` is safe to call read: the quote fragment belongs to the flag's value, not the verb.
+  assert.equal(bashApi.commandAccess("git -c core.pager='rm x' log", true), "read", "the quote fragment is not the verb")
+  assert.equal(bashApi.requiresNetwork(writer), null, "reset stays local behind a quoted global value")
+  assert.equal(
+    bashApi.requiresNetwork("git -c core.pager='rm x' fetch"),
+    "git fetch",
+    "the network verb is found behind the same quoted global value"
+  )
+  assert.equal(bashApi.commandAccess('git -c core.pager="rm x" clean -fd', true), "write", "double-quoted values too")
+  console.log("  ok   quoted git global values no longer hide the verb from write and network checks")
+}
+
+// 235. No-argument git globals must be skipped; when an unlisted global makes the verb
+//      unlocatable, the verdict is write rather than the read of a guessed subcommand.
+{
+  for (const cmd of ["git -p reset --hard", "git --paginate clean -fd", "git -P rm x", "git --bare reset --hard"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `a no-argument global must not hide the verb: ${cmd}`)
+  }
+  assert.equal(
+    bashApi.commandAccess("git --namespace foo reset --hard", true),
+    "write",
+    "an unlisted global with an argument leaves the verb unlocatable"
+  )
+  assert.equal(bashApi.requiresNetwork("git -p fetch"), "git fetch", "a no-argument global does not hide a network verb")
+  console.log("  ok   no-argument git globals are skipped, and an unlocatable verb is a write")
+}
+
+// 236. config/store/version are not blanket readers: the second token decides whether they write.
+{
+  for (const cmd of [
+    "npm config set registry https://x", "pnpm config set a b", "yarn config set k v",
+    "npm config delete k", "pnpm store prune", "npm version patch",
+    "npm config", "pnpm store",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `a package-manager writer must be write: ${cmd}`)
+  }
+  for (const cmd of [
+    "pnpm config get registry", "pnpm config list", "pnpm store path", "pnpm store status",
+    "npm version", "pnpm --version", "npm --help", "yarn -v",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `a package-manager query must be read: ${cmd}`)
+  }
+  console.log("  ok   package-manager config/store/version writes are found, queries and flags-only stay read")
+}
+
+// 237. More git branch/remote writes: each argument rewrites a branch, a remote or its refs.
+{
+  for (const cmd of [
+    "git branch -M x", "git branch -C x", "git branch -c x", "git branch -f x",
+    "git branch --delete x", "git branch --copy x", "git branch --force x", "git branch --unset-upstream x",
+    "git remote prune origin", "git remote set-branches origin main", "git remote update",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `a git ref/remote writer must be write: ${cmd}`)
+  }
+  for (const cmd of ["git branch", "git branch -v", "git remote", "git remote -v", "git remote get-url origin"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `a git listing must be read: ${cmd}`)
+  }
+  console.log("  ok   git branch and remote write arguments are classified correctly")
+}
+
+// 238. find -fprint0 writes a file just like -fprint and -fprintf.
+{
+  assert.equal(bashApi.commandAccess("find . -fprint0 /tmp/out", true), "write", "fprint0 writes a file")
+  assert.equal(bashApi.commandAccess("find . -print0", true), "read", "plain stdout printing stays read")
+  console.log("  ok   find -fprint0 is a write, -print0 is not")
+}
+
+// 239. The writable:false advice is live: buildSpec still grants /tmp and device paths with no
+//      write ceiling, so writeRefusalNote's empty-grant early return does not suppress it.
+{
+  const h = await handler({
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["cat f"], writable: false } } }),
+  })
+  const input = { command: "cat f" }
+  assert.equal(await h.call("bash", input), undefined, "the reader runs")
+  const write = specOf(input.command).write
+  assert.ok(write.length > 0, "a writable:false spec still has write paths, so the advice branch is reachable")
+  const target = `/var/tmp/pi-extend-${process.pid}/out-239.txt`
+  const outcome = await h.result("bash", `error: cannot write '${target}': Permission denied`, true)
+  const content: unknown = outcome?.content
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((part) => (part as { text?: string }).text ?? "").join("\n") : ""
+  assert.match(text, /ask for bash\.writable: true/, "a role with no write ceiling is told how to get one")
+  assert.doesNotMatch(text, /ask for writablePaths/, "and is not asked to extend grants it cannot use")
+  h.restore()
+  console.log("  ok   a writable:false role still receives the ceiling advice on a write refusal")
+}
+
+// 240. Package-manager flags that take a value must not donate that value as the subcommand:
+//      `pnpm -C dir list` used to be classified write, so a read-only query burned the write budget.
+{
+  for (const cmd of [
+    "pnpm -C dir list", "pnpm --dir pkgs/a list", "npm --prefix /tmp/x ls", "pnpm -C dir why x",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `a read-only query behind a value-taking flag must be read: ${cmd}`)
+  }
+  for (const cmd of [
+    "pnpm -C dir install", "pnpm --dir pkgs/a run typecheck", "npm --prefix /tmp/x run build",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `the real subcommand still decides the verdict: ${cmd}`)
+  }
+  // The = forms are one token; they must reach the same verdict as the split forms.
+  assert.equal(bashApi.commandAccess("pnpm --dir=pkgs/a list", true), "read", "an inline flag value is not the subcommand")
+  assert.equal(bashApi.commandAccess("npm --prefix=/tmp/x ls", true), "read", "the npm inline form too")
+  console.log("  ok   value-taking package-manager flags no longer hide the subcommand")
+}
+
+// 241. config's action token stays decisive: a flag between the program and the action must not
+//      change the verdict, and a global flag after the action must not be mistaken for it.
+{
+  assert.equal(bashApi.commandAccess("pnpm config --global set x y", true), "write", "config set writes even behind --global")
+  assert.equal(bashApi.commandAccess("pnpm config get --global registry", true), "read", "config get stays read with --global")
+  console.log("  ok   config's second token still decides read vs write around --global")
+}
+
+// 242. An unlisted package-manager flag must not turn a read-only query into a write: skip the
+//      flag, then trust a located known subcommand, but never guess a read from an unknown token.
+{
+  for (const cmd of [
+    "pnpm --silent list", "pnpm --ignore-workspace list", "pnpm --stream list",
+    "yarn --silent list", "pnpm --parallel -r list",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `a read-only subcommand after an unknown flag stays read: ${cmd}`)
+  }
+  for (const cmd of [
+    "pnpm --silent run build", "pnpm --stream test", "pnpm --silent install",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `a known writer subcommand after an unknown flag stays write: ${cmd}`)
+  }
+  assert.equal(bashApi.commandAccess("pnpm --mystery-flag dir list", true), "write", "an unknown token after an uncertain flag is not guessed as read")
+  console.log("  ok   unlisted flags no longer hide read-only package-manager subcommands")
+}
+
+// 243. A quoted global value spanning three or more words used to be split into whitespace
+//      fragments; the first bare fragment became the "subcommand" and hid the real verb.
+{
+  for (const cmd of [
+    "git -c k='a b c' reset --hard",
+    'git -c k="a b c" reset --hard',
+    "git -C '/x y z' clean -fd",
+  ]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "write", `a multi-word quoted global must not hide the verb: ${cmd}`)
+  }
+  // The quoted value belongs to the -c flag; the verb is log, which only reads.
+  assert.equal(
+    bashApi.commandAccess("git -c core.pager='less -R' log", true),
+    "read",
+    "a quoted global value is not the verb; log only reads"
+  )
+  assert.equal(
+    bashApi.requiresNetwork("git -c k='a b c' fetch"),
+    "git fetch",
+    "the network verb is found behind a multi-word quoted global"
+  )
+  console.log("  ok   multi-word quoted globals no longer hide the verb from write and network checks")
+}
+
+// 244. git's version/help flags only print local information: they are read-only, and an
+//      uncertain position behind them used to make the verdict write.
+{
+  for (const cmd of ["git --version", "git --help", "git -h"]) {
+    assert.equal(bashApi.commandAccess(cmd, true), "read", `a git version/help flag must be read: ${cmd}`)
+  }
+  console.log("  ok   git version/help flags are read")
+}
+
+// 245. Switching the verdict tokenizer must not disturb allowlist matching: commandMatches keeps
+//      splitting on whitespace, so a literal entry with a quoted argument still matches by prefix.
+{
+  const entry = "git -c core.pager='rm x' reset"
+  assert.equal(
+    bashApi.commandMatches(entry, "git -c core.pager='rm x' reset --hard"),
+    true,
+    "a literal entry with a quoted argument still matches by whitespace-token prefix"
+  )
+  assert.equal(
+    bashApi.commandMatches(entry, "git -c core.pager='rm x' clean -fd"),
+    false,
+    "and still refuses a different verb"
+  )
+  console.log("  ok   allowlist matching is unchanged by the verdict tokenizer switch")
+}
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")

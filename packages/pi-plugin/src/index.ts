@@ -47,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, commandNeedsNoManifest, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, requiresNetwork, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
+import { allEntries, classifyCommand, commandAccess, commandMatches, commandNeedsNoManifest, deniedEntry, deniedEnvAssignment, firstToken, isUnknownProgram, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, requiresNetwork, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -1241,9 +1241,10 @@ function toolchainCacheDir(): string | undefined {
  * - git 真正要写的目录（见 gitWritablePaths）：不给的话 add / commit / stash 全拼在 index.lock 上
  * - `<cwd>/node_modules`：pnpm install 要写 .bin 里的 shim；worktree 里它是软链，给真实路径
  * - 项目声明的产物目录 + 工具链缓存目录（XDG_CACHE_HOME）
- * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等）
+ * - bash.writablePaths 里的全局可写区（pnpm store、mise state 等；bash.writable 时）
  *
  * cwd 本身不在其中：整棵授权等于把整个 checkout 打开，读范围的宽窄不该自动变成写权限。
+ * 各项都以 bash.writable 为前提：false 是角色自己定下的上限，任何一层都不该把它放宽。
  */
 function sandboxWritableDirs(
 	policy: Policy,
@@ -1277,10 +1278,10 @@ function sandboxWritableDirs(
 		for (const dir of scratchDirs(cwd, rule, options)) dirs.add(dir);
 		const cache = toolchainCacheDir();
 		if (cache) dirs.add(cache);
-	}
-	for (const raw of rule.writablePaths) {
-		const abs = expandPath(cwd, raw);
-		if (abs && abs !== "/" && existsSync(abs)) dirs.add(abs);
+		for (const raw of rule.writablePaths) {
+			const abs = expandPath(cwd, raw);
+			if (abs && abs !== "/" && existsSync(abs)) dirs.add(abs);
+		}
 	}
 	return [...dirs];
 }
@@ -1598,6 +1599,8 @@ export function dropHiddenGrants(
 const reportedHiddenGrants = new Set<string>();
 /** worktree 默认值依赖的 profile 文件：确认未被 git 跟踪的只提示一次（session_start 清空）。 */
 const reportedUntrackedWorktreeProfiles = new Set<string>();
+/** 迁移告警：legacy bash.read / bash.write 只说一次（session_start 清空）。 */
+const warnedLegacyBashColumns = new Set<string>();
 /**
  * UI 提示通道，由 `judgeToolCall` 绑定的会话上下文注入：模块级函数拿不到 `ctx`，而这条告警是给
  * 父代理看的配置问题，不该写进模型上下文，所以只走 UI。
@@ -1959,6 +1962,9 @@ function profilePolicy(
 	if (!options.profileName || callBroken) return undefined;
 	const resolved = readProfile(cwd, options.profileName, options.profileFile);
 	if (resolved.error) return { policy: denyAll(resolved.error), source: resolved.source, broken: true };
+	// 合成后的 config 会被 reset / 显式空列清掉底层的 legacy 列，只看它会漏报项目 profile 的旧拼法；
+	// 每层按自己的来源告警，护栏按来源去重（同一来源一次会话只说一次）。
+	warnLegacyBashColumns(resolved.config, resolved.source);
 	const merged = mergeConfig(resolved.config, call) ?? {};
 	// 来源要说实话：生效的规则是 profile 与本次派单**合成**的，只写 profile 会让父代理
 	// 改错文件（那条授权不在 profile 里）。拒绝文案里的 `source:` 是父代理判断
@@ -2017,6 +2023,18 @@ function profileTrackedInGit(cwd: string, relPath: string): boolean | undefined 
 	}
 }
 
+/** 还在用 legacy bash.read / bash.write 的配置提示一次：新写法是单列 bash.allow。 */
+function warnLegacyBashColumns(config: Record<string, unknown> | undefined, source: string): void {
+	if (!config || warnedLegacyBashColumns.has(source)) return;
+	const bash = config.bash;
+	if (!bash || typeof bash !== "object" || Array.isArray(bash)) return;
+	const legacy = ["read", "write"].filter((key) => Object.hasOwn(bash, key));
+	if (legacy.length === 0) return;
+	warnedLegacyBashColumns.add(source);
+	uiWarning?.(
+		`pi-subagents-extend: ${source} still spells bash.${legacy.join(" and bash.")}, which are legacy columns; bash.allow is the single allowlist column now and read/write is judged internally. The legacy columns keep working until the compatibility layer is removed.`
+	);
+}
 /**
  * 补 worktree 默认值时，若策略来自磁盘 profile 而该文件没被 git 跟踪，告诉父代理一次：
  * worktree 副本里不会有这个文件，子代理读不到 profile 会被全拒。只在确认未跟踪时提示，
@@ -2539,6 +2557,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		// 本该发出的告警吞掉（那是「lost, not duplicated」的一种，且完全没有痕迹）。
 		reportedHiddenGrants.clear();
 		reportedUntrackedWorktreeProfiles.clear();
+		warnedLegacyBashColumns.clear();
 		// UI 提示通道在这里接上会话的 ctx：`judgeToolCall` 只在工具调用时绑定，session_start
 		// 里的告警要发得出去，就不能等第一次工具调用。
 		uiWarning = (message) => {
@@ -2562,6 +2581,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			armProbe();
 			applyRoleBaseline();
 		}
+		warnLegacyBashColumns(call.config, `extensionBindings ${bindingKey()}`);
 		if (!policy.active) return;
 		const budget = policy.maxReads > 0 ? `, read budget ${policy.maxReads}` : "";
 		const bash = policy.bash
@@ -2616,6 +2636,12 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				}
 			}
 		}
+		// allow 列里表里没有的程序跑成只读、随后写越界时，注解要说清为什么它是只读的。
+		let readOnlyAllow = false;
+		if (isBash && ran && policy.bash) {
+			const bashMatch = classifyCommand(policy.bash, ran.command);
+			readOnlyAllow = bashMatch?.column === "allow" && bashMatch.access === "read" && isUnknownProgram(ran.command);
+		}
 		const hints = [
 			handoffHintFor(text),
 			// 两道注解都以「这条命令真的失败了」为前提。不看 isError 时，成功命令的**输出内容**里
@@ -2624,7 +2650,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			// 判断事实而不猜文案：工具结果自带 isError。
 			isBash && event.isError ? networkFailureNote(text, offline) : undefined,
 			isBash && event.isError ? cpuStallNote(text) : undefined,
-			isBash && ran && event.isError ? writeRefusalNote(text, ran.write, ran.cwd) : undefined,
+			isBash && ran && event.isError ? writeRefusalNote(text, ran.write, ran.cwd, readOnlyAllow, policy.bash?.writable ?? true) : undefined,
 			isBash && ran && event.isError && policy.bash
 				? unreachableCommandNote(text, ran.command, policy.bash, ran.cwd)
 				: undefined,
@@ -2741,6 +2767,16 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				const headHint = headEntriesHint(rule, command, cwd);
 				return bail(
 					`pi-subagents-extend: command not in the allowlist: "${preview([command])}" — allowed: ${preview(allEntries(rule))} (source: ${policy.source})${storeHint}${headHint}`,
+				);
+			}
+			// allow 列放行的写类命令，role 却没给写权限：这是写拒，计入写预算而非撞权限预算。
+			// 判据是「确实有一条 allow 授权」+ 命令本身会写 + writable:false，不看 classifyCommand 报的列：
+			// 同一条命令也命中 legacy 列时那列会先被报出来，但 legacy 不授予写权限。
+			// classifyCommand 在 writable=false 时已把 access 压成 read，这里用固有判定（传 true）
+			// 认出「这条命令本来会写」，否则它会以只读的名义被放行去写。
+			if (rule.allow.some((entry) => commandMatches(entry, command)) && rule.writable === false && commandAccess(command, true) === "write") {
+				return writeBail(
+					`pi-subagents-extend: the role may run this command (it is in bash.allow)${match.column === "allow" ? "" : ` (matched the legacy ${match.column} column, which does not grant writes)`}, but bash.writable: false gives no write access: "${preview([command])}". This is a write refusal, not a grant error — deliver the result as a report, or have the parent set bash.writable: true.`
 				);
 			}
 			// 只读类命令的参数路径：沙箱读面是 `/`（工具链要读 /nix/store），所以路径引导放在插件层。

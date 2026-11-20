@@ -2,8 +2,8 @@
  * 角色 md 的配置源：从 agent 定义文件的 YAML frontmatter 里读出 extend 段，
  * 转换成扩展已有的策略字段。这里只做解析与转换，不参与工具判定。
  *
- * 本阶段只接 permissions 下的 scope / write / readOnly / allowTools / budgets；
- * bash、worktree、setup、output 一律报出来而不是静默丢掉 —— 配置看起来生效其实没接线，
+ * 本阶段接 permissions 下的 scope / write / readOnly / allowTools / budgets / bash；
+ * worktree、setup、output 一律报出来而不是静默丢掉 —— 配置看起来生效其实没接线，
  * 比明确的告警难查得多。
  */
 
@@ -16,6 +16,14 @@ export const BINDING_VERSION = 1;
 
 export const bindingKey = (): string => `${BINDING_NAMESPACE}/${BINDING_VERSION}`;
 
+/** md 里的 bash 单列授权：只收新拼法，legacy 的 read / write 属于 bindings。 */
+export interface RoleBashPolicy {
+	allow?: string[];
+	deny?: string[];
+	writable?: boolean;
+	network?: boolean;
+}
+
 /** md 基线能提供的字段，名字与现有 bindings 的策略字段对齐。 */
 export interface RolePolicy {
 	scope?: string[];
@@ -24,6 +32,7 @@ export interface RolePolicy {
 	allowTools?: string[];
 	maxDenies?: number;
 	maxWriteDenies?: number;
+	bash?: RoleBashPolicy;
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
@@ -160,8 +169,45 @@ export function policyFromBlock(block: Record<string, unknown>): { policy?: Role
 		if (typeof permissions.readOnly === "boolean") policy.readOnly = permissions.readOnly;
 		else problems.push("permissions.readOnly must be a boolean");
 	}
-	if (permissions.bash !== undefined) problems.push("permissions.bash: bash authorization is not wired in this phase");
-
+	if (permissions.bash !== undefined) {
+		const bash = asRecord(permissions.bash);
+		if (!bash) {
+			problems.push("permissions.bash must be an object");
+		} else {
+			const converted: RoleBashPolicy = {};
+			const bashList = (key: "allow" | "deny"): string[] | undefined => {
+				const value = bash[key];
+				if (value === undefined) return undefined;
+				if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+					problems.push(`permissions.bash.${key} must be an array of strings`);
+					return undefined;
+				}
+				return value as string[];
+			};
+			const allow = bashList("allow");
+			if (allow) converted.allow = allow;
+			const deny = bashList("deny");
+			if (deny) converted.deny = deny;
+			for (const key of ["writable", "network"] as const) {
+				const value = bash[key];
+				if (value === undefined) continue;
+				if (typeof value !== "boolean") {
+					problems.push(`permissions.bash.${key} must be a boolean`);
+					continue;
+				}
+				converted[key] = value;
+			}
+			for (const key of Object.keys(bash)) {
+				if (key === "read" || key === "write") {
+					// legacy 拼法属于 bindings，不属于 md：保留这句事实并指出现在新写法。
+					problems.push(`permissions.bash: the legacy read/write spelling belongs to bindings, not to the md; use "allow" instead`);
+				} else if (!["allow", "deny", "writable", "network"].includes(key)) {
+					problems.push(`permissions.bash.${key}: unknown key`);
+				}
+			}
+			if (Object.keys(converted).length > 0) policy.bash = converted;
+		}
+	}
 	for (const key of Object.keys(permissions)) {
 		if (!PERMISSION_KEYS.has(key)) problems.push(`permissions.${key}: unknown key`);
 	}

@@ -175,7 +175,7 @@ default, a partial object enables only the fields it names, `"probe": false` dis
 | Finished early | explicit: `successIdleMs: 300000`, `successPatterns` | once output matches a success marker, no new change within `successIdleMs` stops the turn |
 | Writing litter | explicit: `forbidWritePatterns: []` | a `write`/`edit` target matching the pattern is refused outright |
 
-Write activity means `edit` and `write` calls and commands matching `bash.write`. Reads do not
+Write activity means `edit` and `write` calls and bash commands classified as writes — a legacy `bash.write` hit, or an `allow` entry whose command the classifier judges to write. Reads do not
 count, or a subagent could circle with read-only `bash` and escape the criterion. A task with
 `readOnly: true` skips the two time-based criteria, which are meaningless for it.
 
@@ -191,8 +191,8 @@ review is given exactly one file to write: `readOnly: true` together with
 The repeating-command criterion means "the same thing repeated **without progress**", so write
 activity also clears its counts and cancels a warning already issued: a subagent that edits a file and
 re-runs the same test command is working, not spinning. The cost is that write-class commands are not
-covered by this criterion at all — a profile that lists an interpreter in the `write` column (Node,
-`python3`) exempts that interpreter's commands, and no amount of repetition trips the check. Read-class
+covered by this criterion at all — a profile that lists an interpreter as a write — the legacy `write`
+column, or `allow`, since interpreters are classified as writes — exempts that interpreter's commands, and no amount of repetition trips the check. Read-class
 commands, the real spinning case, are unaffected. This was measured the hard way: two coding subagents
 were stopped mid-task by the criterion before the reset existed.
 
@@ -462,6 +462,8 @@ Rules per field — never one layer over another:
   `bash.allow`, an **explicitly empty array in the upper layer** is a different instruction: it
   empties that column rather than adding nothing. Reading `"read": []` as "add zero entries" left
   the lower layer's whole allowlist in place, so a dispatch that meant to close bash kept the grant.
+  `bash.write` and `bash.allow` merge as one column (emptying either empties both) while meaning
+  different things: `write` grants write, `allow` leaves the read/write judgement to the extension.
   `allowTools` and `bash.writablePaths` have no empty-list form; `reset: true` clears the former.
 - **union, hard floor** — `bash.deny`: **no caller can relax it**. That is what makes a project's
   structural prohibition different from an ordinary allowlist.
@@ -504,7 +506,7 @@ reach the system prompt of whichever session loads the extension and nothing has
 
 | Skill | Contents |
 | --- | --- |
-| `pi-subagents-extend` | file scope, the two bash columns and `re:` patterns, the sandbox, worktree setup, profiles, a call template |
+| `pi-subagents-extend` | file scope, the bash columns and `re:` patterns, the sandbox, worktree setup, profiles, a call template |
 | `pi-subagents-extend-probes` | the probe criteria, the denial budget, warn and stop semantics, how to read a report after a stop |
 | `pi-subagents-extend-context` | the markers, `.pi/main-only.md`, the three entry points |
 
