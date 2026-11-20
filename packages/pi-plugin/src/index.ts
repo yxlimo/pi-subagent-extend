@@ -47,7 +47,7 @@ import { homedir, tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { allEntries, classifyCommand, commandNeedsNoManifest, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
+import { allEntries, classifyCommand, commandNeedsNoManifest, deniedEntry, deniedEnvAssignment, firstToken, leadingAssignments, listedJoin, MAX_LISTED, mergeBashConfig, parseBashRule, pathCandidates, requiresNetwork, stringList, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
@@ -2571,6 +2571,17 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 					// 计入撞权限预算（bail）：父代理放宽范围就能解决，正是这一类。
 					return bail(
 						`pi-subagents-extend: "${foreign}" is outside the working tree (source: ${policy.source}). This is a path nudge, not a wall: the command runs in ${cwd}, and a file outside it is not yours to read — say what you need from it instead.\nWorking tree: ${cwd}`,
+					);
+				}
+			}
+			// 离线时网络是裸 netns：包被丢弃而不是被拒绝，curl 这类命令没有输出也没有错误，
+			// 事后注解等不到触发文本，只能挂到超时。所以在 spawn 之前按名单拒掉确定要往返的
+			// 工具；名单只收确定项，拿不准的一律放行（引导，不是沙箱边界）。
+			if (rule.network !== true) {
+				const networkTool = requiresNetwork(command);
+				if (networkTool) {
+					return bail(
+						`pi-subagents-extend: the network is off per the parent's bindings — a permission, not a broken machine. \`${networkTool}\` would hang here rather than fail (packets are dropped, not refused). Ask the parent via contact_supervisor for "network": true.\n(source: ${policy.source})`,
 					);
 				}
 			}

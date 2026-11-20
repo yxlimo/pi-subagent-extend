@@ -250,6 +250,9 @@ subagent can still report.
 `maxDenies` defaults to five; an explicit `0` disables it. Only refusals that **widening the
 parent's authorisation could resolve** count: an out-of-scope path, a command not in the
 allowlist, the read budget, a tool missing from `allowTools`, bash disabled.
+An offline command from the fixed network-command list is in the same class: the parent can grant
+`"network": true`, so refusing it before the command starts counts toward the collision budget.
+It charges the grant budget, not the write budget: no file was touched.
 
 Write refusals have their own budget, `maxWriteDenies`, defaulting to two. It is separate on
 purpose: a reviewer that keeps trying to write its report is making a usage mistake, and the answer
@@ -331,6 +334,38 @@ that cannot start working. Both apply **only when the command actually failed** 
 `isError` is the gate, not the text of the output. Without that gate a successful command whose
 *output* mentions `EACCES` is annotated: measured on a subagent running `git diff`, whose own patch
 contained such a string and came back carrying "this is outside the writes the parent granted".
+
+**Network commands are refused before they run.** With `bash.network` off, `requiresNetwork` in
+`bash-match.ts` names a fixed list of programs and subcommands that only make sense with a round
+trip: `curl`, `wget`, the netcat family, `telnet`, `ssh`/`scp`/`sftp`, the DNS and host-reachability
+probes, `gh`, `docker pull|push|login`, `npm|pnpm|yarn publish`, and `git clone|fetch|pull|push|ls-remote`
+plus `git remote update` and `git submodule update --remote`. The check runs after the allowlist and
+path judgements but before a spec is written, and names the tool that would hang, explains that the
+offline netns drops packets rather than refusing connections (so there is no failure text for a
+post-hoc note), and tells the model to ask the parent for `"network": true`. It is a permission
+collision on the grant budget, not the write budget.
+
+The matcher looks past surface spellings: the program goes through `basename()`, so `/usr/bin/curl`
+counts, and the pass-through wrappers `env`, `sudo`, `nice`, `timeout`, `command` and `stdbuf` are
+peeled to the program they actually run, skipping the wrapper's own flags and flag values. `git`'s
+global flags (`-C`, `--git-dir`, `--work-tree`, `--no-pager`, `--progress`, `-c`) are skipped when
+locating the subcommand, so `git -C repo fetch` is judged but `git log --fetch` is not. Anything the
+matcher cannot resolve confidently — an unknown wrapper flag, `command -v curl`, a name assembled
+at run time — is allowed through. Quoted text is never parsed: `bash -c "curl …"` is deliberately
+not judged, because deciding what a shell string would execute is a different problem from naming
+the program on the command line.
+
+A few narrow local forms are excluded on purpose: `curl file:///…` (and `file:/…`) reads a file, not
+the network, and `curl --version` / `-V` / `--help` / `-h` print local information and exit. `gh --version`, `gh version`, `gh help` and `gh config get …` only read local state;
+every other `gh` subcommand and every other curl URL is still judged.
+
+**Accepted false positives.** `git push /local/path` is judged as a network git subcommand and
+`nc -z localhost` as netcat, even though both could complete offline. Telling those apart would mean
+resolving a git remote's URL or parsing a netcat target host; that costs more than this guidance is
+worth, so the boundary is accepted and documented rather than parsed. The way out is the same
+`contact_supervisor` request for `"network": true` used for any other network refusal. The annotation
+below remains as a fallback for network failures the list does not cover.
+Looking past path prefixes has the same cost: `foo/curl`, `./curl` and `curl/` all count as curl even when they name a local file, because resolving the actual executable costs more than this pre-spawn guidance is worth.
 
 **Network.** When the command ran offline and failed on the network (`ENETUNREACH`, `EAI_AGAIN`,
 `ENOTFOUND`, a resolve failure), a one-line `[sandbox]` note says the network is off per the

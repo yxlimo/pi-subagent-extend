@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 export type BashAccess = "read" | "write";
 
@@ -280,6 +280,213 @@ export function leadingAssignments(command: string): LeadingAssignments {
  */
 export function deniedEnvAssignment(command: string): string | undefined {
 	return leadingAssignments(command).names.find((name) => isDeniedEnvName(name));
+}
+/**
+ * 离线沙箱里「一跑就挂」的网络命令判定。
+ *
+ * 裸 netns 是丢包而不是拒连：`curl` 没有输出也没有错误，事后注解（networkFailureNote）
+ * 等不到触发文本，所以要在 spawn 之前拒掉这一类。判据放在共用层，不按角色各写一份。
+ *
+ * 宁可少拒，不许误拒：只认确定的程序名与子命令；`git status`、`pnpm install`、
+ * `cargo fetch`、`npm run …`、`pnpm --dir … run …` 都能从缓存或本地工作，一律放行；
+ * 拿不准的也放行。名单看剥掉前置赋值、包装器与路径前缀后的第一个 token，动态拼出来的
+ * 程序名（`$TOOL`、`$(…)`）不判 —— 这一层是引导，不是防黑客，而且 shell 元字符本来就会被先拒掉。
+ * 引号里的东西刻意不解析：`bash -c "curl …"` 不判；直通包装器（env/sudo/…）则剥开看它真正跑谁。
+ *
+ * @returns 需要网络的程序名（有子命令时一并给出，如 `git fetch`），否则 null。
+ */
+const NETWORK_PROGRAMS = new Set([
+	"curl", "wget", "nc", "ncat", "netcat", "telnet", "ssh", "scp", "sftp",
+	"ping", "dig", "host", "nslookup", "traceroute", "gh",
+]);
+const NETWORK_SUBCOMMANDS: Record<string, string[]> = {
+	docker: ["pull", "push", "login"],
+	npm: ["publish"],
+	pnpm: ["publish"],
+	yarn: ["publish"],
+};
+const GIT_NETWORK_SUBCOMMANDS = new Set(["clone", "fetch", "pull", "push", "ls-remote"]);
+
+// 直通包装器会吃掉自己的旗标和旗标值；只认下面列出的，遇到不认识的旗标一律判不准而放行。
+interface WrapperFlags {
+	noArg?: string[];
+	withArg?: string[];
+	assignments?: boolean;
+	duration?: boolean;
+}
+const WRAPPER_FLAGS: Record<string, WrapperFlags> = {
+	env: {
+		noArg: ["-i", "-0", "--ignore-environment", "--null"],
+		withArg: ["-u", "--unset", "-C", "--chdir", "-S", "--split-string", "--default-signal", "--skip-default-signal"],
+		assignments: true,
+	},
+	sudo: {
+		noArg: [
+			"-n", "--non-interactive", "-b", "--background", "-E", "--preserve-env", "-H", "--set-home",
+			"-i", "--login", "-s", "--shell", "-S", "--stdin", "-v", "--validate", "-k", "--reset-timestamp",
+			"-K", "--remove-timestamp", "-l", "--list", "-h", "--help", "-V", "--version",
+		],
+		withArg: [
+			"-u", "--user", "-g", "--group", "-G", "--group-list", "-p", "--prompt", "-r", "--role",
+			"-t", "--type", "-C", "--close-from", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout",
+			"-A", "--askpass", "-P", "--preserve-fd",
+		],
+	},
+	nice: {
+		noArg: ["--version", "--help"],
+		withArg: ["-n", "--adjustment"],
+	},
+	timeout: {
+		noArg: ["--foreground", "--preserve-status", "--version", "--help"],
+		withArg: ["-k", "--kill-after", "-s", "--signal"],
+		duration: true,
+	},
+	command: {
+		noArg: ["-p"],
+	},
+	stdbuf: {
+		withArg: ["-i", "-o", "-e", "--input", "--output", "--error"],
+	},
+};
+const WRAPPERS = new Set(Object.keys(WRAPPER_FLAGS));
+const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+
+/**
+ * 剥掉前置的直通包装器，返回从真正程序开始的 token；判不准返回 null。
+ *
+ * 带值旗标吃掉下一个 token（或等号右边），没列出的旗标一律当判不准而放行。
+ * `command -v/-V` 只查询不执行，直接放弃判断。套得太深也放弃。
+ */
+function peelWrappers(words: string[]): string[] | null {
+	let rest = words;
+	for (let depth = 0; depth < 8; depth += 1) {
+		const wrapper = rest[0];
+		if (!wrapper || !WRAPPERS.has(wrapper)) return rest;
+		// `command -v curl` / `command -V curl` 只报路径不运行，不能算它要联网。
+		if (wrapper === "command" && (rest[1] === "-v" || rest[1] === "-V")) return null;
+		const flags = WRAPPER_FLAGS[wrapper] as WrapperFlags;
+		const args = rest.slice(1);
+		let i = 0;
+		while (i < args.length) {
+			const word = args[i] as string;
+			if (flags.assignments && ASSIGNMENT_LIKE.test(word)) {
+				i += 1;
+				continue;
+			}
+			if (word === "--") {
+				i += 1;
+				break;
+			}
+			if (word.startsWith("--")) {
+				const eq = word.indexOf("=");
+				const name = eq < 0 ? word : word.slice(0, eq);
+				if (flags.withArg?.includes(name)) i += eq < 0 ? 2 : 1;
+				else if (flags.noArg?.includes(name) && eq < 0) i += 1;
+				else return null; // 没见过的长旗标：吃不吃值不知道，放行
+				continue;
+			}
+			if (word.startsWith("-") && word.length > 1) {
+				const short = word.slice(0, 2);
+				if (flags.withArg?.includes(short)) i += word.length > 2 ? 1 : 2; // -n5 / -n 5
+				else if (flags.noArg?.includes(short) && word.length === 2) i += 1;
+				else return null; // 没见过的短旗标：放行
+				continue;
+			}
+			break; // 第一个非旗标 token 是 DURATION 或程序名
+		}
+		// timeout 的位置参数先是 DURATION，再是程序名。
+		if (flags.duration) {
+			const duration = args[i];
+			if (!duration || !/^(?:infinity|[0-9]+(?:\.[0-9]+)?[smhd]?)$/.test(duration)) return null;
+			i += 1;
+		}
+		rest = args.slice(i);
+		if (rest.length === 0) return null;
+	}
+	return null; // 包装器套太深，判不准
+}
+
+/**
+ * curl 的 URL 参数是否全是 file: 协议：读了也不出网，裸 netns 里照常工作。
+ * 带任何其他 scheme（http/https/ftp/…）就仍按网络判；不含 scheme 的裸 host 不在这里放行。
+ */
+function curlOnlyReadsFiles(args: string[]): boolean {
+	let sawFileUrl = false;
+	for (const arg of args) {
+		if (/^file:/i.test(arg)) {
+			sawFileUrl = true;
+			continue;
+		}
+		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(arg)) return false; // 别的 scheme 要出网
+	}
+	return sawFileUrl;
+}
+
+// curl 的查询旗标打印完本地信息就退出；放在任何 URL 之前都成立，不能当成要出网而误拒。
+const CURL_LOCAL_QUERY_FLAGS = new Set(["--version", "-V", "--help", "-h"]);
+
+/**
+ * git 的全局旗标排在子命令前面；跳过它们才知道真正要跑的子命令。
+ * 只认下面这些确定的全局旗标，遇到别的就把它当子命令（不在网络名单里 → 放行）。
+ */
+function gitSubcommandIndex(words: string[]): number {
+	let i = 1;
+	for (;;) {
+		const word = words[i];
+		if (word === undefined) return i;
+		if (word === "-C" || word === "--git-dir" || word === "--work-tree" || word === "-c") {
+			i += 2; // 吃一个参数
+			continue;
+		}
+		if (
+			word.startsWith("--git-dir=") ||
+			word.startsWith("--work-tree=") ||
+			word === "--no-pager" ||
+			word === "--progress"
+		) {
+			i += 1;
+			continue;
+		}
+		return i;
+	}
+}
+
+export function requiresNetwork(command: string): string | null {
+	const words = tokens(leadingAssignments(command).rest);
+	const effective = peelWrappers(words);
+	if (!effective || effective.length === 0) return null;
+	// 绝对路径也要认：`/usr/bin/curl` 与 `curl` 是同一个程序。
+	const program = basename(effective[0] as string);
+	// `gh --version` / `version` / `help` / `config get` 只读本地配置，不外出。
+	if (program === "gh") {
+		const sub = effective[1];
+		if (sub === "--version" || sub === "version" || sub === "help") return null;
+		if (sub === "config" && effective[2] === "get") return null;
+		return "gh";
+	}
+	if (NETWORK_PROGRAMS.has(program)) {
+		if (program === "curl" && CURL_LOCAL_QUERY_FLAGS.has(effective[1] ?? "")) return null;
+		// `curl file:///…` 是本地文件读取，裸 netns 下也能成。
+		if (program === "curl" && curlOnlyReadsFiles(effective.slice(1))) return null;
+		return program;
+	}
+	if (program === "git") {
+		const at = gitSubcommandIndex(effective);
+		const sub = effective[at];
+		if (sub && GIT_NETWORK_SUBCOMMANDS.has(sub)) return `git ${sub}`;
+		const next = effective[at + 1];
+		// `git remote -v` / `git submodule update` 只看本地；带上 update 才去网络上取。
+		if (sub === "remote" && next === "update") return "git remote update";
+		if (sub === "submodule" && next === "update" && effective.slice(at + 2).includes("--remote")) {
+			return "git submodule update --remote";
+		}
+		return null;
+	}
+	// 原型链上的键（toString 之类）不是程序名：用 hasOwn 而不是直接索引。
+	if (!Object.hasOwn(NETWORK_SUBCOMMANDS, program)) return null;
+	const sub = effective[1];
+	const list = NETWORK_SUBCOMMANDS[program] as string[];
+	return sub && list.includes(sub) ? `${program} ${sub}` : null;
 }
 
 /**
