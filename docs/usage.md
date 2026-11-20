@@ -24,9 +24,11 @@ The parent passes them per dispatch:
 subagent(
   agent: "worker",
   task: "Fix the null pointer in login.ts",
-  extensionBindings: { "pi-subagents-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+  extensionBindings: { "pi-subagents-extend/1": { "permissions": { "scope": ["src/auth/**"], "maxReads": 20 } } }
 )
 ```
+
+The namespace key never holds policy fields directly: a dispatch wraps them in `permissions`. A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -163,6 +165,8 @@ pick from a list whose tail was cut is asking for a guess. The annotation is onl
 
 ## Recommended scenarios
 
+Each JSON block in this section is the inner `permissions` object; put it under `permissions` in the namespace key when dispatching.
+
 ### A reviewer that may write exactly one report
 
 The report is longer than a reply can carry, and a reviewer that cannot write has to compress it.
@@ -254,6 +258,8 @@ A project can declare per-role defaults once, in `.pi/subagent-bindings.json`:
 }
 ```
 
+A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`).
+
 and load one from a two-line module the agent declares:
 
 ```ts
@@ -294,10 +300,12 @@ the layer below. It clears the lower layer's `bash.read` / `bash.write` / `bash.
 ```json
 {
   "pi-subagents-extend/1": {
-    "scope": ["src/auth/**"],
-    "reset": true,
-    "allowTools": ["read"],
-    "bash": { "read": ["pnpm run typecheck"] }
+    "permissions": {
+      "scope": ["src/auth/**"],
+      "reset": true,
+      "allowTools": ["read"],
+      "bash": { "read": ["pnpm run typecheck"] }
+    }
   }
 }
 ```
@@ -371,7 +379,7 @@ narrow `tools` list as long as every name exists on every host (`read`, `grep`, 
 Hand bindings reach the extension through `PI_SUBAGENT_EXTENSION_BINDINGS`:
 
 ```bash
-PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagents-extend/1":{"scope":["src/**"],"readOnly":true}}' \
+PI_SUBAGENT_EXTENSION_BINDINGS='{"pi-subagents-extend/1":{"permissions":{"scope":["src/**"],"readOnly":true}}}' \
 pi -e ~/extensions/pi-subagents-extend/packages/pi-plugin/src/index.ts -p "<task>"
 ```
 

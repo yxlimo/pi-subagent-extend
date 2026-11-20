@@ -6,7 +6,9 @@
  *
  * 配置有两条来源：
  * 1. pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
- *      extensionBindings: { "pi-subagents-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+ *      extensionBindings: { "pi-subagents-extend/1": { "permissions": { "scope": ["src/auth/**"], "maxReads": 20 } } }
+ *    命名空间键下只放 permissions；worktree 是它的同级键，不放进 permissions。
+ *    项目 profile .pi/subagent-bindings.json 仍是每个角色一层平铺，不套 permissions。
  *    pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
  *    激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
  *    之后父进程环境被恢复，所以不能在 tool_call 里懒读。

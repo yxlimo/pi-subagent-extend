@@ -55,16 +55,18 @@ The parent passes the scope on each dispatch:
 subagent(
   agent: "worker",
   task: "Fix the null pointer in login.ts",
-  extensionBindings: { "pi-subagents-extend/1": { "scope": ["src/auth/**"], "maxReads": 20 } }
+  extensionBindings: { "pi-subagents-extend/1": { "permissions": { "scope": ["src/auth/**"], "maxReads": 20 } } }
 )
 ```
+
+The namespace key never holds policy fields directly: a dispatch wraps them in `permissions`. A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 
 That is the whole idea: `scope` is what the subagent may read, and everything else — writes, shell,
 network — is off until named. A reviewer, for example, reads the repository and writes exactly one
 report file:
 
 ```json
-{ "scope": ["."], "readOnly": true, "writeScope": ["/tmp/pi-review-reports"] }
+{ "pi-subagents-extend/1": { "permissions": { "scope": ["."], "readOnly": true, "writeScope": ["/tmp/pi-review-reports"] } } }
 ```
 
 That report path reaches the `write` tool but not `bash`: the helper mounts a private tmpfs over

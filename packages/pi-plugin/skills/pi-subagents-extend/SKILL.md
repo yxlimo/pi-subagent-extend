@@ -62,7 +62,7 @@ Reading or writing files, no commands needed:
 subagent(
   agent: "<agent-name>",
   task: "<task description>",
-  extensionBindings: { "pi-subagents-extend/1": { "scope": ["<file/directory glob>", "..."] } }
+  extensionBindings: { "pi-subagents-extend/1": { "permissions": { "scope": ["<file/directory glob>", "..."] } } }
 )
 ```
 
@@ -74,14 +74,17 @@ subagent(
   task: "<task description>; run typecheck afterwards and report the result",
   extensionBindings: {
     "pi-subagents-extend/1": {
-      "scope": ["<file/directory glob>"],
-      "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] }
-    }
+      "permissions": {
+        "scope": ["<file/directory glob>"],
+        "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] }
+      }
   }
 )
 ```
 
 The namespace is fixed at `pi-subagents-extend/1`. Pass it on every delegation, and narrow the scope to the files and directories this task actually touches; do not default to the whole repository.
+
+A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 
 The subagent runs in a worktree (`worktree: true`) and has to install dependencies or run verification:
 
@@ -92,17 +95,20 @@ subagent(
   options: { worktree: true },
   extensionBindings: {
     "pi-subagents-extend/1": {
-      "scope": ["src/auth/**"],
-      "bash": {
-        "read": ["pnpm run typecheck"],
-        "write": ["pnpm test"],
-        "writable": true,
-        "writablePaths": ["~/.local/share/pnpm/store"]
+      "permissions": {
+        "scope": ["src/auth/**"],
+        "bash": {
+          "read": ["pnpm run typecheck"],
+          "write": ["pnpm test"],
+          "writable": true,
+          "writablePaths": ["~/.local/share/pnpm/store"]
+        }
       }
-    }
   }
 )
 ```
+
+`worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. A dispatch can therefore carry `{"pi-subagents-extend/1": {"permissions": {...}, "worktree": true}}`.
 
 ## The `scope` field
 

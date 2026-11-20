@@ -26,11 +26,13 @@ is declared there; background subagents additionally load ambient extensions.
 Two, and either can stand alone:
 
 - **Bindings**, passed by the parent on each dispatch as
-  `extensionBindings: { "pi-subagents-extend/1": { … } }`. pi-subagents encodes them into
+  `extensionBindings: { "pi-subagents-extend/1": { "permissions": { … } } }`. pi-subagents encodes them into
   `PI_SUBAGENT_EXTENSION_BINDINGS`; the extension reads that variable once at activation, because
   it exists only until a foreground subagent's session starts and is then restored.
 - **A profile**, a per-role default declared in the project and loaded through a two-line module
   the agent declares. See [agent profiles](#agent-profiles).
+
+A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 
 Without either, the extension does nothing: no scope, no refusals, no side effects.
 
