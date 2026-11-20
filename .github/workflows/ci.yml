@@ -152,10 +152,11 @@ jobs:
               ;;
           esac
 
-      # Builds the helper first (the package's pretest hook), then runs three
-      # suites: the scope and context ones against a fake pi API, and the mock
-      # session one against a real pi process driven by a scripted
-      # OpenAI-compatible mock server (no model, no network beyond localhost).
+      # Builds the helper first (the package's pretest hook), then runs every
+      # suite the package declares: the scope, role-config, deliverable and
+      # context ones against a fake pi API, the mock session one against a real
+      # pi process driven by a scripted OpenAI-compatible mock server (no model,
+      # no network beyond localhost), and the doc/constant consistency check.
       - name: Extension tests
         working-directory: packages/pi-plugin
         run: pnpm test
