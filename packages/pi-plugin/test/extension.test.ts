@@ -133,6 +133,21 @@ function specOf(command: string): SandboxSpec {
   return JSON.parse(readFileSync(specPathOf(command), "utf8")) as SandboxSpec
 }
 
+/**
+ * src/index.ts leaves a caller-supplied GIT_CONFIG_COUNT alone. A shell that exports it would
+ * otherwise make the git-excludes assertion below fail for a reason unrelated to the change.
+ */
+async function withoutGitConfigCount<T>(run: () => Promise<T>): Promise<T> {
+  const previous = process.env.GIT_CONFIG_COUNT
+  delete process.env.GIT_CONFIG_COUNT
+  try {
+    return await run()
+  } finally {
+    if (previous === undefined) delete process.env.GIT_CONFIG_COUNT
+    else process.env.GIT_CONFIG_COUNT = previous
+  }
+}
+
 const ext = (await import(join(repo, "src", "index.ts"))) as unknown as ExtensionModule
 
 /**
@@ -156,7 +171,15 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue
     const ns = value as Record<string, unknown>
     if (Object.hasOwn(ns, "permissions")) continue
-    table[key] = { permissions: ns }
+    // 块级键（worktree/setup/output）在派单里与 permissions 平级，其余是策略字段。
+    const blockLevel = ["worktree", "setup", "output"]
+    const permissions: Record<string, unknown> = {}
+    const rest: Record<string, unknown> = {}
+    for (const [name, field] of Object.entries(ns)) {
+      if (blockLevel.includes(name)) rest[name] = field
+      else permissions[name] = field
+    }
+    table[key] = { ...rest, permissions }
     changed = true
   }
   return changed ? JSON.stringify(table) : raw
@@ -891,7 +914,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
 // 26. node_modules is writable when the sandbox is writable; git excludes keep
 // dependency directories out of the index.
-{
+await withoutGitConfigCount(async () => {
   mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
@@ -922,7 +945,7 @@ mkdirSync(join(workdir, "src/auth"), { recursive: true })
   )
   h.restore()
   console.log("  ok   可写沙箱里 node_modules 也可写；git 排除规则防止依赖目录进索引")
-}
+})
 
 // 27. The helper gates on kernel support: a kernel below Landlock ABI 7 means no bash.
 {
@@ -7156,7 +7179,7 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   const notified: string[] = []
   await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
   const text = notified.join("\n")
-  assert.match(text, /bash allow: cat w \| cat r \| cat a/, "the allow column joins write, read, allow in enforcement order")
+  assert.match(text, /^bash allow \(no write access: commands that write are refused\): cat a$/m, "the allow line carries the allow column only, not the legacy columns")
   assert.match(text, /bash \(legacy columns, migrate to allow\): read cat r \| write cat w/, "the legacy line names read and write")
   assert.doesNotMatch(text, /bash read: |bash write: /, "the retired two-column display is gone")
   h.restore()
@@ -7171,7 +7194,7 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   const notified: string[] = []
   await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
   const text = notified.join("\n")
-  assert.match(text, /bash allow: ls a/, "the allow column shows the allow entry")
+  assert.match(text, /bash allow \(no write access: commands that write are refused\): ls a/, "the allow column shows the allow entry")
   assert.doesNotMatch(text, /legacy columns, migrate to allow/, "an allow-only config gets no legacy line")
   h.restore()
   console.log("  ok   /permission prints the legacy line only when a legacy column is set")
@@ -7332,6 +7355,313 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   assert.equal(report?.block, true, "a payload output does not widen the read scope")
   run.restore()
   console.log("  ok   output in a dispatch payload warns once at either level and changes nothing")
+}
+// 268. A dispatch payload with worktree beside permissions is honoured and wins
+//      over the role profile's worktree default. This is the block-level key that
+//      used to be dropped by extractCallConfig.
+{
+  const proj = join(workdir, "blocks-proj-268")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({ coder: { scope: ["."], worktree: false, allowTools: ["subagent"] } }),
+  )
+  const h = await handler({
+    cwd: proj,
+    profile: "coder",
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { worktree: true, permissions: { scope: ["."], allowTools: ["subagent"] } },
+    }),
+  })
+  const input: Record<string, unknown> = { agent: "coder", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, true, "the payload's block-level worktree wins over the profile default")
+  const warns = h.ui.filter((m) => m.includes("not tracked by git"))
+  assert.equal(warns.length, 0, "a payload worktree is not treated as a profile default")
+  h.restore()
+  console.log("  ok   a dispatch's worktree beside permissions wins over the profile default")
+}
+
+// 269. An unknown namespace-level key is refused and the four accepted keys are named.
+{
+  const h = await handler({
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { permissions: { scope: ["src/**"] }, nonsense: 1 },
+    }),
+  })
+  const blocked = await h.call("read", { path: "src/auth/login.ts" })
+  assert.equal(blocked?.block, true, "an unknown namespace key refuses everything")
+  assert.match(blocked.reason, /nonsense/, "the offending key is named")
+  for (const key of ["permissions", "worktree", "setup", "output"]) {
+    assert.ok(blocked.reason.includes(key), `the accepted key "${key}" is named`)
+  }
+  h.restore()
+  console.log("  ok   an unknown namespace key is refused and the four accepted keys are named")
+}
+
+// 270. The role-md spelling "write" inside permissions is refused, not silently widened.
+{
+  const h = await handler({
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { permissions: { scope: ["."], write: { scope: ["."] } } },
+    }),
+  })
+  const blocked = await h.call("write", { path: "a.ts", content: "x" })
+  assert.equal(blocked?.block, true, "the role-md write spelling is refused, not treated as a grant")
+  assert.match(blocked.reason, /write/, "the offending key is named")
+  assert.match(blocked.reason, /writeScope/, "the dispatch spelling is named")
+  h.restore()
+  console.log("  ok   a role-md write spelling is refused and names the dispatch writeScope")
+}
+
+// 271. An unknown key inside permissions is refused by name.
+{
+  const h = await handler({
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { permissions: { scope: ["."], nonsense: 1 } },
+    }),
+  })
+  const blocked = await h.call("read", { path: "a.ts" })
+  assert.equal(blocked?.block, true, "an unknown permissions key refuses everything")
+  assert.match(blocked.reason, /nonsense/, "the unknown key is named")
+  h.restore()
+  console.log("  ok   an unknown key inside permissions is refused by name")
+}
+
+// 272. A __proto__ key inside permissions changes nothing: the declared scope still decides.
+{
+  const h = await handler({
+    rawBindings: true,
+    bindings: '{"pi-subagents-extend/1":{"permissions":{"scope":["src/**"],"__proto__":{"scope":["**"]}}}}',
+  })
+  assert.equal(await h.call("read", { path: "src/auth/login.ts" }), undefined, "the declared scope still allows its files")
+  const outside = await h.call("read", { path: "docs/x.md" })
+  assert.equal(outside?.block, true, "the prototype key grants nothing outside the declared scope")
+  h.restore()
+  console.log("  ok   a __proto__ key inside permissions is inert")
+}
+
+// 273. A malformed payload with no permissions does not honour its worktree.
+{
+  const empty = mkdtempSync(join(tmpdir(), "pi-subagents-extend-malformed-273-"))
+  const h = await handler({
+    cwd: empty,
+    rawBindings: true,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { worktree: true } }),
+  })
+  const input: Record<string, unknown> = { agent: "ghost", task: "x" }
+  const outcome = await h.call("subagent", input)
+  assert.equal(outcome?.block, true, "the malformed payload is refused")
+  const malformed = await h.call("read", { path: "x.ts" })
+  assert.equal(malformed?.block, true, "a path call is refused too")
+  assert.match(String(malformed?.reason), /permissions object/, "the missing permissions object is named")
+  assert.equal(input.worktree, undefined, "its worktree is not filled")
+  h.restore()
+  rmSync(empty, { recursive: true, force: true })
+  console.log("  ok   a payload without permissions does not get its worktree honoured")
+}
+
+// 274. A profile file that carries a permissions wrapper is refused with the flat-form message.
+{
+  const proj = join(workdir, "proj-flat-profile-274")
+  mkdirSync(proj, { recursive: true })
+  const file = join(proj, "flat-profile.json")
+  writeFileSync(file, JSON.stringify({ default: { permissions: {} } }))
+  const h = await handler({ cwd: proj, profile: "impl", profileFile: file })
+  const blocked = await h.call("read", { path: "a.ts" })
+  assert.equal(blocked?.block, true, "a flat profile with a permissions wrapper is refused")
+  assert.match(blocked.reason, /flat per-role profile/, "the flat-form mistake is named")
+  assert.match(blocked.reason, /permissions/, "the wrapper key is named")
+  h.restore()
+  console.log("  ok   a profile with a permissions wrapper is refused with the flat-form message")
+}
+
+// 275. A dispatch-level reset with the documented permissions wrapper narrows a wide session layer.
+//      Cases 130-135 put reset in profile files or harness-lifted flat fields, so a reader that
+//      accepts reset but ignores it inside a real dispatch payload would go unnoticed. Both halves
+//      are asserted: without reset the session's allowances survive, with reset only this
+//      dispatch's list remains.
+{
+  const proj = join(workdir, "proj-dispatch-reset-275")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  mkdirSync(join(proj, "src"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({
+      impl: { scope: ["src/**"], allowTools: ["read", "todo_write"], bash: { allow: ["git show", "git diff"] } },
+    }),
+  )
+  const items = { items: [] }
+  const wide = await handler({
+    cwd: proj,
+    profile: "impl",
+    rawBindings: true,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        permissions: { scope: ["."], allowTools: ["read"], bash: { allow: ["git diff"] } },
+      },
+    }),
+  })
+  assert.equal(
+    await wide.call("bash", { command: "git show" }),
+    undefined,
+    "without reset the session's bash entry survives the dispatch's own list",
+  )
+  assert.equal(
+    await wide.call("todo_write", items),
+    undefined,
+    "without reset the session's tool allowance survives too",
+  )
+  wide.restore()
+
+  const dispatch = JSON.stringify({
+    "pi-subagents-extend/1": {
+      permissions: { scope: ["."], reset: true, allowTools: ["read"], bash: { allow: ["git diff"] } },
+    },
+  })
+  const narrow = await handler({ cwd: proj, profile: "impl", rawBindings: true, bindings: dispatch })
+  const droppedBash = await narrow.call("bash", { command: "git show" })
+  assert.equal(droppedBash?.block, true, "reset drops the bash entry the session layer supplied")
+  assert.match(String(droppedBash?.reason), /command not in the allowlist/, "the refusal is the allowlist rule")
+  const droppedTool = await narrow.call("todo_write", items)
+  assert.equal(droppedTool?.block, true, "reset drops the tool the session layer allowed")
+  assert.match(String(droppedTool?.reason), /not on the allow list/, "the reader is told which key to change")
+  assert.equal(await narrow.call("bash", { command: "git diff" }), undefined, "the dispatch's own entry still runs")
+  narrow.restore()
+  console.log("  ok   dispatch-level reset narrows both the session bash allowlist and allowTools")
+}
+
+// 276. /permission prints the allow column and the legacy read/write columns on separate lines.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { allow: ["git diff --stat"], read: ["cat r"], write: ["cat w"] },
+      },
+    }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const lines = notified.join("\n").split("\n")
+  const allowLine = lines.find((line) => line.startsWith("bash allow"))
+  const legacyLine = lines.find((line) => line.startsWith("bash (legacy columns, migrate to allow): "))
+  assert.ok(allowLine, "the allow column has its own line")
+  assert.ok(legacyLine, "the legacy columns have their own line")
+  assert.equal(allowLine, "bash allow (no write access: commands that write are refused): git diff --stat", "the allow line names only the allow column")
+  assert.equal(
+    legacyLine,
+    "bash (legacy columns, migrate to allow): read cat r | write cat w",
+    "the legacy line names both legacy columns",
+  )
+  assert.ok(!allowLine?.includes("read cat r"), "the allow line does not carry a legacy column")
+  assert.ok(!legacyLine?.includes("git diff --stat"), "the legacy line does not carry the allow entry")
+  h.restore()
+  console.log("  ok   /permission keeps the allow column and the legacy columns on separate lines")
+}
+
+// 277. /permission states no-write-access on the allow column itself, not per entry.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { allow: ["git commit", "git diff"], writable: false },
+      },
+    }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const text = notified.join("\n")
+  const allowLine = text.split("\n").find((line) => line.startsWith("bash allow"))
+  assert.ok(allowLine, "the allow line is printed")
+  assert.match(
+    allowLine ?? "",
+    /^bash allow \(no write access: commands that write are refused\): /,
+    "the no-write-access note belongs to the column",
+  )
+  assert.match(allowLine ?? "", /git commit \| git diff/, "both entries are still listed")
+  assert.doesNotMatch(allowLine ?? "", /\(will be refused/, "no individual entry is marked as refused")
+  h.restore()
+  console.log("  ok   /permission puts the no-write-access note on the allow column, not on entries")
+}
+
+// 278. A pattern that can also match a read is not flagged; a matching write still hits the write rule.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { allow: ["git tag", "git commit"], writable: false },
+      },
+    }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const text = notified.join("\n")
+  const allowLine = text.split("\n").find((line) => line.startsWith("bash allow"))
+  assert.ok(allowLine, "the allow line is printed")
+  assert.match(
+    allowLine ?? "",
+    /^bash allow \(no write access: commands that write are refused\): /,
+    "the column carries the note",
+  )
+  assert.doesNotMatch(allowLine ?? "", /git tag \(will be refused/, "git tag is not singled out as refused")
+  assert.doesNotMatch(allowLine ?? "", /git commit \(will be refused/, "nor is the genuine writer")
+
+  const listing = { command: "git tag -l" }
+  assert.equal(await h.call("bash", listing), undefined, "the listing form of the tag pattern still runs")
+
+  const commit = { command: "git commit" }
+  const denied = await h.call("bash", commit)
+  assert.equal(denied?.block, true, "a genuine write through a matching entry is refused")
+  assert.match(String(denied?.reason), /write refusal|gives no write access/, "the refusal is the write rule")
+  assert.doesNotMatch(String(denied?.reason), /not in the allowlist/, "not an allowlist miss")
+
+  h.restore()
+  console.log("  ok   patterns are not classified; a matching read runs and a matching write hits the write rule")
+}
+
+// 279. /permission leaves the no-write note off a writable allow column.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { allow: ["ls a"], writable: true },
+      },
+    }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const text = notified.join("\n")
+  assert.ok(text.includes("bash allow: ls a"), "the writable column prints its entries")
+  assert.equal(text.includes("no write access"), false, "no write refusal note is printed")
+  h.restore()
+  console.log("  ok   /permission prints a plain allow line when the column is writable")
+}
+
+// 280. /permission does not describe a write gate that an empty allow column cannot trigger.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": {
+        scope: ["src/**"],
+        bash: { read: ["cat r"], write: ["cat w"] },
+      },
+    }),
+  })
+  const notified: string[] = []
+  await h.commands["permission"].handler("", { cwd: workdir, ui: { notify: (m: string) => notified.push(m) } })
+  const text = notified.join("\n")
+  assert.ok(text.includes("bash allow: (none)"), "the empty allow column is printed")
+  assert.equal(text.includes("no write access"), false, "the write note needs an allow match to apply")
+  h.restore()
+  console.log("  ok   /permission keeps the no-write note off a legacy-only policy")
 }
 rmSync(workdir, { recursive: true, force: true })
 restoreState()

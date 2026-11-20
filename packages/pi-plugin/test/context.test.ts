@@ -92,6 +92,18 @@ function asBackgroundChild<T>(fn: () => T): T {
   }
 }
 
+/** 用主会话语义跑一个用例：清掉后台标记，退出时恢复调用方的环境。 */
+function asMainSession<T>(fn: () => T): T {
+  const previous = process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_CHILD;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+    else process.env.PI_SUBAGENT_CHILD = previous;
+  }
+}
+
 console.log("pi-subagents-extend context");
 
 // 1. 成对标记整段剥离，其余内容逐字保留。
@@ -162,7 +174,7 @@ console.log("pi-subagents-extend context");
 {
   const dir = project("MAINFILE_B\n");
   const h = harness(activateMain);
-  const options = h.turn(dir, files());
+  const options = asMainSession(() => h.turn(dir, files()));
   assert.equal(options.sections?.main_only_instructions?.includes("MAINFILE_B"), true, "主会话拿到注入");
   assert.equal(options.contextFiles?.[0]?.content.includes("MARK_MAIN_ONLY_A"), true, "主会话不剥标记");
   assert.deepEqual(h.notes, [], "正常情况不打扰用户");
@@ -185,7 +197,7 @@ console.log("pi-subagents-extend context");
 {
   const dir = project("MAINFILE_B\n");
   const h = harness(activateChild);
-  const options = h.turn(dir, files());
+  const options = asMainSession(() => h.turn(dir, files()));
   assert.equal(options.contextFiles?.[0]?.content.includes("MARK_MAIN_ONLY_A"), false, "前台子代理剥掉标记");
   assert.equal(options.sections, undefined, "前台子代理不注入");
   rmSync(dir, { recursive: true, force: true });

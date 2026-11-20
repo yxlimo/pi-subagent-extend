@@ -1,0 +1,219 @@
+// 文档里展示的 bindings 载荷必须仍能被 reader 接受：文档和 reader 不能各自漂移。
+import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import type { CommandSpec, EventHandler, ExtensionModule, FakeExtensionApi, SessionContext } from "./types.ts";
+
+const here = fileURLToPath(new URL(".", import.meta.url));
+const root = fileURLToPath(new URL("../../..", import.meta.url));
+const src = (name: string): string => pathToFileURL(join(here, "..", "src", name)).href;
+
+// extractCallConfig 没有导出，所以用环境变量走完整 reader：激活后用 /permission 看它解析出的策略。
+const { activate } = (await import(src("index.ts"))) as unknown as ExtensionModule;
+
+const SKIP_DIRS = new Set(["node_modules", ".git", ".build", "target"]);
+const skipped = (rel: string): boolean =>
+  rel.split(sep).some((part) => SKIP_DIRS.has(part) || part.includes("pi-worktree"));
+
+const markdownFiles: string[] = [];
+const walk = (absolute: string, rel: string): void => {
+  for (const entry of readdirSync(absolute, { withFileTypes: true })) {
+    const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+    if (skipped(childRel)) continue;
+    const child = join(absolute, entry.name);
+    if (entry.isDirectory()) walk(child, childRel);
+    else if (entry.isFile() && entry.name.endsWith(".md")) markdownFiles.push(child);
+  }
+};
+walk(root, "");
+
+interface Block {
+  file: string
+  line: number
+  text: string
+}
+
+const blocks: Block[] = [];
+for (const file of markdownFiles) {
+  const lines = readFileSync(file, "utf8").split(/\r?\n/);
+  let open: number | undefined;
+  let body: string[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (/^\s*```/.test(line)) {
+      if (open === undefined) {
+        open = index + 1;
+        body = [];
+      } else {
+        blocks.push({ file, line: open, text: body.join("\n") });
+        open = undefined;
+        body = [];
+      }
+      continue;
+    }
+    if (open !== undefined) body.push(line);
+  }
+}
+
+/**
+ * 从围栏块里取出以命名空间为顶层键的 JSON 对象。
+ * 文档里既有裸 {...}，也有 `extensionBindings: {...}` 和 `PI_SUBAGENT_EXTENSION_BINDINGS='{...}'` 这类包裹；
+ * 花括号配平后交给 JSON.parse，散文或残缺示例解析不出来就跳过。
+ */
+function bindingPayload(block: string): string | undefined {
+  for (let start = 0; start < block.length; start += 1) {
+    if (block[start] !== "{") continue;
+    let depth = 0;
+    let quote: string | undefined;
+    for (let i = start; i < block.length; i += 1) {
+      const ch = block[i] as string;
+      if (quote) {
+        if (ch === "\\") {
+          i += 1;
+          continue;
+        }
+        if (ch === quote) quote = undefined;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+        continue;
+      }
+      if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth !== 0) continue;
+        const candidate = block.slice(start, i + 1);
+        try {
+          const parsed: unknown = JSON.parse(candidate);
+          if (
+            parsed &&
+            typeof parsed === "object" &&
+            !Array.isArray(parsed) &&
+            Object.keys(parsed).some((key) => key.startsWith("pi-subagents-extend/"))
+          ) {
+            return candidate;
+          }
+        } catch {
+          // 不是 JSON：散文块，跳过。
+        }
+        break;
+      }
+    }
+  }
+  return undefined;
+}
+
+interface Payload extends Block {
+  json: string
+}
+
+// 文档里的 allow 列必须真的能跑：取第一条普通命令（re: 只是模式，不是命令）。
+function firstPlainAllowCommand(json: string): string | undefined {
+  const parsed: unknown = JSON.parse(json);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  for (const value of Object.values(parsed as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const ns = value as { permissions?: { bash?: { allow?: unknown } } };
+    const allow = ns.permissions?.bash?.allow;
+    if (!Array.isArray(allow)) continue;
+    const command = allow.find(
+      (entry: unknown): entry is string =>
+        typeof entry === "string" && entry.trim().length > 0 && !entry.trimStart().startsWith("re:"),
+    );
+    if (command) return command;
+  }
+  return undefined;
+}
+
+// 只有带引号的命名空间键、且块里真的有花括号才可能是派单载荷：裸路径（import、frontmatter、--spec）
+// 按语义排除，不再用 file:line 豁免表——文档一换行，豁免就会静默漏检。没有 `{` 的块不可能是 JSON 载荷。
+const NAMESPACE_KEY = /["']pi-subagents-extend\/[0-9]+["']/;
+
+const payloads: Payload[] = [];
+const skippedBlocks: string[] = [];
+for (const block of blocks) {
+  if (!NAMESPACE_KEY.test(block.text) || !block.text.includes("{")) continue;
+  const json = bindingPayload(block.text);
+  if (json) payloads.push({ ...block, json });
+  else {
+    skippedBlocks.push(`${relative(root, block.file)}:${block.line}`);
+  }
+}
+
+// 每个带引号命名空间键的围栏块都应当是载荷；一次报齐解析不出来的块，而不是静默跳过。
+assert.equal(
+  skippedBlocks.length,
+  0,
+  `${skippedBlocks.length} fenced blocks carry a quoted pi-subagents-extend/N key but no binding payload:\n${skippedBlocks.join("\n")}`,
+);
+
+const MIN_PAYLOADS = 6;
+assert.ok(
+  payloads.length >= MIN_PAYLOADS,
+  `only ${payloads.length} documented binding payloads; expected at least ${MIN_PAYLOADS} — a payload left coverage, fix the extraction rather than lowering the floor`,
+);
+
+const refusals: string[] = [];
+const writeRefusals: string[] = [];
+let writeChecked = 0;
+let toolCallSeq = 0;
+for (const payload of payloads) {
+  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = payload.json;
+  const commands: Record<string, CommandSpec> = {};
+  const handlers: Record<string, EventHandler> = {};
+  const notices: string[] = [];
+  const api: FakeExtensionApi = {
+    on(event, handler) {
+      handlers[event] = handler;
+    },
+    registerCommand(name, spec) {
+      commands[name] = spec;
+    },
+  };
+  try {
+    activate(api);
+    const permission = commands.permission;
+    assert.ok(permission, "the extension registers /permission");
+    const ctx: SessionContext = { cwd: root, ui: { notify(message) { notices.push(message); } } };
+    await permission.handler("", ctx);
+    const printed = notices.join("\n");
+    if (printed.includes("everything is refused")) {
+      // 不立刻 fail：把所有 refused 的块一次报齐，父代理不用逐个重跑。
+      refusals.push(`${relative(root, payload.file)}:${payload.line}: ${printed}`);
+    }
+    const command = firstPlainAllowCommand(payload.json);
+    if (command) {
+      writeChecked += 1;
+      const verdict = (await handlers.tool_call?.(
+        { type: "tool_call", toolCallId: `doc-${++toolCallSeq}`, toolName: "bash", input: { command } },
+        ctx,
+      )) as { reason?: unknown } | undefined;
+      const reason = typeof verdict?.reason === "string" ? verdict.reason : "";
+      if (reason.includes("bash.writable: false gives no write access")) {
+        writeRefusals.push(`${relative(root, payload.file)}:${payload.line}: ${command}`);
+      }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS;
+    else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous;
+  }
+}
+
+assert.equal(
+  refusals.length,
+  0,
+  `${refusals.length}/${payloads.length} documented payloads were refused by the reader; the docs and the reader disagree:\n${refusals.join("\n---\n")}`,
+);
+assert.ok(writeChecked > 0, "no documented payload has a bash.allow command to exercise");
+assert.equal(
+  writeRefusals.length,
+  0,
+  `${writeRefusals.length}/${writeChecked} documented bash.allow commands were refused as writes:\n${writeRefusals.join("\n")}`,
+);
+
+console.log(
+  `documented binding payloads: checked ${payloads.length}, refused ${refusals.length}, bash.allow commands exercised ${writeChecked}, write-refused ${writeRefusals.length}`,
+);
+console.log("documented binding payload tests passed");

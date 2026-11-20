@@ -57,16 +57,20 @@ Corollary: if a task genuinely needs extensive read-only investigation, either l
 ## Configuration template
 
 ```json
-"pi-subagents-extend/1": {
-  "scope": ["src/auth/**"],
-  "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] },
-  "maxDenies": 5,
-  "probe": {
-    "idleWriteMs": 360000,
-    "abortGraceMs": 120000,
-    "successIdleMs": 300000,
-    "successPatterns": ["0 failed"],
-    "forbidWritePatterns": ["scratch/.*", "_tmp-.*"]
+{
+  "pi-subagents-extend/1": {
+    "permissions": {
+      "scope": ["src/auth/**"],
+      "bash": { "allow": ["pnpm run typecheck", "pnpm test"], "writable": true },
+      "maxDenies": 5,
+      "probe": {
+        "idleWriteMs": 360000,
+        "abortGraceMs": 120000,
+        "successIdleMs": 300000,
+        "successPatterns": ["0 failed"],
+        "forbidWritePatterns": ["scratch/.*", "_tmp-.*"]
+      }
+    }
   }
 }
 ```

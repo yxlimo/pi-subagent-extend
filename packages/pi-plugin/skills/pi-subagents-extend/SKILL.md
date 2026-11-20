@@ -14,7 +14,7 @@ When delegating a subagent, pass the scope of this task through `extensionBindin
 | The subagent should only read/write the few files of this task | `scope`, plus `readOnly` for a read-only task | [The scope field](#the-scope-field) |
 | The subagent should read the whole task scope but write into one directory (a review allowed to write only its report) | `writeScope` | [The scope field](#the-scope-field) |
 | A read-only reviewer still needs to write its report somewhere outside the tree | `readOnly` + an absolute `writeScope` entry + `write` in `allowTools` | [The scope field](#the-scope-field) |
-| The subagent has to run typecheck, tests or a build itself | `bash.allow`, plus `writable` when the artefacts land on disk | [The bash field](#the-bash-field) |
+| The subagent has to run typecheck, tests or a build itself | `bash.allow` plus `writable: true` for commands whose program can write (`pnpm`/`npm`/`yarn`/`bun` with `run`/`test`/`exec` are refused at the gate without it; it also lets artefacts land on disk) | [The bash field](#the-bash-field) |
 | The subagent runs in `worktree: true` and has to install dependencies | The project commits `.pi/worktree-setup.sh`, together with `writablePaths` / `network` | [bash in a worktree](#bash-in-a-worktree) |
 | You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | agent profile | "Profiles (per-role defaults)" below |
 | The subagent starts idling or going in circles | The other half of this package: probes | skill `pi-subagents-extend-probes` |
@@ -76,8 +76,9 @@ subagent(
     "pi-subagents-extend/1": {
       "permissions": {
         "scope": ["<file/directory glob>"],
-        "bash": { "read": ["pnpm run typecheck"], "write": ["pnpm test"] }
+        "bash": { "allow": ["pnpm run typecheck", "pnpm test"], "writable": true }
       }
+    }
   }
 )
 ```
@@ -104,6 +105,7 @@ subagent(
           "writablePaths": ["~/.local/share/pnpm/store"]
         }
       }
+    }
   }
 )
 ```
@@ -305,7 +307,7 @@ Skipping silently is the most expensive failure mode here: the declaration exits
 - **A command that ran but cannot work is annotated**: when an allowlisted command fails because the working directory has no manifest (`pnpm` reports `No package.json found`), a `[sandbox]` note is appended at the end of the result: it names the allowlist entry that cannot work from that directory, the reason, and the form that would work (`pnpm --dir packages/pi-plugin run typecheck`). It names **the entry the allowlist actually used to authorise the command**, not just another entry that matches it — a wider `pnpm` in the same list must not be pinned on a command another entry granted. With several candidate packages it lists up to eight of them instead of picking one (the rest as `… and N more`), and when the only candidate has no such script it says ``no candidate has a `typecheck` script`` rather than inventing a form or asking which package was meant. A truncated list says so (`only the first 8 are listed`). `bun test` is never reported: it runs bun's own runner and needs no manifest at all.
 - The text of an out-of-scope **file-tool** refusal is in English, and it spells out "which path is out of scope, do not retry, report it if you need it", and lists the current scope. The bash path nudge is a different refusal: it names a path outside the working tree and lists the working tree. A refusal for a missing path does not count as a permission problem: `grep`/`find` without a path are handled as the cwd (the text says `no path was given`), and `write`/`edit` must be given a path (the text says `needs a path`). Such refusals do not count towards the collision count.
 - **Refusal counts are consecutive**: any allowed working call resets both budgets, so a mistake that has been corrected is not carried to the end of the run. `contact_supervisor` and `structured_output` are exempt from that reset — they are a report, not progress, so alternating a probe with an escalation does not keep the run alive at the warning level.
-- Inside the scope a session can use `/permission` to see the current scope, the two bash columns, the sandbox's writable paths, the pnpm store, the read count, the collision count and the probe state (the key names are in English: `Source`, `Mode`, `bash read`, `bash write`, `bash deny`, `Sandbox`, `Sandbox writable paths`, `Reads`, `Denials`).
+- Inside the scope a session can use `/permission` to see the current policy: `Source`, `Bindings`, `Mode`, `Write scope` (when it differs), `Read scope`, `Read denials: … · write denials: …`, the `bash allow:` column (with the no-write note when `writable: false` and entries exist), the legacy `bash (legacy columns, migrate to allow):` line when legacy entries exist, `Sandbox`, `Sandbox writable paths`, `Reads` and the probe state.
 
 ## Notes for the parent agent
 
@@ -313,7 +315,7 @@ Skipping silently is the most expensive failure mode here: the declaration exits
 - When the subagent reports `is outside this task's scope`, decide whether that path really belongs to this task: if it does, widen `scope` and dispatch again; if it does not, the task description is ambiguous, so fix the task description first. Check the scope syntax itself first (a directory has to be written as `dir` / `dir/` / `dir/**`), and only then suspect that the subagent went to the wrong directory.
 - When a batch contains an allowed result (the batch is not all terminating), the turn continues, and every later call gets the text of the "stop reason" (it holds historical paths). When judging, trust only the criterion on the last line; do not treat the paths inside it as this task's paths.
 - Do not retry out-of-scope paths over and over to get around a refusal.
-- When the subagent has to run tests/typecheck itself, list the commands in `bash.allow` — one column, and the extension judges from the command itself whether it reads or writes (use a `re:` regex when you need to be precise, but never `re: .*`). If the test artefacts have to land on disk, add `"writable": true`; the sandbox has no network by default, so installing dependencies and the like is refused.
+- When the subagent has to run tests/typecheck itself, list the commands in `bash.allow` — one column, and the extension judges from the command itself whether it reads or writes (use a `re:` regex when you need to be precise, but never `re: .*`). Add `"writable": true` for any command whose program can write: package managers (`pnpm`/`npm`/`yarn`/`bun` with `run`/`test`/`exec`) are refused at the gate without it, and it is also what lets their artefacts land on disk. The sandbox has no network by default, so installing dependencies and the like is refused.
 - The read face stays open on purpose: running tests has to read the whole tree, the toolchain lives in `/nix/store`, and narrowing the read root would kill every command at once, so an allowlisted command can still `cat` a file outside the tree inside the sandbox. Do not treat the bash allowlist as a way of locking reads down. What the extension adds is a nudge, not a wall: for a **read-class** command, an argument that counts as a path — it contains a slash and nothing but path characters, so `src/index.ts` and `~/x` qualify — is resolved (symlinks by their real target) and refused when it lands outside the **working tree**, the directory the command runs in. That is deliberately not the read scope: a scope can be much narrower than the tree (`scope: ["src/auth/**"]` is the normal shape), while a build has to read the whole tree, so the tree is what a command is judged against. The toolchain directories are **not** exempt — the program token is, because that is the tool being run rather than a file of the task's. What is exempt is the system's `/etc`, `/proc`, `/dev` and `/sys`, the working tree itself and the command's private scratch directory. Anything doubtful is skipped rather than guessed at — quoted arguments, `$VAR`, globs, URLs, and bare words such as `foo` or `--flag`. A child that needs a file outside the tree should use `read` when the scope covers it, or say what it needs — not hunt through `/nix/store` with `rg`.
 - When the subagent reports `command not in the allowlist`, first decide whether that command is really needed for this task: if it is, add it to the matching column and dispatch again; if it is not, change the task description instead of letting it keep trying. The refusal text carries the pnpm store path and the `bash.writablePaths` hint — copy it in when the subagent has to install dependencies, instead of letting it install them itself.
 - Nested subagents do not inherit bindings: when you lock down an agent that may delegate in turn, do not also enable `allowNestedSubagents`.

@@ -13,7 +13,7 @@ const { BINDING_VERSION } = (await import(
 )) as typeof import("../src/role-config.ts");
 
 // 跳过的是相对仓库根的路径段：worktree 自身的绝对路径里就有 pi-worktree。
-const SKIP_DIRS = new Set(["node_modules", ".git", ".build"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", ".build", "target"]);
 const skipped = (rel: string): boolean =>
   rel.split(sep).some((part) => SKIP_DIRS.has(part) || part.includes("pi-worktree"));
 

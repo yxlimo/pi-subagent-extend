@@ -312,6 +312,20 @@ function denyAll(source: string): Policy {
 }
 
 /**
+ * /permission 的 allow 列：writable:false 时标注整列，不逐条判定。
+ * 条目只是前缀或正则，同一条匹配的不同命令读写判定可能不同（git tag 与能跑的
+ * git tag -l），对单条下结论必然失真；把「写会被拒」说成列的性质才准确。
+ */
+function permissionAllowColumn(rule: BashRule): string {
+	const entries = rule.allow.join(" | ") || "(none)";
+	if (rule.allow.length === 0) return `bash allow: ${entries}`;
+	// 空列没有可匹配的条目，写拒分支根本进不去，所以不标注一条不存在的机制。
+	return rule.writable === false
+		? `bash allow (no write access: commands that write are refused): ${entries}`
+		: `bash allow: ${entries}`;
+}
+
+/**
  * glob → 正则，单趟扫描。不能串 replace：`**` 先变成 `.*` 后，后一步的 `*` 规则会
  * 把新生成的 `*` 再改写一遍（"**" 曾变成 ".[^/]*"）。
  */
@@ -378,13 +392,41 @@ function positiveInt(value: unknown): number {
 /** `extensionBindings` 里的这两个键属于角色 md，不该影响本次派单的策略。 */
 const PAYLOAD_IGNORED_KEYS = ["setup", "output"] as const;
 
+/** 命名空间层站在 permissions 旁边的块级键；不进策略，交给 worktree 决策。 */
+const NAMESPACE_BLOCK_KEYS = ["worktree"] as const;
+/** 命名空间层能识别的全部键；其余键一律拒绝，免得拼写错误被静默忽略。 */
+const NAMESPACE_KEYS = ["permissions", ...NAMESPACE_BLOCK_KEYS, ...PAYLOAD_IGNORED_KEYS] as const;
 /** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace 配置对象；版本不匹配一律拒绝。 */
 interface CallConfigResult {
 	config?: Record<string, unknown>;
+	/** 命名空间层的块级键（如 worktree），不属于 permissions 策略。 */
+	blocks?: Record<string, unknown>;
 	error?: string;
 	/** 命名空间层或 permissions 层出现的、必须只告警一次的键。 */
 	ignored?: string[];
 }
+
+/**
+ * 派单载荷 permissions 里出现 parsePolicyObject 不认识的键时的拒绝文案。
+ * `write` / `budgets` 是角色 md 的拼法，这里点名正确的派单拼法，避免用户照 md 抄过来被静默丢弃。
+ */
+function unknownPayloadKeysError(keys: readonly string[], prefix: string): string {
+	const hints: Record<string, string> = {
+		write: 'the dispatch spelling is "writeScope"',
+		budgets: 'the dispatch spelling is "maxReads" / "maxDenies"',
+	};
+	const listed = keys
+		.map((key) => (hints[key] ? `"${key}" (${hints[key]})` : `"${key}"`))
+		.join(", ");
+	return `${prefix}.permissions: unknown key(s) ${listed}; everything is refused`;
+}
+
+function unknownNamespaceKeysError(keys: readonly string[], prefix: string): string {
+	const listed = keys.map((key) => `"${key}"`).join(", ");
+	const accepted = NAMESPACE_KEYS.map((key) => `"${key}"`).join(", ");
+	return `${prefix}: unknown namespace key(s) ${listed}; accepted namespace keys are ${accepted}; everything is refused`;
+}
+
 function extractCallConfig(raw: string | undefined): CallConfigResult {
 	if (!raw?.trim()) return {};
 	let parsed: unknown;
@@ -429,14 +471,37 @@ function extractCallConfig(raw: string | undefined): CallConfigResult {
 			error: `extensionBindings ${key}.permissions must be an object; expected ${expected}; everything is refused`,
 		};
 	}
-	const config: Record<string, unknown> = {};
+	// 命名空间层只认 permissions / 块级键 / 忽略对；多出来的键直接拒绝，不让拼写错误藏在这里。
+	const unknownNamespace = Object.keys(namespace).filter(
+		(name) => !(NAMESPACE_KEYS as readonly string[]).includes(name),
+	);
+	if (unknownNamespace.length > 0) {
+		return { error: unknownNamespaceKeysError(unknownNamespace, `extensionBindings ${key}`) };
+	}
+	const config: Record<string, unknown> = Object.create(null);
+	const unknown: string[] = [];
 	for (const [name, value] of Object.entries(perms)) {
-		if (!(PAYLOAD_IGNORED_KEYS as readonly string[]).includes(name)) config[name] = value;
+		// setup / output 是给别的扩展的，本扩展不参与，只告警一次。
+		if ((PAYLOAD_IGNORED_KEYS as readonly string[]).includes(name)) continue;
+		// 原型键不是声明：Object.create(null) 让它成为普通键，这里直接跳过，不进 config 也不报错。
+		if (name === "__proto__") continue;
+		if ((POLICY_CONFIG_KEYS as readonly string[]).includes(name)) {
+			config[name] = value;
+		} else {
+			unknown.push(name);
+		}
+	}
+	if (unknown.length > 0) {
+		return { error: unknownPayloadKeysError(unknown, `extensionBindings ${key}`) };
+	}
+	const blocks: Record<string, unknown> = Object.create(null);
+	for (const name of NAMESPACE_BLOCK_KEYS) {
+		if (Object.hasOwn(namespace, name)) blocks[name] = namespace[name];
 	}
 	const ignored = PAYLOAD_IGNORED_KEYS.filter(
 		(name) => Object.hasOwn(namespace, name) || Object.hasOwn(perms, name),
 	);
-	return { config, ignored: [...ignored] };
+	return { config, blocks, ignored: [...ignored] };
 }
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -533,6 +598,26 @@ function parseWriteScope(
 	}
 	return { writeGlobs: (ws as string[]).map((g) => g.trim()).filter(Boolean) };
 }
+
+/**
+ * parsePolicyObject 认识的配置键。派单载荷的 permissions 对象只认这些键，
+ * 其余键由 extractCallConfig 在入口拒绝（见 unknownPayloadKeysError），避免
+ * 「拼错的收窄字段被静默丢弃」——丢弃一个写范围收窄会把写授权放大到整个读范围。
+ */
+const POLICY_CONFIG_KEYS = [
+	"scope",
+	"writeScope",
+	"readOnly",
+	"tools",
+	"allowTools",
+	"bash",
+	"probe",
+	"maxReads",
+	"maxDenies",
+	"maxWriteDenies",
+	// 不是策略字段：mergeConfig 用它表达「这一层只给这些」，消费后删除。
+	"reset",
+] as const;
 
 function parsePolicyObject(
 	config: Record<string, unknown>,
@@ -1985,6 +2070,12 @@ function readProfile(
 	}
 	const config = mergeConfig(asObject(table.default), asObject(table[name]));
 	if (!config) return { source, error: `${source}: ${shown}: neither "${name}" nor "default" is an object` };
+	if (Object.hasOwn(config, "permissions")) {
+		return {
+			source,
+			error: `${source}: ${shown} is a flat per-role profile, but carries a "permissions" wrapper — that shape belongs to a dispatch payload; use the flat form instead, e.g. {"default":{"scope":["src/**"]}}; everything is refused`,
+		};
+	}
 	return { config, source };
 }
 
@@ -2086,22 +2177,35 @@ function warnLegacyBashColumns(config: Record<string, unknown> | undefined, sour
 
 /**
  * 老的 .pi 配置文件还在时各提示一次：新配置写在角色 md 的 extend 块，老文件暂时继续可用。
- * 只按 existsSync 的可判定事实说话，不猜项目里有没有别的配置入口。
+ * worktree 的 cwd 里没有主检出的配置，所以主检出根和 cwd 都查；两个文件路径只认普通文件，
+ * 目录会让 existsSync 为真却让 readProfile 报 EISDIR，那句「旧文件还能用」就是假的。
  */
 function warnCompatLayer(cwd: string): void {
-	const bindingsFile = resolve(cwd, PROFILE_FILE);
-	if (existsSync(bindingsFile) && !warnedCompatLayer.has(bindingsFile)) {
-		warnedCompatLayer.add(bindingsFile);
-		uiWarning?.(
-			`pi-subagents-extend: ${PROFILE_FILE} is from the older configuration layer; put configuration in the role md's extend: block instead. The old file keeps working meanwhile.`
-		);
-	}
-	const profilesDir = resolve(cwd, AGENT_PROFILES_DIR);
-	if (existsSync(profilesDir) && !warnedCompatLayer.has(profilesDir)) {
-		warnedCompatLayer.add(profilesDir);
-		uiWarning?.(
-			`pi-subagents-extend: ${AGENT_PROFILES_DIR}/*.ts is from the older configuration layer; put configuration in the role md's extend: block instead. The old files keep working meanwhile.`
-		);
+	const isFile = (path: string): boolean => {
+		try {
+			return statSync(path).isFile();
+		} catch {
+			return false;
+		}
+	};
+	const anchor = mainRepoRoot(cwd);
+	const roots = anchor.root === null ? [cwd] : [...new Set([cwd, anchor.root])];
+	for (const root of roots) {
+		const bindingsFile = resolve(root, PROFILE_FILE);
+		if (isFile(bindingsFile) && !warnedCompatLayer.has(bindingsFile)) {
+			warnedCompatLayer.add(bindingsFile);
+			uiWarning?.(
+				`pi-subagents-extend: ${PROFILE_FILE} is from the older configuration layer; put configuration in the role md's extend: block instead. The old file keeps working meanwhile.`
+			);
+		}
+		// 目录按目录判：老一代 profile 目录本身就是一个目录，不能套用上面的 isFile。
+		const profilesDir = resolve(root, AGENT_PROFILES_DIR);
+		if (existsSync(profilesDir) && !warnedCompatLayer.has(profilesDir)) {
+			warnedCompatLayer.add(profilesDir);
+			uiWarning?.(
+				`pi-subagents-extend: ${AGENT_PROFILES_DIR}/*.ts is from the older configuration layer; put configuration in the role md's extend: block instead. The old files keep working meanwhile.`
+			);
+		}
 	}
 }
 /**
@@ -3050,7 +3154,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				// 只有 worktree 这一个决策把本次派单自带的 bindings 叠在会话 bindings 之上；
 				// 其余策略解析仍用会话启动时定格的那一份，范围不因单次派单而变。
 				const own = asObject(candidate.extensionBindings)?.[bindingKey()];
-				const strategy = worktreePolicyFor(cwd, options, { ...call.config, ...asObject(own) }, agent.trim());
+				const strategy = worktreePolicyFor(cwd, options, { ...call.config, ...call.blocks, ...asObject(own) }, agent.trim());
 				if (shouldDefaultWorktree(strategy, event.toolName, event.input)) {
 					candidate.worktree = true;
 					if (strategy.fromProfile) warnUntrackedWorktreeProfile(cwd, options);
@@ -3282,7 +3386,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 					`Read scope: ${policy.globs.join(" | ") || "(none)"}`,
 					`Read denials: ${denyCounter.status()} · write denials: ${writeDenyCounter.status()}`,
 					policy.bash
-						? `bash allow: ${[...policy.bash.write, ...policy.bash.read, ...policy.bash.allow].join(" | ") || "(none)"}`
+						? permissionAllowColumn(policy.bash)
 						: "bash: off",
 					policy.bash && (policy.bash.read.length > 0 || policy.bash.write.length > 0)
 						? `bash (legacy columns, migrate to allow): read ${policy.bash.read.join(" | ") || "(none)"} | write ${policy.bash.write.join(" | ") || "(none)"}`

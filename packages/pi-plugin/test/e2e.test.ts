@@ -1,8 +1,8 @@
 // 端到端验证：真会话、真模型，验证三种会话看到的上下文不一样。
 //
-//   pnpm run test:e2e           跑完整矩阵
-//   PI_E2E_KEEP=1 pnpm run test:e2e   保留临时工程，便于翻会话记录
-//   PI_E2E_MODEL=<provider>/<model> pnpm run test:e2e   指定模型；缺省用 pi 自身的默认模型
+//   pnpm run test:llm           跑完整矩阵
+//   PI_E2E_KEEP=1 pnpm run test:llm   保留临时工程，便于翻会话记录
+//   PI_E2E_MODEL=<provider>/<model> pnpm run test:llm   指定模型；缺省用 pi 自身的默认模型
 //
 // 为什么用 RPC 而不是 `pi -p`：`pi -p` 在父代理空闲时就退出，后台子代理还在跑的时候
 // 进程没了，取证只能靠翻文件。RPC 模式（官方导出的 RpcClient）把会话跑成长寿子进程，
