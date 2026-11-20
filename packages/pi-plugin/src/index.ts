@@ -52,6 +52,7 @@ import { DenyCounter } from "./deny-count.ts";
 import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
 import { Probe, STOP_NOTICE, parseProbeConfig } from "./probe.ts";
+import { shouldDefaultWorktree, WORKTREE_TOOLS } from "./worktree-default.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
 const BINDING_NAMESPACE = "pi-subagents-extend";
@@ -1589,6 +1590,8 @@ export function dropHiddenGrants(
 
 /** 已提示过的被剔授权：每条命令一份 spec，不记下来就会每调一次重复提示一次。 */
 const reportedHiddenGrants = new Set<string>();
+/** worktree 默认值依赖的 profile 文件：确认未被 git 跟踪的只提示一次（session_start 清空）。 */
+const reportedUntrackedWorktreeProfiles = new Set<string>();
 /**
  * UI 提示通道，由 `judgeToolCall` 绑定的会话上下文注入：模块级函数拿不到 `ctx`，而这条告警是给
  * 父代理看的配置问题，不该写进模型上下文，所以只走 UI。
@@ -1949,6 +1952,72 @@ function profilePolicy(
 	// 「该改哪个文件」的唯一线索，所以合成时必须把两层都写出来。
 	const source = call ? `${resolved.source} + extensionBindings` : resolved.source;
 	return parsePolicyObject(merged, source, { requireScope: false });
+}
+
+/**
+ * 派单目标角色的 worktree 默认值。按 input.agent 从 profile 里解析：default 打底，
+ * 角色层与本次 bindings 依次覆盖（标量调用方优先）。读不到对应角色时，只有调用方
+ * bindings 里的 `worktree === true` 才算策略（写 false、字符串等都不算）；两者都没有
+ * 就返回 undefined（fail open）。
+ *
+ * `fromProfile` 标记这个值是否来自磁盘 profile 文件：派单自带 bindings 走的不是文件，
+ * 补值时不需要提示「worktree 副本里没有那份 profile」。
+ */
+interface WorktreeStrategy {
+	worktree?: unknown;
+	fromProfile: boolean;
+}
+
+function worktreePolicyFor(
+	cwd: string,
+	options: ActivateOptions,
+	call: Record<string, unknown> | undefined,
+	agent: string,
+): WorktreeStrategy {
+	const resolved = readProfile(cwd, agent, options.profileFile);
+	if (!resolved.config) {
+		return call?.worktree === true ? { worktree: true, fromProfile: false } : { fromProfile: false };
+	}
+	const merged = mergeConfig(resolved.config, call);
+	const fromProfile = call?.worktree === undefined && resolved.config.worktree === true;
+	return { worktree: merged?.worktree, fromProfile };
+}
+
+/**
+ * profile 文件在 git 里是否被跟踪。三态：true 已跟踪、false 确认未跟踪、undefined 判不了
+ * （不在仓库里、git 不在 PATH、超时）。`--error-unmatch` 的退出码 1 才是「没跟踪」这个确定
+ * 答案；其它失败一律当未知，宁可少说也不误报。
+ */
+function profileTrackedInGit(cwd: string, relPath: string): boolean | undefined {
+	try {
+		execFileSync("git", ["ls-files", "--error-unmatch", "--", relPath], {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 5000,
+		});
+		return true;
+	} catch (error) {
+		return typeof error === "object" && error !== null && (error as { status?: number }).status === 1
+			? false
+			: undefined;
+	}
+}
+
+/**
+ * 补 worktree 默认值时，若策略来自磁盘 profile 而该文件没被 git 跟踪，告诉父代理一次：
+ * worktree 副本里不会有这个文件，子代理读不到 profile 会被全拒。只在确认未跟踪时提示，
+ * 判不了就不说；同一路径只提示一次（集合在 session_start 清空）。
+ */
+function warnUntrackedWorktreeProfile(cwd: string, options: ActivateOptions): void {
+	const file = resolve(cwd, options.profileFile ?? PROFILE_FILE);
+	if (reportedUntrackedWorktreeProfiles.has(file)) return;
+	const relPath = relative(cwd, file);
+	if (profileTrackedInGit(cwd, relPath) !== false) return;
+	reportedUntrackedWorktreeProfiles.add(file);
+	uiWarning?.(
+		`pi-subagents-extend: \`worktree: true\` runs the subagent in a worktree copy, but the profile file ${relPath} is not tracked by git, so the copy will not contain it and the subagent will be denied every call because it cannot read its profile. Commit that file, or pass the configuration in the dispatch's own bindings instead.`
+	);
 }
 
 export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
@@ -2380,6 +2449,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		// 提示状态按会话重置：一个进程可能服务多个会话，模块级的 set 留到下一个会话就会把
 		// 本该发出的告警吞掉（那是「lost, not duplicated」的一种，且完全没有痕迹）。
 		reportedHiddenGrants.clear();
+		reportedUntrackedWorktreeProfiles.clear();
 		// UI 提示通道在这里接上会话的 ctx：`judgeToolCall` 只在工具调用时绑定，session_start
 		// 里的告警要发得出去，就不能等第一次工具调用。
 		uiWarning = (message) => {
@@ -2496,6 +2566,23 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 			const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
 			ui?.notify?.(message, "warning");
 		};
+		// 派单默认值先于范围判定：父会话没有 bindings 时同样按角色 profile 补上。
+		// 补值不是拒绝，不进 deny 预算；策略解析不到就什么都不做。
+		if (WORKTREE_TOOLS.has(event.toolName)) {
+			const candidate = event.input as { agent?: unknown; worktree?: unknown; extensionBindings?: unknown } | undefined;
+			const agent = candidate?.agent;
+			if (candidate && typeof agent === "string" && agent.trim()) {
+				const cwd = ctx.cwd ?? process.cwd();
+				// 只有 worktree 这一个决策把本次派单自带的 bindings 叠在会话 bindings 之上；
+				// 其余策略解析仍用会话启动时定格的那一份，范围不因单次派单而变。
+				const own = asObject(candidate.extensionBindings)?.[`${BINDING_NAMESPACE}/1`];
+				const strategy = worktreePolicyFor(cwd, options, { ...call.config, ...asObject(own) }, agent.trim());
+				if (shouldDefaultWorktree(strategy, event.toolName, event.input)) {
+					candidate.worktree = true;
+					if (strategy.fromProfile) warnUntrackedWorktreeProfile(cwd, options);
+				}
+			}
+		}
 		if (!policy.active) return;
 		const cwd = ctx.cwd ?? process.cwd();
 		// 求援通道不受任何停机影响：被停住的子代理最需要的就是「报告我卡在哪」。

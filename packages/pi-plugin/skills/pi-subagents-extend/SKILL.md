@@ -116,6 +116,7 @@ subagent(
 | `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way. It cannot widen a path tool: file tools are judged by the scope first, so listing a write tool here does not free it from `writeScope`. Unioned with the profile's list; `reset: true` clears that list |
 | `reset` | `boolean` | Optional, and only in a layer that has one below it. "Only these entries this time": clears the inherited `bash.read` / `bash.write` / `bash.allow` **and** `allowTools` before this layer's own lists are applied. `bash.deny` is not cleared. See [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time) |
 | `tools` | `object` | Optional. Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `path` names the argument that carries the target; `false` means the tool has no path argument, and a write tool declared that way is always refused. Omit `path` and the argument name is read from the tool's own schema. `access` is `read` or `write`; a tool that touches a **second** file (`copy`/`move`) takes `transferSource: "read"\|"write"` as well — `copy`'s source is only read, `move`'s is written to, and an undeclared transfer tool is judged as a write on both sides |
+| `worktree` | `boolean` | Optional, defaults to `false`. `true` in a role profile (or in a dispatch's own bindings) fills `worktree: true` on `subagent` and nested `subagent_launch` calls for that role when the caller did not supply it — `??=` semantics, so `null` / `undefined` are filled while an explicit `false` (or any other value) on the call wins. It only fills a value: no refusal, no deny-budget charge. An `agent` with no strategy is left alone (fail open). When the value comes from a profile file that git does not track, a one-time UI warning says to commit that file or move the configuration into the dispatch's own bindings: a worktree copy will not contain an untracked profile, so the child would be denied every call. |
 
 Glob rules: `**` matches any number of levels (including zero), `*` matches characters within a single level, `?` matches a single character.
 
@@ -227,6 +228,7 @@ Rules:
 - A profile may omit `scope`: file access is then refused entirely while the command allowlist still applies (a forgotten binding is a loud failure).
 - When the profile cannot be read, everything is refused; it does not fall back to no restriction.
 - The main session does not load these loaders, so the main agent is not locked down by accident.
+- **`worktree: true` is a dispatch default, not a permission.** It applies to `subagent` and to the nested `subagent_launch` pi-subagents sends before workflow children, so `tasks[]`, `chain` and script workflows get the same treatment. A call that says `worktree: false` keeps its shared working tree: the fill is `??=`, so only a missing or `null` value becomes `true`. No call is refused and no deny budget is charged for this.
 
 ## bash in a worktree
 

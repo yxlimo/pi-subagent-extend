@@ -5475,6 +5475,204 @@ function requiresNetworkOf(command: string): string | null {
 	h.restore()
 	console.log("  ok   curl 的查询旗标放行，真实 URL 仍按网络拒")
 }
+
+// 170. 角色 profile 的 worktree: true 给 subagent 派单补默认值；补值不是拒绝。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(
+    join(proj, ".pi/subagent-bindings.json"),
+    JSON.stringify({
+      coder: { scope: ["."], worktree: true, allowTools: ["subagent", "subagent_launch", "read"] },
+      plain: { scope: ["."], allowTools: ["subagent", "subagent_launch"] },
+    }),
+  )
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { agent: "coder", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined, "filling the default is not a refusal")
+  assert.equal(input.worktree, true)
+  h.restore()
+  console.log("  ok   a role's worktree default fills a subagent dispatch")
+}
+
+// 171. 调用方显式 false 是「我要共享工作树」，不能被角色默认值盖掉。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { agent: "coder", task: "x", worktree: false }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, false, "an explicit false survives the profile default")
+  h.restore()
+  console.log("  ok   explicit worktree: false wins over the role default")
+}
+
+// 172. 策略没有 worktree 字段时不能凭空长出这个键。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  const h = await handler({ cwd: proj, profile: "plain" })
+  const input: Record<string, unknown> = { agent: "plain", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.ok(!Object.hasOwn(input, "worktree"), "no worktree key appears without a strategy")
+  h.restore()
+  console.log("  ok   no worktree field leaves the input untouched")
+}
+
+// 173. 工作流里的 subagent_launch 也要补：tasks[] / chain 的子代理不能漏。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { workflowRunId: "run-1", key: "k", agent: "coder", task: "x" }
+  assert.equal(await h.call("subagent_launch", input), undefined)
+  assert.equal(input.worktree, true, "the nested launch gets the same default")
+  h.restore()
+  console.log("  ok   nested subagent_launch gets the role's worktree default")
+}
+
+// 174. 非派单工具不补，即使入参里也带了个 agent 字段。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { path: "src/x.ts", agent: "coder" }
+  assert.equal(await h.call("read", input), undefined)
+  assert.ok(!Object.hasOwn(input, "worktree"), "only dispatch tools are touched")
+  h.restore()
+  console.log("  ok   non-dispatch tools are left alone")
+}
+
+// 175. 角色解析不到就 fail open，不拿别的角色的策略来补。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { agent: "ghost", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.ok(!Object.hasOwn(input, "worktree"), "an unknown agent has no strategy")
+  h.restore()
+  console.log("  ok   an unresolvable agent gets no default")
+}
+
+// 176. ??= 把 null 也算「没给」：显式 false 才有优先权。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { agent: "coder", task: "x", worktree: null }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, true, "null is absent under ??=")
+  h.restore()
+  console.log("  ok   a null worktree is filled like a missing one")
+}
+
+// 177. 没有 profile 时，本次 bindings 自己写了 worktree 也照样生效。
+{
+  const empty = mkdtempSync(join(tmpdir(), "pi-subagents-extend-worktree-call-"))
+  const h = await handler({
+    cwd: empty,
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["."], worktree: true, allowTools: ["subagent"] },
+    }),
+  })
+  const input: Record<string, unknown> = { agent: "ghost", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, true, "the call's own bindings carry the strategy")
+  h.restore()
+  rmSync(empty, { recursive: true, force: true })
+  console.log("  ok   call-level worktree applies without a profile file")
+}
+
+
+// 170-182. worktree 补值的护栏（review P1）与派单自带 bindings 覆盖（P2）。
+const gitAvailable = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0
+const worktreeProj = (name: string, roles: unknown, tracked: "tracked" | "untracked" | "none"): string => {
+  const proj = join(workdir, name)
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  writeFileSync(join(proj, ".pi/subagent-bindings.json"), JSON.stringify(roles))
+  if (tracked !== "none") spawnSync("git", ["init", "-q"], { cwd: proj, stdio: "ignore" })
+  if (tracked === "tracked") spawnSync("git", ["add", ".pi/subagent-bindings.json"], { cwd: proj, stdio: "ignore" })
+  return proj
+}
+const rolesWorktree = { coder: { scope: ["."], worktree: true, allowTools: ["subagent"] } }
+const rolesPlain = { plain: { scope: ["."], allowTools: ["subagent"] } }
+
+// 178. 未跟踪的 profile 文件：补值时告警一次，第二次派单不再重复。
+if (!gitAvailable) {
+  console.log("  skip  untracked worktree profile warning（环境里没有 git）")
+} else {
+  const proj = worktreeProj("proj-wt-untracked", rolesWorktree, "untracked")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const first: Record<string, unknown> = { agent: "coder", task: "x" }
+  assert.equal(await h.call("subagent", first), undefined)
+  assert.equal(first.worktree, true, "the default is still filled")
+  const warns = h.ui.filter((m) => m.includes("not tracked by git"))
+  assert.equal(warns.length, 1, "one warning for the untracked profile")
+  assert.match(warns[0], /worktree: true/, "the warning explains that worktree: true uses a copy")
+  assert.match(warns[0], /\.pi\/subagent-bindings\.json/, "the warning names the profile file")
+  assert.match(warns[0], /denied every call/, "the warning says the child is fully denied")
+  assert.match(warns[0], /Commit that file/, "the warning says to commit it")
+  assert.match(warns[0], /dispatch's own bindings/, "the warning offers dispatch bindings")
+  const second: Record<string, unknown> = { agent: "coder", task: "y" }
+  assert.equal(await h.call("subagent", second), undefined)
+  assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 1, "still one warning")
+  h.restore()
+  console.log("  ok   an untracked worktree profile warns once, with why and how")
+}
+
+// 179. 已跟踪的 profile 文件不告警。
+if (!gitAvailable) {
+  console.log("  skip  tracked worktree profile stays silent（环境里没有 git）")
+} else {
+  const proj = worktreeProj("proj-wt-tracked", rolesWorktree, "tracked")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { agent: "coder", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, true)
+  assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 0, "a tracked profile is silent")
+  h.restore()
+  console.log("  ok   a tracked worktree profile stays silent")
+}
+
+// 180. 判定不了（不在 git 仓库里）时不告警：宁可少说，不许误报。
+{
+  const proj = worktreeProj("proj-wt-norepo", rolesWorktree, "none")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = { agent: "coder", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, true)
+  assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 0, "an undecidable check stays silent")
+  h.restore()
+  console.log("  ok   an undecidable git-tracking check warns nothing")
+}
+
+// 181. 派单自带 worktree: false 覆盖 profile 的 true：不补值。
+{
+  const proj = worktreeProj("proj-wt-false", rolesWorktree, "none")
+  const h = await handler({ cwd: proj, profile: "coder" })
+  const input: Record<string, unknown> = {
+    agent: "coder",
+    task: "x",
+    extensionBindings: { "pi-subagents-extend/1": { worktree: false } },
+  }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.ok(!Object.hasOwn(input, "worktree"), "the dispatch's false suppresses the profile default")
+  h.restore()
+  console.log("  ok   a dispatch's worktree: false overrides the profile default")
+}
+
+// 182. 派单自带 worktree: true 而 profile 没有该字段：补值；来源是派单，不告警。
+if (!gitAvailable) {
+  console.log("  skip  dispatch worktree participates（环境里没有 git）")
+} else {
+  const proj = worktreeProj("proj-wt-own-true", rolesPlain, "untracked")
+  const h = await handler({ cwd: proj, profile: "plain" })
+  const input: Record<string, unknown> = {
+    agent: "plain",
+    task: "x",
+    extensionBindings: { "pi-subagents-extend/1": { worktree: true } },
+  }
+  assert.equal(await h.call("subagent", input), undefined)
+  assert.equal(input.worktree, true, "the dispatch's own worktree participates in the decision")
+  assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 0, "a dispatch-sourced strategy warns about no file")
+  h.restore()
+  console.log("  ok   a dispatch's own worktree: true fills in, with no profile-file warning")
+}
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")
