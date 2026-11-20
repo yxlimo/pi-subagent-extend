@@ -5673,6 +5673,435 @@ if (!gitAvailable) {
   h.restore()
   console.log("  ok   a dispatch's own worktree: true fills in, with no profile-file warning")
 }
+
+// 183-200. Role config source and versioned namespace (phase 1).
+const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typeof import("../src/role-config.ts")
+
+// 183. The active_agent tag gives the role wherever it stands alone on a line.
+{
+  assert.equal(rc.parseRoleName('<active_agent name="coder"/>\nyou are a helpful assistant'), "coder")
+  assert.equal(rc.parseRoleName('rewritten prompt\n\n<active_agent name="coder"/>\n\nsystem prompt'), "coder", "the bridge puts the tag after the rewritten prompt")
+  console.log("  ok   parseRoleName reads the role from any line that is only the tag")
+}
+
+// 184. No tag, a tag quoted inside another line, or an empty name is no role.
+{
+  assert.equal(rc.parseRoleName("a prompt with no tag"), null)
+  assert.equal(rc.parseRoleName('first line\ncontext: <active_agent name="coder"/>'), null, "a tag inside another line is not the role")
+  assert.equal(rc.parseRoleName('<active_agent name=""/>'), null, "an empty name is no role")
+  console.log("  ok   parseRoleName returns null when the tag is absent, quoted or empty")
+}
+
+// 185. Whitespace around the tag is tolerated.
+{
+  assert.equal(rc.parseRoleName('  <active_agent   name="coder"  />  \nnext'), "coder")
+  console.log("  ok   parseRoleName tolerates surrounding whitespace")
+}
+
+// 186. XML-escaped role names are decoded.
+{
+  assert.equal(rc.parseRoleName('<active_agent name="a&amp;b&quot;c"/>'), 'a&b"c')
+  assert.equal(rc.parseRoleName('<active_agent name="coder&#45;x"/>'), "coder-x")
+  console.log("  ok   parseRoleName decodes escaped role names")
+}
+
+// 187. Agent md resolution walks project levels before user levels.
+{
+  const proj = join(workdir, "resolve-proj")
+  const home = join(workdir, "resolve-home")
+  const files = [
+    join(proj, ".pi", "agents", "worker.md"),
+    join(proj, ".agents", "worker.md"),
+    join(home, ".pi", "agent", "agents", "worker.md"),
+    join(home, ".agents", "worker.md"),
+  ]
+  for (const file of files) {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, file)
+  }
+  for (let i = 0; i < files.length; i += 1) {
+    assert.equal(rc.resolveAgentFile("worker", proj, home), files[i])
+    rmSync(files[i])
+  }
+  assert.equal(rc.resolveAgentFile("worker", proj, home), null, "no file means no role")
+  console.log("  ok   agent md resolution follows the project-then-user order")
+}
+
+// 188. readExtendBlock returns the extend object from valid frontmatter.
+{
+  const file = join(workdir, "md-valid.md")
+  writeFileSync(file, '---\nextend:\n  permissions:\n    scope: ["src/**"]\n---\n# body\n')
+  const out = rc.readExtendBlock(file)
+  assert.deepEqual(out.problems, [])
+  assert.deepEqual(out.block, { permissions: { scope: ["src/**"] } })
+  console.log("  ok   readExtendBlock returns the extend object")
+}
+
+// 189. No frontmatter is not a problem.
+{
+  const file = join(workdir, "md-no-front.md")
+  writeFileSync(file, "# just a heading\n")
+  const out = rc.readExtendBlock(file)
+  assert.equal(out.block, undefined)
+  assert.deepEqual(out.problems, [])
+  console.log("  ok   no frontmatter yields no block and no problem")
+}
+
+// 190. Frontmatter without extend is not a problem.
+{
+  const file = join(workdir, "md-no-extend.md")
+  writeFileSync(file, "---\ntitle: hello\n---\nbody\n")
+  const out = rc.readExtendBlock(file)
+  assert.equal(out.block, undefined)
+  assert.deepEqual(out.problems, [])
+  console.log("  ok   frontmatter without extend yields no problem")
+}
+
+// 191. Invalid YAML reports a problem instead of throwing.
+{
+  const file = join(workdir, "md-bad-yaml.md")
+  writeFileSync(file, "---\nextend: [unterminated\n---\n")
+  const out = rc.readExtendBlock(file)
+  assert.equal(out.block, undefined)
+  assert.equal(out.problems.length, 1)
+  assert.match(out.problems[0], /invalid YAML/)
+  console.log("  ok   invalid YAML yields one problem, not a throw")
+}
+
+// 192. permissions map onto the existing policy fields.
+{
+  const out = rc.policyFromBlock({
+    permissions: {
+      scope: ["src/**"],
+      write: ["src/gen/**"],
+      readOnly: true,
+      allowTools: ["subagent"],
+      budgets: { deny: 7, writeDeny: 3 },
+    },
+  })
+  assert.deepEqual(out.problems, [])
+  assert.deepEqual(out.policy, {
+    scope: ["src/**"],
+    writeScope: ["src/gen/**"],
+    readOnly: true,
+    allowTools: ["subagent"],
+    maxDenies: 7,
+    maxWriteDenies: 3,
+  })
+  console.log("  ok   permissions map onto scope, write, budgets and the rest")
+}
+
+// 193. permissions.bash is reported, not silently dropped.
+{
+  const out = rc.policyFromBlock({ permissions: { scope: ["."], bash: { read: ["git status"] } } })
+  assert.ok(out.problems.some((p) => p.includes("bash authorization is not wired in this phase")))
+  assert.deepEqual(out.policy?.scope, ["."], "the other fields still convert")
+  console.log("  ok   permissions.bash gets a not-wired problem")
+}
+
+// 194. Each unwired top-level block gets its own problem.
+{
+  const out = rc.policyFromBlock({ worktree: {}, setup: {}, output: {} })
+  assert.equal(out.problems.filter((p) => p.includes("not wired in this phase")).length, 3)
+  for (const key of ["worktree", "setup", "output"]) {
+    assert.ok(out.problems.some((p) => p.startsWith(`${key}:`)), `${key} is named`)
+  }
+  console.log("  ok   worktree, setup and output each get a problem")
+}
+
+// 195. Unknown keys are reported by name.
+{
+  const inPermissions = rc.policyFromBlock({ permissions: { scope: ["."], mystery: 1 } })
+  assert.ok(inPermissions.problems.some((p) => p.includes("mystery")))
+  const topLevel = rc.policyFromBlock({ spooky: {} })
+  assert.ok(topLevel.problems.some((p) => p.includes("spooky")))
+  console.log("  ok   unknown keys are reported by name")
+}
+
+// 196. A mistyped scope is reported and omitted, other fields survive.
+{
+  const out = rc.policyFromBlock({ permissions: { scope: "src/**", readOnly: true } })
+  assert.ok(out.problems.some((p) => p.includes("permissions.scope")))
+  assert.equal(out.policy?.scope, undefined)
+  assert.equal(out.policy?.readOnly, true)
+  console.log("  ok   a string scope is reported and omitted")
+}
+
+// 197. A /2 payload is refused and both versions appear in the message.
+{
+  const h = await handler({ bindings: JSON.stringify({ "pi-subagents-extend/2": { scope: ["."] } }) })
+  const outcome = await h.call("read", { path: join(workdir, "src", "auth", "x.ts") })
+  assert.ok(outcome && outcome.block, "a wrong-version payload is refused")
+  assert.match(outcome.reason, /pi-subagents-extend\/1/)
+  assert.match(outcome.reason, /pi-subagents-extend\/2/)
+  h.restore()
+  console.log("  ok   a wrong-version namespace is refused with both versions named")
+}
+
+// 198. Two of our namespaces are refused as ambiguous.
+{
+  const h = await handler({
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["."] },
+      "pi-subagents-extend/2": { scope: ["."] },
+    }),
+  })
+  const outcome = await h.call("read", { path: join(workdir, "src", "auth", "x.ts") })
+  assert.ok(outcome && outcome.block, "two of our namespaces are refused")
+  assert.match(outcome.reason, /ambiguous/)
+  h.restore()
+  console.log("  ok   two versioned namespaces are refused as ambiguous")
+}
+
+// A child run: activate, fire session_start, then before_agent_start with a role tag.
+const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; profile?: string; profileFile?: string }) => {
+  const prev = {
+    bindings: process.env.PI_SUBAGENT_EXTENSION_BINDINGS,
+    child: process.env.PI_SUBAGENT_CHILD,
+    home: process.env.HOME,
+  }
+  if (opts.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = opts.bindings
+  process.env.PI_SUBAGENT_CHILD = "1"
+  process.env.HOME = opts.home
+  const handlers: Record<string, EventHandler> = {}
+  const ui: string[] = []
+  const api: FakeExtensionApi = {
+    on(event, fn) { handlers[event] = fn },
+    registerCommand() {},
+  }
+  ext.activate(api, opts.profile ? { profileName: opts.profile, profileFile: opts.profileFile } : {})
+  const ctx: SessionContext = { cwd: opts.cwd, ui: { notify: (message) => ui.push(message) } }
+  await handlers.session_start?.({ type: "session_start" }, ctx)
+  await handlers.before_agent_start?.({ type: "before_agent_start", systemPrompt: opts.systemPrompt }, ctx)
+  return {
+    call: async (tool: string, input?: Record<string, unknown>): Promise<Outcome> =>
+      (await handlers.tool_call({ type: "tool_call", toolName: tool, input, toolCallId: "r1" }, ctx)) as Outcome,
+    ui,
+    restore: () => {
+      if (prev.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+      else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = prev.bindings
+      if (prev.child === undefined) delete process.env.PI_SUBAGENT_CHILD
+      else process.env.PI_SUBAGENT_CHILD = prev.child
+      if (prev.home === undefined) delete process.env.HOME
+      else process.env.HOME = prev.home
+    },
+  }
+}
+
+// 199. The role md fills scope when no bindings file exists.
+{
+  const home = join(workdir, "role-home-199")
+  const md = join(home, ".agents", "phase1-coder.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n---\n# phase1-coder\n')
+  const proj = join(workdir, "role-proj-199")
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="phase1-coder"/>\nhello' })
+  assert.equal(await run.call("read", { path: join(proj, "allowed", "x.ts") }), undefined, "the md scope allows its subtree")
+  const outside = await run.call("read", { path: join(proj, "outside", "x.ts") })
+  assert.ok(outside && outside.block, "paths outside the md scope are refused")
+  assert.match(outside.reason, /outside the read scope/)
+  run.restore()
+  console.log("  ok   the role md fills scope when no bindings exist")
+}
+
+// 200. A bindings value wins over the md baseline for the same key.
+{
+  const home = join(workdir, "role-home-200")
+  const md = join(home, ".agents", "phase1-coder.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["src/**"]\n---\n')
+  const proj = join(workdir, "role-proj-200")
+  mkdirSync(join(proj, "src"), { recursive: true })
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="phase1-coder"/>\nhello',
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"] } }),
+  })
+  assert.equal(await run.call("read", { path: join(proj, "src", "x.ts") }), undefined, "the bindings scope works")
+  const mdPath = await run.call("read", { path: join(proj, "allowed", "x.ts") })
+  assert.ok(mdPath && mdPath.block, "the md scope does not add to the bindings scope")
+  assert.ok(
+    mdPath.reason.includes("(source: extensionBindings pi-subagents-extend/1)"),
+    `the refusal must name the bindings layer, got: ${mdPath.reason}`,
+  )
+  assert.ok(
+    !mdPath.reason.includes(md) && !mdPath.reason.includes("role md"),
+    `the md contributed no policy key, so it must not appear as a source, got: ${mdPath.reason}`,
+  )
+  run.restore()
+  console.log("  ok   bindings wins over the md baseline for the same key")
+}
+
+// 201. The role md names itself as the source when it is the only configuration.
+{
+  const home = join(workdir, "role-home-201")
+  const md = join(home, ".agents", "source-label-coder-201.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n---\n# source-label-coder-201\n')
+  const proj = join(workdir, "role-proj-201")
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="source-label-coder-201"/>\nhello',
+  })
+  assert.equal(await run.call("read", { path: join(proj, "allowed", "x.ts") }), undefined, "the md scope still allows its subtree")
+  const outside = await run.call("read", { path: join(proj, "outside", "x.ts") })
+  assert.ok(outside && outside.block, "paths outside the md scope are refused")
+  assert.ok(
+    outside.reason.includes(`(source: role md ${md})`),
+    `the reason must name the md file as the only source layer, got: ${outside.reason}`,
+  )
+  assert.ok(
+    !outside.reason.includes("extensionBindings"),
+    `the md-only reason must not claim an extensionBindings layer, got: ${outside.reason}`,
+  )
+  run.restore()
+  console.log("  ok   the role md names itself as the source when it is the only configuration")
+}
+
+// 202. A profile key and an md key name both layers, in contribution order.
+{
+  const home = join(workdir, "role-home-202")
+  const md = join(home, ".agents", "source-label-coder-202.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    budgets:\n      deny: 4\n---\n# source-label-coder-202\n')
+  const proj = join(workdir, "role-proj-202")
+  mkdirSync(join(proj, ".pi"), { recursive: true })
+  mkdirSync(join(proj, "src"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  writeFileSync(join(proj, ".pi/subagent-bindings.json"), JSON.stringify({ "source-label-coder-202": { scope: ["src/**"] } }))
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="source-label-coder-202"/>\nhello',
+    profile: "source-label-coder-202",
+  })
+  assert.equal(await run.call("read", { path: join(proj, "src", "x.ts") }), undefined, "the profile scope still allows its subtree")
+  const outside = await run.call("read", { path: join(proj, "outside", "x.ts") })
+  assert.ok(outside && outside.block, "paths outside the profile scope are refused")
+  assert.ok(
+    outside.reason.includes(`(source: profile source-label-coder-202 (.pi/subagent-bindings.json) + role md ${md})`),
+    `the reason must name the profile then the md layer, got: ${outside.reason}`,
+  )
+  run.restore()
+  console.log("  ok   a profile key and an md key name both layers, in contribution order")
+}
+// 203. A role tag below the first line still applies the md scope.
+{
+  const home = join(workdir, "role-home-203")
+  const md = join(home, ".agents", "later-line-coder-203.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n---\n# later-line-coder-203\n')
+  const proj = join(workdir, "role-proj-203")
+  mkdirSync(join(proj, "allowed"), { recursive: true })
+  mkdirSync(join(proj, "outside"), { recursive: true })
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: 'rewritten prompt\n\n<active_agent name="later-line-coder-203"/>\n\nsystem prompt',
+  })
+  assert.equal(await run.call("read", { path: join(proj, "allowed", "x.ts") }), undefined, "the md scope is active")
+  const outside = await run.call("read", { path: join(proj, "outside", "x.ts") })
+  assert.ok(outside && outside.block, "a path outside the md scope is refused")
+  assert.match(outside.reason, /outside the read scope/)
+  run.restore()
+  console.log("  ok   a role tag on a later line applies the md scope")
+}
+
+// 204. The md is found by walking up from the dispatch cwd.
+{
+  const home = join(workdir, "role-home-204")
+  const md = join(workdir, "role-root-204", ".pi", "agents", "nested-coder-204.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["allowed/**"]\n---\n# nested-coder-204\n')
+  const nested = join(workdir, "role-root-204", "packages", "app")
+  mkdirSync(join(nested, "allowed"), { recursive: true })
+  mkdirSync(join(nested, "outside"), { recursive: true })
+  const run = await childRun({
+    cwd: nested,
+    home,
+    systemPrompt: '<active_agent name="nested-coder-204"/>\nhello',
+  })
+  assert.equal(await run.call("read", { path: join(nested, "allowed", "x.ts") }), undefined, "the md at the root is active")
+  const outside = await run.call("read", { path: join(nested, "outside", "x.ts") })
+  assert.ok(outside && outside.block, "a path outside the root md scope is refused")
+  assert.match(outside.reason, /outside the read scope/)
+  run.restore()
+  console.log("  ok   a dispatch in a nested package finds the md at the project root")
+}
+
+// 205. A child with no identifiable role warns once that the md limits are not applied.
+{
+  const home = join(workdir, "role-home-205")
+  const proj = join(workdir, "role-proj-205")
+  mkdirSync(proj, { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: "a prompt with no active_agent tag" })
+  const warnings = run.ui.filter((message) => message.includes("role md limits are NOT applied"))
+  assert.equal(warnings.length, 1, `exactly one warning about the missing md limits, got: ${run.ui.join(" | ")}`)
+  assert.match(warnings[0], /no active_agent role was found/)
+  assert.equal(await run.call("read", { path: join(proj, "anything.ts") }), undefined, "an unbound child is unchanged")
+  run.restore()
+  console.log("  ok   a child with no identifiable role warns once and does not crash")
+}
+
+// 206. An md write grant cannot restore writes the bindings suppressed.
+{
+  const home = join(workdir, "role-home-206")
+  const md = join(home, ".agents", "readonly-coder-206.md")
+  mkdirSync(dirname(md), { recursive: true })
+  writeFileSync(md, '---\nextend:\n  permissions:\n    scope: ["src/**"]\n    write: ["reports/**"]\n---\n')
+  const proj = join(workdir, "role-proj-206")
+  mkdirSync(join(proj, "src"), { recursive: true })
+  mkdirSync(join(proj, "reports"), { recursive: true })
+  const run = await childRun({
+    cwd: proj,
+    home,
+    systemPrompt: '<active_agent name="readonly-coder-206"/>\nhello',
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], readOnly: true } }),
+  })
+  const write = await run.call("write", { path: join(proj, "reports", "x.md"), content: "x" })
+  assert.ok(write && write.block, "the md cannot re-grant a write the bindings suppressed")
+  assert.match(write.reason, /no write grant/)
+  run.restore()
+  console.log("  ok   a readOnly binding keeps its empty write scope against the md")
+}
+
+// 207. A known role with no md anywhere warns once and names the directories tried.
+{
+  const home = join(workdir, "role-home-207")
+  const proj = join(workdir, "role-proj-207")
+  mkdirSync(proj, { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: '<active_agent name="missing-coder-207"/>\nhello' })
+  const warnings = run.ui.filter((message) => message.includes("role md limits are NOT applied"))
+  assert.equal(warnings.length, 1, `exactly one warning about the missing md, got: ${run.ui.join(" | ")}`)
+  assert.ok(warnings[0].includes("missing-coder-207"), "the role is named")
+  assert.ok(warnings[0].includes(join(proj, ".pi", "agents")), "the project directory is named")
+  assert.ok(warnings[0].includes(join(home, ".agents")), "the home fallback directory is named")
+  run.restore()
+  console.log("  ok   a missing role md warns once and names the directories tried")
+}
+
+// 208. No role tag and no bindings/profile: the warning must say the child is unconstrained.
+{
+  const home = join(workdir, "role-home-208")
+  const proj = join(workdir, "role-proj-208")
+  mkdirSync(proj, { recursive: true })
+  const run = await childRun({ cwd: proj, home, systemPrompt: "a prompt with no active_agent tag" })
+  const warnings = run.ui.filter((message) => message.includes("no active_agent role was found"))
+  assert.equal(warnings.length, 1, `exactly one no-role warning, got: ${run.ui.join(" | ")}`)
+  assert.match(warnings[0], /no configuration is in effect/, "the warning says no configuration is active")
+  assert.match(warnings[0], /tool calls in this child are unconstrained/, "the warning says the child is unconstrained")
+  run.restore()
+  console.log("  ok   an unconfigured child warns that no configuration is in effect and it is unconstrained")
+}
+
 rmSync(workdir, { recursive: true, force: true })
 restoreState()
 console.log("\npi-subagents-extend 测试通过")

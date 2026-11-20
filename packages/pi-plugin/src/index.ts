@@ -53,9 +53,9 @@ import { handoffHintFor, withHint } from "./handoff-hint.ts";
 import { cpuStallNote, networkFailureNote, writeRefusalNote } from "./sandbox-note.ts";
 import { Probe, STOP_NOTICE, parseProbeConfig } from "./probe.ts";
 import { shouldDefaultWorktree, WORKTREE_TOOLS } from "./worktree-default.ts";
+import { BINDING_NAMESPACE, bindingKey, agentMdDirs, parseRoleName, resolveAgentFile, readExtendBlock, policyFromBlock, type RolePolicy } from "./role-config.ts";
 
 const BINDINGS_ENV = "PI_SUBAGENT_EXTENSION_BINDINGS";
-const BINDING_NAMESPACE = "pi-subagents-extend";
 /** agent 角色默认 bindings 的默认位置（相对会话 cwd）。 */
 const PROFILE_FILE = ".pi/subagent-bindings.json";
 /**
@@ -365,7 +365,7 @@ function positiveInt(value: unknown): number {
 	return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
-/** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace 配置对象。 */
+/** 从 PI_SUBAGENT_EXTENSION_BINDINGS 里取本扩展的 namespace 配置对象；版本不匹配一律拒绝。 */
 function extractCallConfig(raw: string | undefined): { config?: Record<string, unknown>; error?: string } {
 	if (!raw?.trim()) return {};
 	let parsed: unknown;
@@ -380,11 +380,17 @@ function extractCallConfig(raw: string | undefined): { config?: Record<string, u
 		return { error: `${BINDINGS_ENV} is not a JSON object; everything is refused` };
 	}
 	const record = parsed as Record<string, unknown>;
-	const key = Object.keys(record).find(
-		(k) => k === `${BINDING_NAMESPACE}/1` || k.startsWith(`${BINDING_NAMESPACE}/`),
-	);
+	const prefix = `${BINDING_NAMESPACE}/`;
+	const keys = Object.keys(record).filter((key) => key.startsWith(prefix));
 	// 绑定是给别的扩展的，本扩展不参与。
-	if (!key) return {};
+	if (keys.length === 0) return {};
+	if (keys.length > 1) {
+		return { error: `ambiguous: more than one ${BINDING_NAMESPACE}/* namespace; everything is refused` };
+	}
+	const key = keys[0];
+	if (key !== bindingKey()) {
+		return { error: `this build supports ${bindingKey()}, got ${key}; everything is refused` };
+	}
 	const cfg = record[key];
 	if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
 		return { error: `extensionBindings ${key}: the configuration is not an object; everything is refused` };
@@ -1937,21 +1943,28 @@ function readProfile(
  * 「可用」。里面某一段（比如 `bash`）写坏时方向相同：`mergeConfig` 让那一段变成「关闭」，
  * 而不是让 profile 那一层的同名段补成「可用」。
  */
+interface ResolvedProfile {
+	policy: Policy;
+	config?: Record<string, unknown>;
+	source: string;
+	broken?: boolean;
+}
+
 function profilePolicy(
 	cwd: string,
 	options: ActivateOptions,
 	call: Record<string, unknown> | undefined,
 	callBroken: boolean,
-): Policy | undefined {
+): ResolvedProfile | undefined {
 	if (!options.profileName || callBroken) return undefined;
 	const resolved = readProfile(cwd, options.profileName, options.profileFile);
-	if (resolved.error) return denyAll(resolved.error);
+	if (resolved.error) return { policy: denyAll(resolved.error), source: resolved.source, broken: true };
 	const merged = mergeConfig(resolved.config, call) ?? {};
 	// 来源要说实话：生效的规则是 profile 与本次派单**合成**的，只写 profile 会让父代理
 	// 改错文件（那条授权不在 profile 里）。拒绝文案里的 `source:` 是父代理判断
 	// 「该改哪个文件」的唯一线索，所以合成时必须把两层都写出来。
 	const source = call ? `${resolved.source} + extensionBindings` : resolved.source;
-	return parsePolicyObject(merged, source, { requireScope: false });
+	return { policy: parsePolicyObject(merged, source, { requireScope: false }), config: merged, source };
 }
 
 /**
@@ -2026,6 +2039,14 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	// 所以在 session_start 里解析。
 	const call = extractCallConfig(process.env[BINDINGS_ENV]);
 	let policy: Policy = INACTIVE;
+	// 角色 md 的基线：before_agent_start 里按子代理身份填入，只补 bindings / profile 没给的字段。
+	let roleBaseline: RolePolicy | undefined;
+	let roleSource: string | undefined;
+	let roleResolved = false;
+	let baseConfig = call.config;
+	let baseSource = `extensionBindings ${bindingKey()}`;
+	let baseRequireScope = Boolean(call.config);
+	let baseBroken = Boolean(call.error);
 	/** toolCallId → 这次 bash 的 spec 摘要（写清单、cwd、是否离线）。 */
 	const sandboxSpecs = new Map<
 		string,
@@ -2034,7 +2055,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 	if (call.error) {
 		policy = denyAll(call.error);
 	} else if (call.config) {
-		policy = parsePolicyObject(call.config, `extensionBindings ${BINDING_NAMESPACE}`, { requireScope: true });
+		policy = parsePolicyObject(call.config, `extensionBindings ${bindingKey()}`, { requireScope: true });
 	}
 	let denyCounter = new DenyCounter(policy.maxDenies);
 	// 写拒单独计数：写拒的正解是换交付方式（回报告），跟「授权写错」不是一类信号。
@@ -2072,6 +2093,37 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 				: undefined;
 	};
 	armProbe();
+
+	/**
+	 * bindings / profile 已经有值的键优先，md 基线只填缺失的那几个
+	 * （scope、writeScope、readOnly、allowTools、maxDenies、maxWriteDenies）。
+	 */
+	const applyRoleBaseline = (): void => {
+		if (baseBroken || !roleBaseline || Object.keys(roleBaseline).length === 0) return;
+		// 上层自己写了 readOnly 且没写 writeScope：写范围就是空的（与 mergeConfig 同语义），
+		// md 不能把写授权重新放出来。
+		const readOnlyWithoutWrite = Object.hasOwn(baseConfig ?? {}, "readOnly") && baseConfig?.readOnly === true && !Object.hasOwn(baseConfig ?? {}, "writeScope");
+		const fields: Record<string, unknown> = { ...(baseConfig ?? {}) };
+		let mdContributed = false;
+		for (const [key, value] of Object.entries(roleBaseline)) {
+			if (key === "writeScope" && readOnlyWithoutWrite) continue;
+			if (!Object.hasOwn(fields, key)) {
+				fields[key] = value;
+				mdContributed = true;
+			}
+		}
+		// md 一个字段都没补进来就不重算策略：来源也不能凭空多出一层。
+		if (!mdContributed) return;
+		// 拒绝文案里的 source 是父代理判断「该改哪个文件」的唯一线索，只列真正贡献过的层。
+		// baseSource 已经是 profile 与本次 bindings 的合成结果（见 profilePolicy），排在 md 之前。
+		const mdLabel = roleSource ?? "role md";
+		const source = baseConfig ? `${baseSource} + ${mdLabel}` : mdLabel;
+		probe?.dispose();
+		policy = parsePolicyObject(fields, source, { requireScope: baseRequireScope });
+		denyCounter = new DenyCounter(policy.maxDenies);
+		writeDenyCounter = new DenyCounter(policy.maxWriteDenies, "write");
+		armProbe();
+	};
 
 	// 绑定与方法约定（skill）一起提供给会话：扩展被加载，skill 就进系统提示的
 	// 可用列表；父代理据此知道委派时传 extensionBindings。已上锁的会话不注册——
@@ -2443,6 +2495,43 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 	};
 
 	pi.on("resources_discover", async () => (policy.active ? {} : { skillPaths: SKILL_DIRS }));
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (process.env.PI_SUBAGENT_CHILD !== "1" || roleResolved) return;
+		const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
+		uiWarning = (message) => { ui?.notify?.(message, "warning"); };
+		const raw = (event as { systemPrompt?: unknown }).systemPrompt;
+		const tag = parseRoleName(typeof raw === "string" ? raw : "");
+		if (!tag) {
+			uiWarning?.(
+				policy.active
+					? `pi-subagents-extend: no active_agent role was found in the system prompt, so the role md limits are NOT applied; the only configuration in effect is ${policy.source}.`
+					: "pi-subagents-extend: no active_agent role was found in the system prompt, so the role md limits are NOT applied; no configuration is in effect, so tool calls in this child are unconstrained."
+			);
+			roleResolved = true;
+			return;
+		}
+		const cwd = ctx.cwd ?? process.cwd();
+		const home = homedir();
+		const file = resolveAgentFile(tag, cwd, home);
+		if (!file) {
+			uiWarning?.(
+				`pi-subagents-extend: no role md was found for role "${tag}"; the role md limits are NOT applied. Looked in: ${agentMdDirs(cwd, home).join(", ")}`,
+			);
+			roleResolved = true;
+			return;
+		}
+		const read = readExtendBlock(file);
+		const converted = read.block ? policyFromBlock(read.block) : { problems: [] as string[] };
+		for (const problem of [...read.problems, ...converted.problems]) {
+			uiWarning?.(`pi-subagents-extend: ${tag} (${file}): ${problem}`);
+		}
+		if (converted.policy && Object.keys(converted.policy).length > 0) {
+			roleBaseline = converted.policy;
+			roleSource = `role md ${file}`;
+			applyRoleBaseline();
+		}
+		roleResolved = true;
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
@@ -2462,11 +2551,16 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 		const resolved = profilePolicy(cwd, options, call.config, Boolean(call.error));
 		if (resolved) {
 			probe?.dispose();
-			policy = resolved;
+			policy = resolved.policy;
+			baseConfig = resolved.config;
+			baseSource = resolved.source;
+			baseRequireScope = false;
+			baseBroken = resolved.broken === true;
 			denyCounter = new DenyCounter(policy.maxDenies);
 			writeDenyCounter = new DenyCounter(policy.maxWriteDenies, "write");
 			allowedReads = 0;
 			armProbe();
+			applyRoleBaseline();
 		}
 		if (!policy.active) return;
 		const budget = policy.maxReads > 0 ? `, read budget ${policy.maxReads}` : "";
@@ -2575,7 +2669,7 @@ const TRANSFER_DEST_ARGS = ["anchor"];
 				const cwd = ctx.cwd ?? process.cwd();
 				// 只有 worktree 这一个决策把本次派单自带的 bindings 叠在会话 bindings 之上；
 				// 其余策略解析仍用会话启动时定格的那一份，范围不因单次派单而变。
-				const own = asObject(candidate.extensionBindings)?.[`${BINDING_NAMESPACE}/1`];
+				const own = asObject(candidate.extensionBindings)?.[bindingKey()];
 				const strategy = worktreePolicyFor(cwd, options, { ...call.config, ...asObject(own) }, agent.trim());
 				if (shouldDefaultWorktree(strategy, event.toolName, event.input)) {
 					candidate.worktree = true;
