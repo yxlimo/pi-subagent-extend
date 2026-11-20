@@ -195,7 +195,7 @@ function refusal(events: { results: { text: string }[] }, pattern: RegExp): stri
 {
 	const run1 = await run({
 		files: { "src/a.txt": "alpha\nbeta\ngamma\n" },
-		bindings: { "pi-subagents-extend/1": { scope: ["src/**"], writeScope: ["src/**"], bash: false } },
+		bindings: { "pi-subagents-extend/1": { permissions: { scope: ["src/**"], writeScope: ["src/**"], bash: false } } },
 		steps: [
 			{ calls: [{ name: "read", args: { path: "src/a.txt" } }] },
 			(parts: unknown[]) => {
@@ -217,7 +217,9 @@ function refusal(events: { results: { text: string }[] }, pattern: RegExp): stri
 	const run2 = await run({
 		files: { "src/a.txt": "alpha\n", "outside/b.txt": "secret\n" },
 		bindings: {
-			"pi-subagents-extend/1": { scope: ["src/**", "outside/**"], writeScope: ["src/**"], bash: false },
+			"pi-subagents-extend/1": {
+				permissions: { scope: ["src/**", "outside/**"], writeScope: ["src/**"], bash: false },
+			},
 		},
 		steps: [
 			{ calls: [{ name: "read", args: { path: "outside/b.txt" } }] },
@@ -242,7 +244,9 @@ function refusal(events: { results: { text: string }[] }, pattern: RegExp): stri
 	const run3 = await run({
 		files: { "src/a.txt": "alpha\n", "outside/b.txt": "target\n" },
 		bindings: {
-			"pi-subagents-extend/1": { scope: ["src/**", "outside/**"], writeScope: ["src/**"], bash: false },
+			"pi-subagents-extend/1": {
+				permissions: { scope: ["src/**", "outside/**"], writeScope: ["src/**"], bash: false },
+			},
 		},
 		steps: [
 			{ calls: [{ name: "read", args: { path: "src/a.txt" } }] },
@@ -276,7 +280,9 @@ function refusal(events: { results: { text: string }[] }, pattern: RegExp): stri
 	const run4 = await run({
 		files: { "src/dest.txt": "dest\n", "outside/src.txt": "payload\n" },
 		bindings: {
-			"pi-subagents-extend/1": { scope: ["src/**", "outside/**"], writeScope: ["src/**"], bash: false },
+			"pi-subagents-extend/1": {
+				permissions: { scope: ["src/**", "outside/**"], writeScope: ["src/**"], bash: false },
+			},
 		},
 		steps: [
 			{ calls: [{ name: "read", args: { path: "outside/src.txt" } }] },
@@ -311,7 +317,7 @@ function refusal(events: { results: { text: string }[] }, pattern: RegExp): stri
 	// 默认配置下带相对 path 的 copy。
 	const run5 = await run({
 		files: { "src/a.txt": "alpha\n", "src/dest.txt": "dest\n" },
-		bindings: { "pi-subagents-extend/1": { scope: ["src/**"], writeScope: ["src/**"], bash: false } },
+		bindings: { "pi-subagents-extend/1": { permissions: { scope: ["src/**"], writeScope: ["src/**"], bash: false } } },
 		steps: [
 			{ calls: [{ name: "read", args: { path: "src/a.txt" } }] },
 			{ calls: [{ name: "read", args: { path: "src/dest.txt" } }] },
