@@ -47,13 +47,16 @@
     "@types/node": "^24.0.0",
     "eslint": "^9.39.4",
     "eslint-plugin-unicorn": "^79.0.0",
+    "pi-hashline-edit-pro": "7.2.0",
     "typescript": "^5.9.0",
-    "typescript-eslint": "^8.72.2",
-    "pi-hashline-edit-pro": "7.2.0"
+    "typescript-eslint": "^8.72.2"
   },
   "files": [
     "src",
     "skills",
     "bin"
-  ]
+  ],
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
 }
