@@ -19,11 +19,19 @@ const repo = join(here, "..") // packages/pi-plugin
 // Worktree root: three levels above this test directory (`<worktree>/packages/pi-plugin/test`).
 const repoRoot = join(here, "..", "..", "..")
 
-/** A fresh scratch directory with the given name prefix. */
-export function stateDir(prefix: string): string {
+/**
+ * A fresh scratch directory.
+ *
+ * `prefix` names it inside the shared `<repo-root>/.test-state`; `legacyPrefix` names it in the
+ * package-local fallback and defaults to the same string. The two exist separately because the
+ * harness's own state dir has always been called `.test-state-*` when there is no shared root, and
+ * a pinning case asserts that name — renaming it would be a silent behaviour change in a plain
+ * local run for no benefit.
+ */
+export function stateDir(prefix: string, legacyPrefix = prefix): string {
   try {
     return mkdtempSync(join(repoRoot, ".test-state", prefix))
   } catch {
-    return mkdtempSync(join(repo, prefix))
+    return mkdtempSync(join(repo, legacyPrefix))
   }
 }

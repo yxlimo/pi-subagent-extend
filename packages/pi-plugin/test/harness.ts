@@ -46,7 +46,7 @@ const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
 // probe-then-fallback lives once in ./state-dir.ts; this harness takes its own
 // run directory from there, and suites reach for `stateDir(prefix)` when they
 // need a scratch directory too.
-const testState = stateDir("run-")
+const testState = stateDir("run-", ".test-state-")
 process.env.PI_SUBAGENTS_EXTEND_STATE = testState
 
 // Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise
