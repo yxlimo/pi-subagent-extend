@@ -12,20 +12,6 @@ import type {
 import { handler, writeAgentMd, childSystemPrompt, specOf, liveSandbox, workdir, ext } from "./harness.ts"
 import { restoreState } from "./support.ts"
 
-/**
- * src/index.ts leaves a caller-supplied GIT_CONFIG_COUNT alone. A shell that exports it would
- * otherwise make the git-excludes assertion below fail for a reason unrelated to the change.
- */
-async function withoutGitConfigCount<T>(run: () => Promise<T>): Promise<T> {
-  const previous = process.env.GIT_CONFIG_COUNT
-  delete process.env.GIT_CONFIG_COUNT
-  try {
-    return await run()
-  } finally {
-    if (previous === undefined) delete process.env.GIT_CONFIG_COUNT
-    else process.env.GIT_CONFIG_COUNT = previous
-  }
-}
 // 22. Worktree ergonomics: writablePaths, env injection, and a worktree root that is NOT granted.
 {
   const store = join(workdir, "pnpm-store")
@@ -114,7 +100,7 @@ async function withoutGitConfigCount<T>(run: () => Promise<T>): Promise<T> {
 
 // 26. node_modules is writable when the sandbox is writable; git excludes keep
 // dependency directories out of the index.
-await withoutGitConfigCount(async () => {
+{
   mkdirSync(join(workdir, "node_modules", ".bin"), { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
@@ -145,7 +131,7 @@ await withoutGitConfigCount(async () => {
   )
   h.restore()
   console.log("  ok   可写沙箱里 node_modules 也可写；git 排除规则防止依赖目录进索引")
-})
+}
 
 // 27. The helper gates on kernel support: a kernel below Landlock ABI 7 means no bash.
 {

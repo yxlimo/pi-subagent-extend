@@ -30,6 +30,15 @@ import type {
   PromptOptions,
 } from "./types.ts"
 
+// The suites must not inherit the extension's own git-excludes injection. `sandbox/spec.ts` adds
+// GIT_CONFIG_COUNT/KEY_0/VALUE_0 unless the host already set GIT_CONFIG_COUNT — so a test process
+// started from a sandboxed shell arrives with those three variables already set, the injection is
+// suppressed by its own gate, and a case asserting the injected values fails against the very thing
+// it is meant to test. Clear them here, once, so a suite behaves the same in CI and in a developer's
+// shell; individual suites no longer need their own workaround.
+delete process.env.GIT_CONFIG_COUNT
+delete process.env.GIT_CONFIG_KEY_0
+delete process.env.GIT_CONFIG_VALUE_0
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
 
