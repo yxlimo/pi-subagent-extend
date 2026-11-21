@@ -1,6 +1,7 @@
 import { DenyCounter } from "../budgets.ts";
 import { bindingKey, type RolePolicy } from "../role-config.ts";
-import { BINDINGS_ENV, denyAll, extractCallConfig, parsePolicyObject, type Policy } from "../policy.ts";
+import { BINDINGS_ENV, asObject, denyAll, extractCallConfig, parsePolicyObject, type Policy } from "../policy.ts";
+import { stringList } from "../bash-match.ts";
 import { Probe, parseProbeConfig } from "../probe.ts";
 
 /** activate() 的接线选项。profile 层已移除，目前没有字段；新选项按需加在这里。 */
@@ -151,6 +152,23 @@ export function createWiring(): Wiring {
 			let mdContributed = false;
 			for (const [key, value] of Object.entries(this.roleBaseline)) {
 				if (key === "writeScope" && readOnlyWithoutWrite) continue;
+				// bash.deny 是硬底线（与 mergeConfig 同语义）：派单整块声明了 bash 也不拆 md 的禁令。
+				// 效果 = payload 的 bash 原样 + deny 与 md 的并集；其余字段仍是 payload 优先，
+				// payload 没声明 bash（或写坏了）时 md 的整块照旧按下面的缺失补齐走。
+				// 并集确实补进了新条目才算 md 有贡献——没有新条目就不重算，source 也不多一层。
+				if (key === "bash" && Object.hasOwn(fields, "bash")) {
+					const payloadBash = asObject(fields.bash);
+					const mdBash = asObject(value);
+					if (payloadBash && mdBash) {
+						const payloadDeny = stringList(payloadBash.deny);
+						const deny = [...new Set([...payloadDeny, ...stringList(mdBash.deny)])];
+						if (deny.length > payloadDeny.length) {
+							fields.bash = { ...payloadBash, deny };
+							mdContributed = true;
+						}
+					}
+					continue;
+				}
 				if (!Object.hasOwn(fields, key)) {
 					fields[key] = value;
 					mdContributed = true;

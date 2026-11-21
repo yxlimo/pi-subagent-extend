@@ -1,4 +1,4 @@
-// Session start: profile read, worktree defaults, role wiring and /permission output.
+// Session start: role-md policy resolution, worktree defaults, role wiring and /permission output.
 // Offline test for the pi-subagents-extend extension.
 //
 // Runs the extension against a fake pi API, so the scope contract can be
@@ -20,8 +20,7 @@ import type {
   Outcome,
   SessionContext,
 } from "./types.ts"
-import { handler, specOf, ext, workdir, repo } from "./harness.ts"
-
+import { handler, specOf, ext, workdir, repo, writeAgentMd } from "./harness.ts"
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
@@ -147,40 +146,42 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
   }
   return changed ? JSON.stringify(table) : raw
 }
-// 170. 角色 profile 的 worktree: true 给 subagent 派单补默认值；补值不是拒绝。
+// 170. 角色 md 的 extend.worktree.enabled: true 给 subagent 派单补默认值；补值不是拒绝。
 {
   const proj = join(workdir, "proj-worktree-default")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  writeFileSync(
-    join(proj, ".pi/subagent-bindings.json"),
-    JSON.stringify({
-      coder: { scope: ["."], worktree: true, allowTools: ["subagent", "subagent_launch", "read"] },
-      plain: { scope: ["."], allowTools: ["subagent", "subagent_launch"] },
-    }),
-  )
-  const h = await handler({ cwd: proj, profile: "coder" })
+  writeAgentMd({
+    cwd: proj,
+    role: "coder",
+    extend: {
+      permissions: { scope: ["."], allowTools: ["subagent", "subagent_launch", "read"] },
+      worktree: { enabled: true },
+    },
+  })
+  // 172 复用这个角色：没有 worktree 配置的 md 不得长出 worktree 键。
+  writeAgentMd({ cwd: proj, role: "plain", extend: { permissions: { scope: ["."], allowTools: ["subagent"] } } })
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { agent: "coder", task: "x" }
   assert.equal(await h.call("subagent", input), undefined, "filling the default is not a refusal")
   assert.equal(input.worktree, true)
   h.restore()
-  console.log("  ok   a role's worktree default fills a subagent dispatch")
+  console.log("  ok   a role md's worktree default fills a subagent dispatch")
 }
 
-// 171. 调用方显式 false 是「我要共享工作树」，不能被角色默认值盖掉。
+// 171. 调用方显式 false 是「我要共享工作树」，不能被角色 md 默认值盖掉。
 {
   const proj = join(workdir, "proj-worktree-default")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { agent: "coder", task: "x", worktree: false }
   assert.equal(await h.call("subagent", input), undefined)
-  assert.equal(input.worktree, false, "an explicit false survives the profile default")
+  assert.equal(input.worktree, false, "an explicit false survives the role md default")
   h.restore()
   console.log("  ok   explicit worktree: false wins over the role default")
 }
 
-// 172. 策略没有 worktree 字段时不能凭空长出这个键。
+// 172. md 没有 worktree 字段时不能凭空长出这个键。
 {
   const proj = join(workdir, "proj-worktree-default")
-  const h = await handler({ cwd: proj, profile: "plain" })
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { agent: "plain", task: "x" }
   assert.equal(await h.call("subagent", input), undefined)
   assert.ok(!Object.hasOwn(input, "worktree"), "no worktree key appears without a strategy")
@@ -191,18 +192,18 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
 // 173. 工作流里的 subagent_launch 也要补：tasks[] / chain 的子代理不能漏。
 {
   const proj = join(workdir, "proj-worktree-default")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { workflowRunId: "run-1", key: "k", agent: "coder", task: "x" }
   assert.equal(await h.call("subagent_launch", input), undefined)
   assert.equal(input.worktree, true, "the nested launch gets the same default")
   h.restore()
-  console.log("  ok   nested subagent_launch gets the role's worktree default")
+  console.log("  ok   nested subagent_launch gets the role md's worktree default")
 }
 
 // 174. 非派单工具不补，即使入参里也带了个 agent 字段。
 {
   const proj = join(workdir, "proj-worktree-default")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { path: "src/x.ts", agent: "coder" }
   assert.equal(await h.call("read", input), undefined)
   assert.ok(!Object.hasOwn(input, "worktree"), "only dispatch tools are touched")
@@ -213,8 +214,8 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
 // 175. 角色解析不到就 fail open，不拿别的角色的策略来补。
 {
   const proj = join(workdir, "proj-worktree-default")
-  const h = await handler({ cwd: proj, profile: "coder" })
-  const input: Record<string, unknown> = { agent: "ghost", task: "x" }
+  const h = await handler({ cwd: proj })
+  const input: Record<string, unknown> = { agent: "ghost-role-175", task: "x" }
   assert.equal(await h.call("subagent", input), undefined)
   assert.ok(!Object.hasOwn(input, "worktree"), "an unknown agent has no strategy")
   h.restore()
@@ -224,7 +225,7 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
 // 176. ??= 把 null 也算「没给」：显式 false 才有优先权。
 {
   const proj = join(workdir, "proj-worktree-default")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { agent: "coder", task: "x", worktree: null }
   assert.equal(await h.call("subagent", input), undefined)
   assert.equal(input.worktree, true, "null is absent under ??=")
@@ -232,7 +233,7 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
   console.log("  ok   a null worktree is filled like a missing one")
 }
 
-// 177. 没有 profile 时，本次 bindings 自己写了 worktree 也照样生效。
+// 177. 没有角色 md 时，本次 bindings 自己写了 worktree 也照样生效。
 {
   const empty = mkdtempSync(join(tmpdir(), "pi-subagents-extend-worktree-call-"))
   const h = await handler({
@@ -246,64 +247,63 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
   assert.equal(input.worktree, true, "the call's own bindings carry the strategy")
   h.restore()
   rmSync(empty, { recursive: true, force: true })
-  console.log("  ok   call-level worktree applies without a profile file")
+  console.log("  ok   call-level worktree applies without a role md")
 }
 
 
-// 170-182. worktree 补值的护栏（review P1）与派单自带 bindings 覆盖（P2）。
+// 170-182. worktree 补值的护栏（review P1）与派单自带 worktree 覆盖（P2）。
 const gitAvailable = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0
-const worktreeProj = (name: string, roles: unknown, tracked: "tracked" | "untracked" | "none"): string => {
+const worktreeProj = (name: string, role: string, extend: Record<string, unknown>, tracked: "tracked" | "untracked" | "none"): string => {
   const proj = join(workdir, name)
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  writeFileSync(join(proj, ".pi/subagent-bindings.json"), JSON.stringify(roles))
+  writeAgentMd({ cwd: proj, role, extend })
   if (tracked !== "none") spawnSync("git", ["init", "-q"], { cwd: proj, stdio: "ignore" })
-  if (tracked === "tracked") spawnSync("git", ["add", ".pi/subagent-bindings.json"], { cwd: proj, stdio: "ignore" })
+  if (tracked === "tracked") spawnSync("git", ["add", join(".pi", "agents", `${role}.md`)], { cwd: proj, stdio: "ignore" })
   return proj
 }
-const rolesWorktree = { coder: { scope: ["."], worktree: true, allowTools: ["subagent"] } }
-const rolesPlain = { plain: { scope: ["."], allowTools: ["subagent"] } }
+const extendWorktree = { permissions: { scope: ["."], allowTools: ["subagent"] }, worktree: { enabled: true } }
+const extendPlain = { permissions: { scope: ["."], allowTools: ["subagent"] } }
 
-// 178. 未跟踪的 profile 文件：补值时告警一次，第二次派单不再重复。
+// 178. 未跟踪的角色 md：补值时告警一次，第二次派单不再重复。
+//      未跟踪的 md 在 worktree 副本里不存在，子代理认不出角色，等于没有任何角色策略。
 if (!gitAvailable) {
-  console.log("  skip  untracked worktree profile warning（环境里没有 git）")
+  console.log("  skip  untracked role md warning（环境里没有 git）")
 } else {
-  const proj = worktreeProj("proj-wt-untracked", rolesWorktree, "untracked")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const proj = worktreeProj("proj-wt-untracked", "coder", extendWorktree, "untracked")
+  const h = await handler({ cwd: proj })
   const first: Record<string, unknown> = { agent: "coder", task: "x" }
   assert.equal(await h.call("subagent", first), undefined)
   assert.equal(first.worktree, true, "the default is still filled")
   const warns = h.ui.filter((m) => m.includes("not tracked by git"))
-  assert.equal(warns.length, 1, "one warning for the untracked profile")
+  assert.equal(warns.length, 1, "one warning for the untracked role md")
   assert.match(warns[0], /worktree: true/, "the warning explains that worktree: true uses a copy")
-  assert.match(warns[0], /\.pi\/subagent-bindings\.json/, "the warning names the profile file")
-  assert.match(warns[0], /denied every call/, "the warning says the child is fully denied")
-  assert.match(warns[0], /Commit that file/, "the warning says to commit it")
-  assert.match(warns[0], /dispatch's own bindings/, "the warning offers dispatch bindings")
+  assert.match(warns[0], /\.pi\/agents\/coder\.md/, "the warning names the role md")
+  assert.match(warns[0], /no role policy/, "the warning says the child runs with no role policy")
+  assert.match(warns[0], /Commit the role md/, "the warning says to commit it")
   const second: Record<string, unknown> = { agent: "coder", task: "y" }
   assert.equal(await h.call("subagent", second), undefined)
   assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 1, "still one warning")
   h.restore()
-  console.log("  ok   an untracked worktree profile warns once, with why and how")
+  console.log("  ok   an untracked role md warns once, with why and how")
 }
 
-// 179. 已跟踪的 profile 文件不告警。
+// 179. 已跟踪的角色 md 不告警。
 if (!gitAvailable) {
-  console.log("  skip  tracked worktree profile stays silent（环境里没有 git）")
+  console.log("  skip  tracked role md stays silent（环境里没有 git）")
 } else {
-  const proj = worktreeProj("proj-wt-tracked", rolesWorktree, "tracked")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const proj = worktreeProj("proj-wt-tracked", "coder", extendWorktree, "tracked")
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { agent: "coder", task: "x" }
   assert.equal(await h.call("subagent", input), undefined)
   assert.equal(input.worktree, true)
-  assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 0, "a tracked profile is silent")
+  assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 0, "a tracked role md is silent")
   h.restore()
-  console.log("  ok   a tracked worktree profile stays silent")
+  console.log("  ok   a tracked role md stays silent")
 }
 
 // 180. 判定不了（不在 git 仓库里）时不告警：宁可少说，不许误报。
 {
-  const proj = worktreeProj("proj-wt-norepo", rolesWorktree, "none")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const proj = worktreeProj("proj-wt-norepo", "coder", extendWorktree, "none")
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = { agent: "coder", task: "x" }
   assert.equal(await h.call("subagent", input), undefined)
   assert.equal(input.worktree, true)
@@ -312,27 +312,27 @@ if (!gitAvailable) {
   console.log("  ok   an undecidable git-tracking check warns nothing")
 }
 
-// 181. 派单自带 worktree: false 覆盖 profile 的 true：不补值。
+// 181. 派单自带 worktree: false 覆盖 md 的 true：不补值。
 {
-  const proj = worktreeProj("proj-wt-false", rolesWorktree, "none")
-  const h = await handler({ cwd: proj, profile: "coder" })
+  const proj = worktreeProj("proj-wt-false", "coder", extendWorktree, "none")
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = {
     agent: "coder",
     task: "x",
     extensionBindings: { "pi-subagents-extend/1": { worktree: false } },
   }
   assert.equal(await h.call("subagent", input), undefined)
-  assert.ok(!Object.hasOwn(input, "worktree"), "the dispatch's false suppresses the profile default")
+  assert.ok(!Object.hasOwn(input, "worktree"), "the dispatch's false suppresses the role md default")
   h.restore()
-  console.log("  ok   a dispatch's worktree: false overrides the profile default")
+  console.log("  ok   a dispatch's worktree: false overrides the role md default")
 }
 
-// 182. 派单自带 worktree: true 而 profile 没有该字段：补值；来源是派单，不告警。
+// 182. 派单自带 worktree: true 而 md 没有该字段：补值；来源是派单，不告警。
 if (!gitAvailable) {
   console.log("  skip  dispatch worktree participates（环境里没有 git）")
 } else {
-  const proj = worktreeProj("proj-wt-own-true", rolesPlain, "untracked")
-  const h = await handler({ cwd: proj, profile: "plain" })
+  const proj = worktreeProj("proj-wt-own-true", "plain", extendPlain, "untracked")
+  const h = await handler({ cwd: proj })
   const input: Record<string, unknown> = {
     agent: "plain",
     task: "x",
@@ -342,7 +342,7 @@ if (!gitAvailable) {
   assert.equal(input.worktree, true, "the dispatch's own worktree participates in the decision")
   assert.equal(h.ui.filter((m) => m.includes("not tracked by git")).length, 0, "a dispatch-sourced strategy warns about no file")
   h.restore()
-  console.log("  ok   a dispatch's own worktree: true fills in, with no profile-file warning")
+  console.log("  ok   a dispatch's own worktree: true fills in, with no role-md warning")
 }
 
 // 183-200. Role config source and versioned namespace (phase 1).
@@ -497,7 +497,7 @@ const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typ
 
 
 // A child run: activate, fire session_start, then before_agent_start with a role tag.
-const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; profile?: string; profileFile?: string; order?: "normal" | "hostile"; beforeStartEmissions?: number; beforeStartDelayMs?: number; beforeStartCwds?: string[]; foreground?: boolean; rawBindings?: boolean; systemPromptOptions?: PromptOptions }) => {
+const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; order?: "normal" | "hostile"; beforeStartEmissions?: number; beforeStartDelayMs?: number; beforeStartCwds?: string[]; foreground?: boolean; rawBindings?: boolean; systemPromptOptions?: PromptOptions }) => {
   const prev = {
     bindings: process.env.PI_SUBAGENT_EXTENSION_BINDINGS,
     child: process.env.PI_SUBAGENT_CHILD,
@@ -514,7 +514,7 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
     on(event, fn) { handlers[event] = fn },
     registerCommand() {},
   }
-  ext.activate(api, opts.profile ? { profileName: opts.profile, profileFile: opts.profileFile } : {})
+  ext.activate(api)
   const ctx: SessionContext = { cwd: opts.cwd, ui: { notify: (message) => ui.push(message) } }
   if (opts.order === "hostile") {
     // A hostile host could emit session_start after the role wiring; the grant must survive it.
@@ -626,33 +626,6 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   console.log("  ok   the role md names itself as the source when it is the only configuration")
 }
 
-// 202. A profile key and an md key name both layers, in contribution order.
-{
-  const home = join(workdir, "role-home-202")
-  const md = join(home, ".agents", "source-label-coder-202.md")
-  mkdirSync(dirname(md), { recursive: true })
-  writeFileSync(md, '---\nextend:\n  permissions:\n    budgets:\n      deny: 4\n---\n# source-label-coder-202\n')
-  const proj = join(workdir, "role-proj-202")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  mkdirSync(join(proj, "src"), { recursive: true })
-  mkdirSync(join(proj, "outside"), { recursive: true })
-  writeFileSync(join(proj, ".pi/subagent-bindings.json"), JSON.stringify({ "source-label-coder-202": { scope: ["src/**"] } }))
-  const run = await childRun({
-    cwd: proj,
-    home,
-    systemPrompt: '<active_agent name="source-label-coder-202"/>\nhello',
-    profile: "source-label-coder-202",
-  })
-  assert.equal(await run.call("read", { path: join(proj, "src", "x.ts") }), undefined, "the profile scope still allows its subtree")
-  const outside = await run.call("read", { path: join(proj, "outside", "x.ts") })
-  assert.ok(outside && outside.block, "paths outside the profile scope are refused")
-  assert.ok(
-    outside.reason.includes(`(source: profile source-label-coder-202 (.pi/subagent-bindings.json) + role md ${md})`),
-    `the reason must name the profile then the md layer, got: ${outside.reason}`,
-  )
-  run.restore()
-  console.log("  ok   a profile key and an md key name both layers, in contribution order")
-}
 // 203. A role tag below the first line still applies the md scope.
 {
   const home = join(workdir, "role-home-203")
@@ -1158,29 +1131,22 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   console.log("  ok   a writable role's write note keeps the writablePaths advice and drops the cause")
 }
 
-// 233. A legacy column supplied by the project profile warns under that profile's own source,
-//      not under the merged source label.
+// 233. A legacy bash column supplied by the dispatch bindings warns under that bindings
+//      source alone, not merged into any role-md attribution. (The profile layer is gone;
+//      the bindings env is the only non-md source that can still carry legacy columns.)
 {
-  const proj = join(workdir, "proj-legacy-profile-233")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  writeFileSync(
-    join(proj, ".pi/subagent-bindings.json"),
-    JSON.stringify({ coder: { scope: ["src/**"], bash: { read: ["cat f"], write: ["rm f"] } } }),
-  )
   const h = await handler({
-    cwd: proj,
-    profile: "coder",
-    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { allow: ["cat g"] } } }),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["src/**"], bash: { read: ["cat f"], write: ["rm f"] } } }),
   })
   const warnings = h.ui.filter((m) => m.includes("legacy columns"))
-  assert.equal(warnings.length, 1, "the profile's legacy columns produce one warning")
+  assert.equal(warnings.length, 1, "the bindings' legacy columns produce one warning")
   assert.match(
     warnings[0],
-    /^pi-subagents-extend: profile coder \(\.pi\/subagent-bindings\.json\) still spells/,
-    "the warning is attributed to the profile source alone",
+    /^pi-subagents-extend: extensionBindings pi-subagents-extend\/1 still spells/,
+    "the warning is attributed to the bindings source alone",
   )
   h.restore()
-  console.log("  ok   a legacy column from the project profile warns under the profile's own source")
+  console.log("  ok   a legacy column from the dispatch bindings warns under the bindings source")
 }
 
 
@@ -1799,7 +1765,7 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   assert.equal(warns.length, 1, "one compat warning naming the bindings file")
   assert.match(warns[0], /\.pi\/subagent-bindings\.json/, "the file is named")
   assert.match(warns[0], /extend:/, "the md extend block is named as the new home")
-  assert.match(warns[0], /keeps working meanwhile/, "it says the old file still works")
+  assert.match(warns[0], /is now ignored/, "it says the old file is ignored")
   first.restore()
 
   const second = await handler({ cwd: proj })
@@ -1915,18 +1881,17 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   console.log("  ok   output in a dispatch payload warns once at either level and changes nothing")
 }
 // 268. A dispatch payload with worktree beside permissions is honoured and wins
-//      over the role profile's worktree default. This is the block-level key that
+//      over the role md's worktree default. This is the block-level key that
 //      used to be dropped by extractCallConfig.
 {
   const proj = join(workdir, "blocks-proj-268")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  writeFileSync(
-    join(proj, ".pi/subagent-bindings.json"),
-    JSON.stringify({ coder: { scope: ["."], worktree: false, allowTools: ["subagent"] } }),
-  )
+  writeAgentMd({
+    cwd: proj,
+    role: "coder",
+    extend: { permissions: { scope: ["."], allowTools: ["subagent"] }, worktree: { enabled: false } },
+  })
   const h = await handler({
     cwd: proj,
-    profile: "coder",
     rawBindings: true,
     bindings: JSON.stringify({
       "pi-subagents-extend/1": { worktree: true, permissions: { scope: ["."], allowTools: ["subagent"] } },
@@ -1934,11 +1899,11 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   })
   const input: Record<string, unknown> = { agent: "coder", task: "x" }
   assert.equal(await h.call("subagent", input), undefined)
-  assert.equal(input.worktree, true, "the payload's block-level worktree wins over the profile default")
+  assert.equal(input.worktree, true, "the payload's block-level worktree wins over the role md default")
   const warns = h.ui.filter((m) => m.includes("not tracked by git"))
-  assert.equal(warns.length, 0, "a payload worktree is not treated as a profile default")
+  assert.equal(warns.length, 0, "a payload worktree is not treated as a role default")
   h.restore()
-  console.log("  ok   a dispatch's worktree beside permissions wins over the profile default")
+  console.log("  ok   a dispatch's worktree beside permissions wins over the role md default")
 }
 
 
@@ -1962,20 +1927,6 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
   console.log("  ok   a payload without permissions does not get its worktree honoured")
 }
 
-// 274. A profile file that carries a permissions wrapper is refused with the flat-form message.
-{
-  const proj = join(workdir, "proj-flat-profile-274")
-  mkdirSync(proj, { recursive: true })
-  const file = join(proj, "flat-profile.json")
-  writeFileSync(file, JSON.stringify({ default: { permissions: {} } }))
-  const h = await handler({ cwd: proj, profile: "impl", profileFile: file })
-  const blocked = await h.call("read", { path: "a.ts" })
-  assert.equal(blocked?.block, true, "a flat profile with a permissions wrapper is refused")
-  assert.match(blocked.reason, /flat per-role profile/, "the flat-form mistake is named")
-  assert.match(blocked.reason, /permissions/, "the wrapper key is named")
-  h.restore()
-  console.log("  ok   a profile with a permissions wrapper is refused with the flat-form message")
-}
 
 
 // 276. /permission prints the allow column and the legacy read/write columns on separate lines.

@@ -2160,6 +2160,53 @@ async function mdChild({ cwd, prompt, bindings }: { cwd: string; prompt: string;
 }
 
 
+// 101. Regression pin for applyRoleBaseline: a dispatch that declares its own `bash` block used
+//      to skip the role md's whole `bash` field — including `deny` — so a caller narrowing the
+//      role with `bash: { allow: [...] }` could silently re-allow a banned command. deny is a
+//      floor across layers (same contract as mergeConfig): the effective bash is the payload's
+//      allowlist plus the md's deny union, and because the deny union is the md contributing,
+//      the refusal's source must name the md too.
+{
+  const proj = join(workdir, "proj-deny-floor")
+  const body = "Role policy for review: inspect with git; the deny list is a hard floor."
+  writeAgentMd({
+    cwd: proj,
+    role: "review",
+    extend: { permissions: { bash: { allow: ["git diff"], deny: ["git stash"] } } },
+    body,
+  })
+  const h = await mdChild({
+    cwd: proj,
+    prompt: childSystemPrompt("review", body),
+    // The dispatch declares bash and its own allowlist even names the banned command:
+    // exactly the payload shape that used to strip the md's deny list.
+    bindings: JSON.stringify({
+      // `writable: true` so the write-class `git stash` is not refused for a second reason:
+      // under the regression the only thing standing between it and execution is the md's deny.
+      "pi-subagents-extend/1": { permissions: { scope: ["src/**"], bash: { allow: ["git status", "git stash"], writable: true } } },
+    }),
+  })
+  const stash = await h.call("bash", { command: "git stash" })
+  assert.equal(
+    stash?.block,
+    true,
+    "the md's deny entry blocks the command even though the dispatch's own allowlist names it",
+  )
+  assert.match(stash.reason, /git stash/, "the refusal names the banned command")
+  assert.match(stash.reason, /role md/, "the refusal's source names the md: the deny union is the md contributing")
+  // The union only adds the md's deny entries; the payload's bash is otherwise intact, so a
+  // command only the payload allowlists still passes (the md's bash was not substituted in).
+  const status = await h.call("bash", { command: "git status" })
+  assert.equal(
+    status,
+    undefined,
+    "the dispatch's own allowlist still authorizes what the md does not deny",
+  )
+  h.restore()
+  console.log("  ok   bash.deny 在 applyRoleBaseline 里也是硬底线：派单声明 bash 不拆 md 禁令")
+}
+
+
 
 
 rmSync(workdir, { recursive: true, force: true })
