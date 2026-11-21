@@ -20,14 +20,14 @@ extend:
   permissions:
     scope: ["."]
     write:
-      - src/bash/tokens.ts
-      - src/bash/env.ts
-      - src/bash/network.ts
-      - src/bash/programs.ts
-      - src/bash/rules.ts
-      - src/bash/unreachable.ts
-      - src/bash-match.ts
-      - test/unit/bash.unit.test.ts
+      - packages/pi-plugin/src/bash/tokens.ts
+      - packages/pi-plugin/src/bash/env.ts
+      - packages/pi-plugin/src/bash/network.ts
+      - packages/pi-plugin/src/bash/programs.ts
+      - packages/pi-plugin/src/bash/rules.ts
+      - packages/pi-plugin/src/bash/unreachable.ts
+      - packages/pi-plugin/src/bash-match.ts
+      - packages/pi-plugin/test/unit/bash.unit.test.ts
       - .test-state
     budgets:
       deny: 5

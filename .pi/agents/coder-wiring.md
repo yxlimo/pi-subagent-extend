@@ -13,25 +13,25 @@ extend:
   permissions:
     scope: ["."]
     write:
-      - src/index.ts
-      - src/budgets.ts
-      - src/notices.ts
-      - src/probe.ts
-      - src/context-scope.ts
-      - src/main-context.ts
-      - src/child-context.ts
-      - src/handoff-hint.ts
-      - src/wiring/context.ts
-      - src/wiring/agent-start.ts
-      - src/wiring/session-start.ts
-      - src/wiring/tool-result.ts
-      - src/wiring/misc.ts
-      - src/wiring/tool-call/judge.ts
-      - test/extension.test.ts
-      - test/budgets.test.ts
-      - test/notices.test.ts
-      - test/session-start.test.ts
-      - test/annotations.test.ts
+      - packages/pi-plugin/src/index.ts
+      - packages/pi-plugin/src/budgets.ts
+      - packages/pi-plugin/src/notices.ts
+      - packages/pi-plugin/src/probe.ts
+      - packages/pi-plugin/src/context-scope.ts
+      - packages/pi-plugin/src/main-context.ts
+      - packages/pi-plugin/src/child-context.ts
+      - packages/pi-plugin/src/handoff-hint.ts
+      - packages/pi-plugin/src/wiring/context.ts
+      - packages/pi-plugin/src/wiring/agent-start.ts
+      - packages/pi-plugin/src/wiring/session-start.ts
+      - packages/pi-plugin/src/wiring/tool-result.ts
+      - packages/pi-plugin/src/wiring/misc.ts
+      - packages/pi-plugin/src/wiring/tool-call/judge.ts
+      - packages/pi-plugin/test/extension.test.ts
+      - packages/pi-plugin/test/budgets.test.ts
+      - packages/pi-plugin/test/notices.test.ts
+      - packages/pi-plugin/test/session-start.test.ts
+      - packages/pi-plugin/test/annotations.test.ts
       - .test-state
     budgets:
       deny: 5

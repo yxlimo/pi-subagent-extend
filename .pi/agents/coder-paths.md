@@ -21,10 +21,10 @@ extend:
     # Write only this area. Everything else is refused, and a refused write charges the
     # write budget, so a wrong target is loud rather than silent.
     write:
-      - src/paths.ts
-      - test/paths.test.ts
-      - test/anchors.test.ts
-      - test/bash-paths.test.ts
+      - packages/pi-plugin/src/paths.ts
+      - packages/pi-plugin/test/paths.test.ts
+      - packages/pi-plugin/test/anchors.test.ts
+      - packages/pi-plugin/test/bash-paths.test.ts
       - .test-state
     budgets:
       deny: 5

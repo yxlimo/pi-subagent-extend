@@ -13,14 +13,14 @@ extend:
   permissions:
     scope: ["."]
     write:
-      - src/sandbox/grants.ts
-      - src/sandbox/helper.ts
-      - src/sandbox/spec.ts
-      - src/sandbox.ts
-      - src/sandbox-note.ts
-      - src/dependencies.ts
-      - test/sandbox.real.test.ts
-      - test/e2e-bash.test.ts
+      - packages/pi-plugin/src/sandbox/grants.ts
+      - packages/pi-plugin/src/sandbox/helper.ts
+      - packages/pi-plugin/src/sandbox/spec.ts
+      - packages/pi-plugin/src/sandbox.ts
+      - packages/pi-plugin/src/sandbox-note.ts
+      - packages/pi-plugin/src/dependencies.ts
+      - packages/pi-plugin/test/sandbox.real.test.ts
+      - packages/pi-plugin/test/e2e-bash.test.ts
       - .test-state
     budgets:
       deny: 5

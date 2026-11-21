@@ -13,14 +13,14 @@ extend:
   permissions:
     scope: ["."]
     write:
-      - src/policy/glob.ts
-      - src/policy/merge.ts
-      - src/policy/payload.ts
-      - src/policy.ts
-      - test/policy.test.ts
-      - test/policy-profile.test.ts
-      - test/policy-contract.test.ts
-      - test/unit/policy.unit.test.ts
+      - packages/pi-plugin/src/policy/glob.ts
+      - packages/pi-plugin/src/policy/merge.ts
+      - packages/pi-plugin/src/policy/payload.ts
+      - packages/pi-plugin/src/policy.ts
+      - packages/pi-plugin/test/policy.test.ts
+      - packages/pi-plugin/test/policy-profile.test.ts
+      - packages/pi-plugin/test/policy-contract.test.ts
+      - packages/pi-plugin/test/unit/policy.unit.test.ts
       - .test-state
     budgets:
       deny: 5

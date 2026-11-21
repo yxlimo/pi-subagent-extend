@@ -13,7 +13,7 @@ extend:
   permissions:
     scope: ["."]
     write:
-      - test
+      - packages/pi-plugin/test
     budgets:
       deny: 5
       writeDeny: 2
@@ -39,6 +39,7 @@ extend:
         - node
         - npx
         - mise run test:fast
+        - mise run test:paths
         - mise run test:unit
         - mise run test:docs
         - mise run lint

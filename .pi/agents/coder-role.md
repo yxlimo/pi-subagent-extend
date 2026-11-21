@@ -13,12 +13,12 @@ extend:
   permissions:
     scope: ["."]
     write:
-      - src/role-config.ts
-      - src/deliverable.ts
-      - src/worktree-default.ts
-      - test/role-phase3.test.ts
-      - test/role-phase3-role-config.test.ts
-      - test/role-phase3-wiring.test.ts
+      - packages/pi-plugin/src/role-config.ts
+      - packages/pi-plugin/src/deliverable.ts
+      - packages/pi-plugin/src/worktree-default.ts
+      - packages/pi-plugin/test/role-phase3.test.ts
+      - packages/pi-plugin/test/role-phase3-role-config.test.ts
+      - packages/pi-plugin/test/role-phase3-wiring.test.ts
       - .test-state
     budgets:
       deny: 5
