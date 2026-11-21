@@ -82,7 +82,7 @@ export interface FakeExtensionApi {
 
 /** The extension module as the suites see it. */
 export interface ExtensionModule {
-	activate(pi: FakeExtensionApi, options?: { profileName?: string; profileFile?: string }): void
+	activate(pi: FakeExtensionApi): void
 	/** 扫描用的排序比较器，单独暴露出来以便钉住「顺序不随文件系统变化」。 */
 	sortByName<T extends { name: string }>(entries: T[]): T[]
 	/** 依赖闸门的扫描范围，暴露出来以便钉住 200 个目录的上限。 */
@@ -96,8 +96,6 @@ export interface ExtensionModule {
 export interface HandlerOptions {
 	bindings?: string
 	cwd?: string
-	profile?: string
-	profileFile?: string
 	/** Fake tool registry, for the schema-derived path-argument lookup. */
 	piTools?: Array<{ name: string; parameters?: unknown }>
 }

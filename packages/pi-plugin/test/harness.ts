@@ -12,6 +12,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
+import { stringify } from "yaml"
 import { fileURLToPath } from "node:url"
 import type {
   CommandSpec,
@@ -188,10 +189,10 @@ const wrapDispatchBindings = (raw: string | undefined): string | undefined => {
 type HandlerArgs = HandlerOptions & { rawBindings?: boolean }
 
 /**
+/**
  * Activate the extension with the given bindings env and return its tool_call handler.
- * Pass `profile` to activate through the profile loader (per-role defaults).
  */
-async function handler({ bindings, rawBindings, cwd = workdir, profile, profileFile, piTools }: HandlerArgs = {}): Promise<Harness> {
+async function handler({ bindings, rawBindings, cwd = workdir, piTools }: HandlerArgs = {}): Promise<Harness> {
   const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
   else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = rawBindings ? bindings : wrapDispatchBindings(bindings)
@@ -208,7 +209,7 @@ async function handler({ bindings, rawBindings, cwd = workdir, profile, profileF
     },
   }
   if (piTools) api.getAllTools = () => piTools
-  ext.activate(api, profile ? { profileName: profile, profileFile } : {})
+  ext.activate(api)
 
   const aborts: string[] = []
   const ctx: SessionContext = { cwd, ui: { notify: (message: string) => ui.push(message) }, actions: { abort: () => aborts.push("abort") } }
@@ -270,6 +271,56 @@ async function handler({ bindings, rawBindings, cwd = workdir, profile, profileF
   }
 }
 
+/**
+ * Write a role md into a test project the way production finds one: `.pi/agents/<role>.md`
+ * under `cwd`, frontmatter with `name` and `systemPromptMode: append`, a non-empty body,
+ * and the given `extend` block as YAML. The extension does all parsing — this only writes
+ * the file. Returns the path written.
+ */
+function writeAgentMd({
+  cwd,
+  role,
+  extend,
+  body = `Role policy for ${role}: stay inside the granted scope and report instead of writing outside it.`,
+}: {
+  cwd: string
+  role: string
+  extend: Record<string, unknown>
+  body?: string
+}): string {
+  const dir = join(cwd, ".pi", "agents")
+  mkdirSync(dir, { recursive: true })
+  // `stringify` is the same serializer family the reader (`parse` in role-config.ts) uses,
+  // so what a test passes is what the extension reads back, without hand-rolled YAML.
+  const frontmatter = stringify({ name: role, systemPromptMode: "append", extend }, { lineWidth: 0 })
+  const file = join(dir, `${role}.md`)
+  writeFileSync(file, `---\n${frontmatter}---\n\n${body}\n`)
+  return file
+}
+
+/**
+ * The child system prompt as production assembles it under `systemPromptMode: append`:
+ * the base prompt arrives wrapped in `<addendum>`, so the `<active_agent>` tag does not
+ * sit on line one, and the md body follows the tag. `parseRoleName` only demands that
+ * the tag be a whole line by itself; the harness composes text, it does not parse it.
+ */
+function childSystemPrompt(role: string, body: string, base = "You are a delegated subagent."): string {
+  const attribute = role
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+  return [
+    "<addendum>",
+    base,
+    "</addendum>",
+    "",
+    `<active_agent name="${attribute}"/>`,
+    "",
+    body,
+  ].join("\n")
+}
+
 /** Deterministic clock: setTimeout is driven manually via advance(). */
 interface TimerHost {
   now(): number
@@ -317,4 +368,4 @@ const defaultProbe = () => ({
 const workdir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-test-"))
 mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
-export { handler, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext }
+export { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext }
