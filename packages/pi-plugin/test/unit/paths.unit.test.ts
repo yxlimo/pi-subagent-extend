@@ -4,15 +4,13 @@
 // directly, so a boundary slip is caught here instead of through a host.
 
 import assert from "node:assert/strict"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
+import { mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
+import { join } from "node:path"
+import { stateDir } from "../state-dir.ts"
 import { dropHiddenGrants, expandPath, privatisedDirs, resolveComparable, underRoot } from "../../src/paths.ts"
 
-const here = dirname(fileURLToPath(import.meta.url))
-const packageRoot = join(here, "..")
-const root = realpathSync.native(mkdtempSync(join(packageRoot, ".unit-paths-")))
+const root = realpathSync.native(stateDir(".unit-paths-"))
 
 const restore = (): void => {
   rmSync(root, { recursive: true, force: true })

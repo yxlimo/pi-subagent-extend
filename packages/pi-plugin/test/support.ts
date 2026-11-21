@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { spawnSync } from "node:child_process"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
-import { repo } from "./harness.ts"
+import { repo, stateDir } from "./harness.ts"
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
@@ -19,7 +19,7 @@ import { repo } from "./harness.ts"
 // Redirecting `HOME` instead is too blunt: on CI `cargo` is rustup's shim and tries to create
 // `$HOME/.rustup`, which the sandbox refuses because the package directory is not a write grant.
 const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
-export const testState = mkdtempSync(join(repo, ".test-state-"))
+export const testState = stateDir(".test-state-")
 process.env.PI_SUBAGENTS_EXTEND_STATE = testState
 
 // Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise

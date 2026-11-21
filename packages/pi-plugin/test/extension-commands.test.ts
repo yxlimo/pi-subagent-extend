@@ -7,7 +7,7 @@ import assert from "node:assert/strict"
 import { existsSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { handler, specOf, specPathOf, workdir, repo, ext } from "./harness.ts"
+import { handler, specOf, specPathOf, workdir, stateDir, ext } from "./harness.ts"
 
 // 82. bash 配了却跑不起来时，开场就说，而不是让子代理撞几次墙再自己推断。
 //     （实测过：helper 没装时子代理连跑四条命令，每条都拿到同一句「helper not found」，
@@ -268,7 +268,7 @@ import { handler, specOf, specPathOf, workdir, repo, ext } from "./harness.ts"
   const grant = join(tmpdir(), `pi-hidden-grant-${process.pid}`)
   // cwd 必须不在 /tmp 下：helper 只在 cwd 不落在该目录时才挂私有 tmpfs（否则会盖住工作目录），
   // 而测试的 workdir 本身就在 tmpdir() 里。`.test-*` 已在 .gitignore 里，不会污染工作树。
-  const outsideTmp = mkdtempSync(join(repo, ".test-cwd-"))
+  const outsideTmp = stateDir(".test-cwd-")
   mkdirSync(grant, { recursive: true })
   const h = await handler({
     bindings: JSON.stringify({
@@ -344,7 +344,7 @@ import { handler, specOf, specPathOf, workdir, repo, ext } from "./harness.ts"
 //      而 helper 会因它拒掉整份 spec —— 又回到「一条命令都跑不了」。反方向同样有害：插件比 helper
 //      更激进时，一条本来能用的授权会被白白剔掉。
 {
-  const outsideTmp = mkdtempSync(join(repo, ".test-cwd-"))
+  const outsideTmp = stateDir(".test-cwd-")
   // 指向 tmpdir()（私有化目录）的软链：插件按原字符串看不在 /tmp 下，按真实路径看在。
   const toTmp = join(outsideTmp, "link-to-tmp")
   symlinkSync(tmpdir(), toTmp)

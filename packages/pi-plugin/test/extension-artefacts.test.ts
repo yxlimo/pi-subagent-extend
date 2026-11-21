@@ -1,12 +1,12 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { join } from "node:path"
 import type {
   Harness,
   SandboxSpec,
 } from "./types.ts"
-import { handler, specOf, liveSandbox, workdir, repo } from "./harness.ts"
+import { handler, specOf, liveSandbox, workdir, stateDir } from "./harness.ts"
 import { described, testState } from "./support.ts"
 
 // 47. Build/test artefact directories are derived from what the project uses.
@@ -265,7 +265,7 @@ import { described, testState } from "./support.ts"
   } else {
     // 仓库不能放在 tmpdir() 下：spec.write 天然包含 tmpdir()，那里什么都能写，「写不进去」
     // 就永远测不出来。放在项目目录下的临时目录里，跑完删掉。
-    const outside = mkdtempSync(join(repo, ".test-git-hooks-"))
+    const outside = stateDir(".test-git-hooks-")
     try {
       const repoDir = join(outside, "repo")
       const wtDir = join(outside, "wt")
@@ -365,7 +365,7 @@ import { described, testState } from "./support.ts"
 //     Landlock 只能正向授权，所以「授权目录」必须恰好等于「这条 glob 覆盖的范围」：文件级写法
 //     展开成实际存在的文件，只有覆盖整棵子树的写法（dir、dir/**）才授权目录本身。
 {
-  const outside = mkdtempSync(join(repo, ".test-glob-scope-"))
+  const outside = stateDir(".test-glob-scope-")
   try {
     const authDir = join(outside, "src", "auth")
     const matched = join(authDir, "session.ts")

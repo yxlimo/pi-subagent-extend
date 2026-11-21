@@ -14,6 +14,7 @@ import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { stringify } from "yaml"
 import { fileURLToPath } from "node:url"
+import { stateDir } from "./state-dir.ts"
 import type {
   CommandSpec,
   EventHandler,
@@ -31,8 +32,6 @@ import type {
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
-// Worktree root: three levels above this test directory (`<worktree>/packages/pi-plugin/test`).
-const repoRoot = join(here, "..", "..", "..")
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
@@ -43,20 +42,11 @@ const repoRoot = join(here, "..", "..", "..")
 // `$HOME/.rustup`, which the sandbox refuses because the package directory is not a write grant.
 const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
 // Inside a sandboxed child the package directory is not a write grant, so every
-// suite here dies with `EACCES: mkdtemp` before its first case. The parent's
-// session setup provides `<repo-root>/.test-state` for us to create in (the
-// `mkdir -p … .test-state` preExec creates it at the worktree root — three
-// levels above this test directory, two above the package dir). Probe it by
-// creating, not with `accessSync(W_OK)` — a Landlock
-// denial is invisible to an access check, so a try/catch around the first
-// mkdtempSync is the honest test. Without that directory (a plain local
-// `mise run …`) the probe fails with ENOENT and today's layout is unchanged.
-let testState: string
-try {
-  testState = mkdtempSync(join(repoRoot, ".test-state", "run-"))
-} catch {
-  testState = mkdtempSync(join(repo, ".test-state-"))
-}
+// suite here would die with `EACCES: mkdtemp` before its first case. The
+// probe-then-fallback lives once in ./state-dir.ts; this harness takes its own
+// run directory from there, and suites reach for `stateDir(prefix)` when they
+// need a scratch directory too.
+const testState = stateDir("run-")
 process.env.PI_SUBAGENTS_EXTEND_STATE = testState
 
 // Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise
@@ -430,4 +420,4 @@ const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as
 // The role-md parser, reached the same way: the split session-start files assert on
 // policyFromBlock / bindingKey directly, so the import lives here once instead of once per file.
 const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typeof import("../src/role-config.ts")
-export { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext, wrapDispatchBindings, childRun, bashApi, rc }
+export { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext, wrapDispatchBindings, childRun, bashApi, rc, stateDir }

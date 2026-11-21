@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join, dirname } from "node:path"
-import { handler, specOf, workdir, repo, bashApi, childRun } from "./harness.ts"
+import { handler, specOf, workdir, stateDir, bashApi, childRun } from "./harness.ts"
 import "./support.ts"
 
 // 221. A writablePaths grant must not widen a bash.writable:false role, even for a read command.
@@ -9,7 +9,7 @@ import "./support.ts"
 //      is writable. Put the grant in the repo (not /tmp), where dropHiddenGrants keeps it when it is
 //      present, so its absence pins the writable gate rather than tmpfs filtering.
 {
-  const cwd = mkdtempSync(join(repo, ".test-cwd-"))
+  const cwd = stateDir(".test-cwd-")
   const grant = join(cwd, "no-write-grant")
   mkdirSync(grant, { recursive: true })
   const h = await handler({

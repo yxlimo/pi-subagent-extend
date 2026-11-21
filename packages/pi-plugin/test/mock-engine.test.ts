@@ -2,14 +2,13 @@
 //
 //   node test/mock-engine.test.ts
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { loadMockFixture } from "./mock-fixture.ts";
 import { startMockLlm, startMockLlmFromFixture } from "./mock-llm.ts";
+import { stateDir } from "./state-dir.ts";
 import type { MockFixture, MockLlm } from "./mock-llm.ts";
 
-const here = dirname(fileURLToPath(import.meta.url));
 
 async function test(name: string, body: () => Promise<void> | void): Promise<void> {
 	await body();
@@ -190,7 +189,7 @@ await test("reply shape is validated at load time", async () => {
 });
 
 await test("YAML fixture loading reports the file and offending path", async () => {
-	const dir = mkdtempSync(join(here, ".mock-fixture-"));
+	const dir = stateDir(".mock-fixture-");
 	try {
 		const good = join(dir, "good.yaml");
 		writeFileSync(
