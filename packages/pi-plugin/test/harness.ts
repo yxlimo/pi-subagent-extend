@@ -26,6 +26,7 @@ import type {
   PatchedResult,
   SandboxSpec,
   SessionContext,
+  PromptOptions,
 } from "./types.ts"
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -368,4 +369,61 @@ const defaultProbe = () => ({
 const workdir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-test-"))
 mkdirSync(join(workdir, "src/auth"), { recursive: true })
 
-export { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext }
+
+// A child run: activate, fire session_start, then before_agent_start with a role tag.
+const childRun = async (opts: { cwd: string; home: string; systemPrompt: string; bindings?: string; order?: "normal" | "hostile"; beforeStartEmissions?: number; beforeStartDelayMs?: number; beforeStartCwds?: string[]; foreground?: boolean; rawBindings?: boolean; systemPromptOptions?: PromptOptions }) => {
+  const prev = {
+    bindings: process.env.PI_SUBAGENT_EXTENSION_BINDINGS,
+    child: process.env.PI_SUBAGENT_CHILD,
+    home: process.env.HOME,
+  }
+  if (opts.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = opts.rawBindings ? opts.bindings : wrapDispatchBindings(opts.bindings)
+  if (opts.foreground) delete process.env.PI_SUBAGENT_CHILD
+  else process.env.PI_SUBAGENT_CHILD = "1"
+  process.env.HOME = opts.home
+  const handlers: Record<string, EventHandler> = {}
+  const ui: string[] = []
+  const api: FakeExtensionApi = {
+    on(event, fn) { handlers[event] = fn },
+    registerCommand() {},
+  }
+  ext.activate(api)
+  const ctx: SessionContext = { cwd: opts.cwd, ui: { notify: (message) => ui.push(message) } }
+  if (opts.order === "hostile") {
+    // A hostile host could emit session_start after the role wiring; the grant must survive it.
+    await handlers.before_agent_start?.({ type: "before_agent_start", systemPrompt: opts.systemPrompt, systemPromptOptions: opts.systemPromptOptions }, ctx)
+    await handlers.session_start?.({ type: "session_start" }, ctx)
+  } else {
+    await handlers.session_start?.({ type: "session_start" }, ctx)
+    const emitBeforeStart = (cwd?: string) => handlers.before_agent_start?.({ type: "before_agent_start", systemPrompt: opts.systemPrompt, systemPromptOptions: opts.systemPromptOptions }, cwd ? { ...ctx, cwd } : ctx)
+    if (opts.beforeStartEmissions && opts.beforeStartEmissions > 1) {
+      await Promise.all(
+        Array.from({ length: opts.beforeStartEmissions }, async (_, i) => {
+          if (i > 0 && opts.beforeStartDelayMs) await new Promise((r) => setTimeout(r, opts.beforeStartDelayMs))
+          return emitBeforeStart(opts.beforeStartCwds?.[i])
+        }),
+      )
+    } else {
+      await emitBeforeStart()
+    }
+  }
+  return {
+    call: async (tool: string, input?: Record<string, unknown>): Promise<Outcome> =>
+      (await handlers.tool_call({ type: "tool_call", toolName: tool, input, toolCallId: "r1" }, ctx)) as Outcome,
+    ui,
+    restore: () => {
+      if (prev.bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+      else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = prev.bindings
+      if (prev.child === undefined) delete process.env.PI_SUBAGENT_CHILD
+      else process.env.PI_SUBAGENT_CHILD = prev.child
+      if (prev.home === undefined) delete process.env.HOME
+      else process.env.HOME = prev.home
+    },
+  }
+}
+
+// The internal read/write judgment is not exported from the extension entry, so suites reach the
+// module directly. Shared: three of the five split session-start files classify commands.
+const bashApi = (await import(join(repo, "src", "bash-match.ts"))) as unknown as typeof import("../src/bash-match.ts")
+export { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext, wrapDispatchBindings, childRun, bashApi }
