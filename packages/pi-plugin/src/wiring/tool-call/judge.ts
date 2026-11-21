@@ -9,13 +9,13 @@ import { asObject, matches, type Policy } from "../../policy.ts";
 import { dependencyGateVerdict } from "../../dependencies.ts";
 import { expandPath, privatisedDirs, resolveComparable, underRoot } from "../../paths.ts";
 import { buildSpec, detectPnpmStore, describeHelper, dropSpecFile, helperPath, SANDBOX_DEVICE_PATHS, scratchDir, wrapInSandbox, writeSpecFile } from "../../sandbox.ts";
-import type { ActivateOptions, Wiring } from "../context.ts";
+import type { Wiring } from "../context.ts";
 import { bail, deny, pathToolVerdict, preview, writeBail } from "./paths.ts";
 
 /**
  * tool_call 的总判定（judgeToolCall）从 index.ts 的 activate() 闭包整体移入。
  * 判定函数不持有会话状态：会话状态都在 Wiring 上，由调用方传入；per-activation 的
- * schema 缓存（schemaPathArgs）、options 与 pi 也由 activate 传入 —— 与 paths.ts
+ * schema 缓存（schemaPathArgs）、pi 与 ctx 也经入参对象由 activate 传入 —— 与 paths.ts
  * 同一形状（imports 只来自 node:* 与叶子模块，不来自 index.ts）。
  *
  * 闸门顺序是有意为之，别打乱（自上而下）：
@@ -245,14 +245,27 @@ const toolKindOf = (
 	};
 };
 
-export const judgeToolCall = async (
-	pi: ExtensionAPI,
-	w: Wiring,
-	_options: ActivateOptions,
-	schemaPathArgs: Map<string, string | undefined>,
-	event: ToolCallEvent,
-	ctx: ExtensionContext,
-): Promise<ToolCallEventResult | undefined | void> => {
+/**
+ * judgeToolCall 的入参对象。原先六个位置参数（pi、w、options、schemaPathArgs、
+ * event、ctx）只有 index.ts 的 tool_call 处理器一个调用方，位置序已经到了读不动的
+ * 边界；options 字段从来没人读，收对象时一并去掉。
+ */
+export interface JudgeToolCallOptions {
+	pi: ExtensionAPI;
+	w: Wiring;
+	/** activate 持有的 schema 路径入参缓存（见 pathArgFromSchema）。 */
+	schemaPathArgs: Map<string, string | undefined>;
+	event: ToolCallEvent;
+	ctx: ExtensionContext;
+}
+
+export const judgeToolCall = async ({
+	pi,
+	w,
+	schemaPathArgs,
+	event,
+	ctx,
+}: JudgeToolCallOptions): Promise<ToolCallEventResult | undefined | void> => {
 	w.currentCtx = ctx;
 	w.uiWarning = (message) => {
 		const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;

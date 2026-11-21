@@ -108,7 +108,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 
 
 	pi.on("tool_call", async (event, ctx) => {
-		const verdict = await judgeToolCall(pi, w, options, schemaPathArgs, event, ctx);
+		const verdict = await judgeToolCall({ pi, w, schemaPathArgs, event, ctx });
 		// 放行的调用把两类「连续」计数都清零。判据是连续而不是累计：子代理改了做法就该重新计数，
 		// 否则早期的一次误判会在几十轮之后把任务判死。
 		//
