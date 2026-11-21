@@ -9,7 +9,7 @@ import assert from "node:assert/strict"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import type { EventHandler, FakeExtensionApi, Outcome, SessionContext } from "./types.ts"
-import { ext, workdir, writeAgentMd, childSystemPrompt } from "./harness.ts"
+import { ext, childRun, workdir, writeAgentMd, childSystemPrompt } from "./harness.ts"
 
 /**
  * A role-md child: `handler()` never fires before_agent_start, and the role wiring runs
@@ -113,4 +113,78 @@ const outside = (proj: string): string => join(proj, "..", "outside-the-tree.ts"
   )
   h.restore()
   console.log("  ok   a role tag with no md anywhere stays fail open and warns")
+}
+
+// 5. A dispatch payload's scope replaces the role md's scope — it does not union.
+//    Whoever sends the payload can move or narrow the boundary, but the md's wider
+//    scope must not leak back in through the baseline merge (applyRoleBaseline only
+//    fills fields the payload omits; a present scope is present even when narrower).
+{
+  const proj = join(workdir, "roles-scope-payload")
+  writeAgentMd({
+    cwd: proj,
+    role: "scope-replaced",
+    extend: { permissions: { scope: ["docs/**"] } },
+  })
+  const run = (scope: string[]) =>
+    childRun({
+      cwd: proj,
+      home: join(workdir, "role-home-scope"),
+      systemPrompt: '<active_agent name="scope-replaced"/>\nhello',
+      rawBindings: true,
+      bindings: JSON.stringify({ "pi-subagents-extend/1": { permissions: { scope } } }),
+    })
+  const moved = await run(["src/**"])
+  const granted = await moved.call("read", { path: join(proj, "src/a.ts") })
+  assert.equal(granted, undefined, "the payload's scope applies: src is readable")
+  const refused = await moved.call("read", { path: join(proj, "docs/x.md") })
+  assert.equal(refused?.block, true, "the md's wider scope does not survive the payload's replacement")
+  assert.match(String(refused?.reason), /outside the read scope/, "the refusal is a scope refusal")
+  assert.match(String(refused?.reason), /Read scope: src\/\*\*/, "the refusal names the payload's scope")
+  assert.doesNotMatch(String(refused?.reason), /docs\/\*\*/, "the md's scope is not unioned back in")
+  moved.restore()
+  const narrowed = await run([])
+  const payloadSide = await narrowed.call("read", { path: join(proj, "src/a.ts") })
+  const mdSide = await narrowed.call("read", { path: join(proj, "docs/x.md") })
+  assert.equal(payloadSide?.block, true, "payload scope: [] narrows away even what the payload itself granted before")
+  assert.equal(mdSide?.block, true, "payload scope: [] does not inherit the md's wider scope")
+  assert.match(String(payloadSide?.reason), /outside the read scope/, "the refusal is a scope refusal, not a tool refusal")
+  assert.match(String(payloadSide?.reason), /Read scope: \(empty\)/, "the read scope is the narrowed empty list")
+  narrowed.restore()
+  console.log("  ok   a dispatch payload's scope replaces the role md's scope, including down to empty")
+}
+// 6. Two payload bash merge semantics: an explicitly empty bash.allow clears the
+//    allowlist (it is a present-but-empty value, not an absent one, so the md's
+//    entries must not fall back in), and a non-object bash switches the whole bash
+//    surface off — refused with the bash-disabled reason, not a scope reason.
+{
+  const proj = join(workdir, "roles-bash-merge")
+  writeAgentMd({
+    cwd: proj,
+    role: "bash-merge",
+    extend: { permissions: { scope: ["src/**"], bash: { allow: ["echo md-allowed"] } } },
+  })
+  const run = (permissions: Record<string, unknown>) =>
+    childRun({
+      cwd: proj,
+      home: join(workdir, "role-home-bash"),
+      systemPrompt: '<active_agent name="bash-merge"/>\nhello',
+      rawBindings: true,
+      bindings: JSON.stringify({ "pi-subagents-extend/1": { permissions } }),
+    })
+  const cleared = await run({ scope: ["src/**"], bash: { allow: [] } })
+  const emptied = await cleared.call("bash", { command: "echo md-allowed" })
+  assert.equal(emptied?.block, true, "an explicitly empty bash.allow clears: the md's entry does not fall back in")
+  assert.match(String(emptied?.reason), /bash is not allowed here/, "the refusal is the bash-disabled reason")
+  assert.doesNotMatch(String(emptied?.reason), /command not in the allowlist/, "the whole surface is off, not a list miss")
+  cleared.restore()
+  const off = await run({ scope: ["src/**"], bash: false })
+  const shut = await off.call("bash", { command: "echo md-allowed" })
+  assert.equal(shut?.block, true, "a non-object bash switches the whole bash surface off")
+  assert.match(String(shut?.reason), /bash is not allowed here/, "the refusal names bash being disallowed, not the scope")
+  assert.doesNotMatch(String(shut?.reason), /outside the read scope/, "not a scope refusal")
+  const reading = await off.call("read", { path: join(proj, "src/a.ts") })
+  assert.equal(reading, undefined, "bash: false leaves the rest of the policy intact")
+  off.restore()
+  console.log("  ok   an explicit empty bash.allow clears the allowlist and a non-object bash switches bash off")
 }
