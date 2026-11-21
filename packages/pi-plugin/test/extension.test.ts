@@ -679,7 +679,7 @@ async function mdChild({ cwd, prompt, bindings }: { cwd: string; prompt: string;
   })
   const stash = await h.call("bash", { command: "git stash" })
   assert.equal(stash?.block, true, "a deny entry from the role md blocks the command")
-  assert.match(stash.reason, /blocked by the project profile/, "the denial says the command is forbidden")
+  assert.match(stash.reason, /blocked by a deny entry/, "the denial says the command is forbidden")
   const checkout = await h.call("bash", { command: "git checkout -- src/a.ts" })
   assert.equal(checkout?.block, true, "deny entries use the same prefix matching")
   h.restore()

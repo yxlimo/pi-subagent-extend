@@ -192,7 +192,7 @@ function worktreePolicyFor(
 	const mdFile = resolveAgentFile(agent, cwd, homedir()) ?? undefined;
 	const block = mdFile ? readExtendBlock(mdFile).block : undefined;
 	const enabled = worktreeFromBlock(block ?? {}).worktree?.enabled === true;
-	if (enabled && call?.worktree === undefined) {
+	if (enabled && (call?.worktree === undefined || call?.worktree === null)) {
 		return { worktree: true, fromMd: true, mdFile };
 	}
 	return call?.worktree === true ? { worktree: true, fromMd: false } : { fromMd: false };
@@ -308,7 +308,7 @@ export const judgeToolCall = async (
 	//   写不了 → 写预算（writeBail）：写范围外、readOnly 会话里的写。放宽授权也解决不了，
 	//          正解是改成交报告，所以计数与文案都跟授权那类分开。
 	//   不能 → 只拒不计（deny）：用法错误（缺 path、空命令、shell 元字符）、
-	//          项目 profile 的硬禁令、永远不开放的工具、环境/内核缺能力。
+	//          bash deny 的硬禁令、永远不开放的工具、环境/内核缺能力。
 	// 把后一类算进预算，会让一次参数写错就提前判死长任务。
 
 	if (event.toolName === "bash") {
@@ -321,11 +321,12 @@ export const judgeToolCall = async (
 			);
 		}
 		if (!command) return deny("pi-subagents-extend: empty bash command");
-		// 禁止列表先于一切判定：它来自项目 profile，调用方的白名单不能放宽它。
+		// 禁止列表先于一切判定：deny 是硬底线（两层并集，任何一层都拆不掉），
+		// 调用方的白名单不能放宽它。它不属于哪一层配置文件，来源只在 (source: …) 里。
 		const forbidden = deniedEntry(rule, command);
 		if (forbidden) {
 			return deny(
-				`pi-subagents-extend: command blocked by the project profile: "${forbidden}" (source: ${w.policy.source}); extensionBindings cannot lift it.`,
+				`pi-subagents-extend: command blocked by a deny entry: "${forbidden}" (source: ${w.policy.source}). A deny entry is a restriction; no layer can remove it.`,
 			);
 		}
 		if (hasUnquotedShellControl(command)) {

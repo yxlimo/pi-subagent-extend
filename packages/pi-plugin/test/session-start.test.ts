@@ -591,7 +591,7 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   // runs before the write gate, so a write-class fixture would also be denied — by a message that
   // never mentions deny.)
   assert.ok(
-    denied.reason.includes("command blocked by the project profile"),
+    denied.reason.includes("command blocked by a deny entry"),
     `the refusal must be a deny refusal, not a write-gate refusal, got: ${denied.reason}`,
   )
   assert.ok(!denied.reason.includes("bash.writable"), `a deny refusal must not mention bash.writable, got: ${denied.reason}`)
