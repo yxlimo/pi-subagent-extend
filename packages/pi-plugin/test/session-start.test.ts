@@ -631,25 +631,34 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
 //      A refusal's source is the parent agent's only clue about which file to edit, so it names
 //      every layer that actually contributed — extensionBindings first, then the role md — and
 //      only those layers. Here the md contributes through the deny union alone: the payload
-//      declares scope and bash, so the md's only way in is its deny entry joining the union.
+//      declares scope and bash, so the md's only way in is its deny entry joining the union. The
+//      denied command is read-class (`git status`), so the deny list — not the bash.writable write
+//      gate — is the blocking cause; a write-gate refusal would keep the case green without the union.
 {
   const proj = join(workdir, "role-proj-202")
   const md = writeAgentMd({
     cwd: proj,
     role: "source-label-coder-202",
-    extend: { permissions: { scope: ["src/**"], bash: { deny: ["git stash"] } } },
+    extend: { permissions: { scope: ["src/**"], bash: { deny: ["git status"] } } },
   })
   const run = await childRun({
     cwd: proj,
     home: workdir,
     systemPrompt: childSystemPrompt("source-label-coder-202", "Contribution-order role for the deny union."),
     bindings: JSON.stringify({
-      "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["git status", "git stash"] } },
+      "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["git diff", "git status"] } },
     }),
   })
-  assert.equal(await run.call("bash", { command: "git status" }), undefined, "the payload's own allowlist still runs its commands")
-  const denied = await run.call("bash", { command: "git stash" })
+  assert.equal(await run.call("bash", { command: "git diff" }), undefined, "the payload's own allowlist still runs its commands")
+  const denied = await run.call("bash", { command: "git status" })
   assert.ok(denied && denied.block, "the md's deny entry blocks a command the payload's own allowlist names")
+  // The refusal must come from the deny list, not the write gate: git status is read-class, so
+  // bash.writable plays no part, and a write-gate message here would mean the case regressed.
+  assert.ok(
+    denied.reason.includes("command blocked by the project profile"),
+    `the refusal must be a deny refusal, not a write-gate refusal, got: ${denied.reason}`,
+  )
+  assert.ok(!denied.reason.includes("bash.writable"), `a deny refusal must not mention bash.writable, got: ${denied.reason}`)
   assert.ok(
     denied.reason.includes(`(source: extensionBindings pi-subagents-extend/1 + role md ${md})`),
     `the reason must name the bindings layer then the md layer, got: ${denied.reason}`,
