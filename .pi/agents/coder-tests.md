@@ -14,6 +14,8 @@ extend:
     scope: ["."]
     write:
       - packages/pi-plugin/test
+      - .test-state
+      - .gitignore
     budgets:
       deny: 5
       writeDeny: 2
