@@ -178,9 +178,26 @@ export function createWiring(): Wiring {
 			if (!mdContributed) return;
 			// 拒绝文案里的 source 是父代理判断「该改哪个文件」的唯一线索，只列真正贡献过的层。
 			// baseSource 是激活时定格的 bindings 来源（createWiring），排在 md 之前。
+			// 「补了字段」不等于「改了结果」：md 写的若本来就是默认值（bash.writable: false，
+			// 或没有任何写范围时的 readOnly: true），有效策略与只有载荷时完全相同，source 再
+			// 多出 md 这层就是误导——父代理会去改一个改不动的 md。所以按两次解析的结果判
+			// 贡献，而不是按补没补字段。
 			const mdLabel = this.roleSource ?? "role md";
-			const source = this.baseConfig ? `${this.baseSource} + ${mdLabel}` : mdLabel;
-			this.probe?.dispose();
+			let source = this.baseConfig ? `${this.baseSource} + ${mdLabel}` : mdLabel;
+			try {
+				const withMd = parsePolicyObject(fields, "", { requireScope: this.baseRequireScope });
+				const payloadOnly = parsePolicyObject({ ...(this.baseConfig ?? {}) }, "", {
+					requireScope: this.baseRequireScope,
+				});
+				// 两份策略同出 parsePolicyObject 一条构造路径，键序固定，JSON 直比即稳定。
+				// source 正是我们在此要决定的，先归一再比；编译出的 RegExp 两边都序列化成
+				// {}，内容差异已由 globs / writeGlobs 本身承载。
+				if (JSON.stringify({ ...withMd, source: "" }) === JSON.stringify({ ...payloadOnly, source: "" })) {
+					source = this.baseSource;
+				}
+			} catch {
+				// 载荷单独解析抛错：按 md 有贡献处理（与今天一致），不让异常悄悄改策略。
+			}
 			this.policy = parsePolicyObject(fields, source, { requireScope: this.baseRequireScope });
 			this.denyCounter = new DenyCounter(this.policy.maxDenies);
 			this.writeDenyCounter = new DenyCounter(this.policy.maxWriteDenies, "write");

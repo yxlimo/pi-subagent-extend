@@ -219,3 +219,69 @@ import "./support.ts"
   h.restore()
   console.log("  ok   /permission keeps the no-write note off a legacy-only policy")
 }
+
+// 281. A role md that only repeats a default must not be named as a source layer.
+//      Filling a field the payload left out is not the same as changing the outcome: an
+//      allow-less `bash: { writable: false }` parses to the same policy as no bash block
+//      at all, so the refusal's source must stay the payload alone — the md is not where
+//      the parent can fix anything. An md that does change the parsed policy must keep
+//      being named, so the pair of directions in one case is the point.
+{
+  const proj = join(workdir, "role-proj-281")
+  mkdirSync(proj, { recursive: true })
+  const md = writeAgentMd({
+    cwd: proj,
+    role: "repeat-default",
+    extend: { permissions: { bash: { writable: false } } },
+  })
+  const run = await childRun({
+    cwd: proj,
+    home: workdir,
+    systemPrompt: '<active_agent name="repeat-default"/>\nhello',
+    rawBindings: true,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { permissions: { scope: ["src/**"] } } }),
+  })
+  const blocked = await run.call("bash", { command: "git status" })
+  assert.equal(blocked?.block, true, "the command is refused either way")
+  assert.ok(
+    String(blocked?.reason).includes("bash is not allowed here"),
+    `the refusal is the missing allowlist, got: ${blocked?.reason}`,
+  )
+  assert.ok(
+    String(blocked?.reason).includes("(source: extensionBindings pi-subagents-extend/1)"),
+    `the source must name the payload alone, got: ${blocked?.reason}`,
+  )
+  assert.ok(
+    !String(blocked?.reason).includes(md),
+    `a default-repeating md must not be named as a source layer, got: ${blocked?.reason}`,
+  )
+  run.restore()
+
+  // The mirror direction: the md does change the parsed policy — the payload has no
+  // scope at all (denyAll on its own) and the md's scope rescues it — so the source
+  // must keep naming the md. A fix that dropped the md here would overcorrect.
+  const rescuingMd = writeAgentMd({
+    cwd: proj,
+    role: "real-scope",
+    extend: { permissions: { scope: ["src/**"] } },
+  })
+  const rescue = await childRun({
+    cwd: proj,
+    home: workdir,
+    systemPrompt: '<active_agent name="real-scope"/>\nhello',
+    rawBindings: true,
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { permissions: { bash: { allow: ["ls"] } } } }),
+  })
+  const outside = await rescue.call("read", { path: join(proj, "..", "outside-281.ts") })
+  assert.equal(outside?.block, true, "the read outside the md's scope is refused")
+  assert.ok(
+    String(outside?.reason).includes("outside the read scope"),
+    `the refusal is the scope check, got: ${outside?.reason}`,
+  )
+  assert.ok(
+    String(outside?.reason).includes(`(source: extensionBindings pi-subagents-extend/1 + role md ${rescuingMd})`),
+    `a policy-changing md must stay named as a source layer, got: ${outside?.reason}`,
+  )
+  rescue.restore()
+  console.log("  ok   a default-repeating md is not named as source; a policy-changing md is")
+}
