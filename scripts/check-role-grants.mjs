@@ -7,13 +7,20 @@
 // So: an entry that does not exist is only legitimate if the role's `setup.preExec` creates it.
 // Anything else is a dead grant, and a role whose only grants are dead cannot write at all.
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const dir = process.argv[2] ?? ".pi/agents";
 const exists = (p) => {
 	try {
 		statSync(p);
 		return true;
+	} catch {
+		return false;
+	}
+};
+const isDirectory = (path) => {
+	try {
+		return statSync(path).isDirectory();
 	} catch {
 		return false;
 	}
@@ -39,6 +46,33 @@ function writeEntries(text) {
 		.filter(Boolean);
 }
 
+// Approximate the creation shapes role mds actually use: `mkdir -p <dir>` creates that directory,
+// and a copy/move into a directory creates one file named after its source there. Redirections,
+// loops and globs are deliberately not modelled — reporting a reachable grant as unreachable is
+// safer than hiding a dead one.
+function createdPaths(preExec) {
+	const created = [];
+	for (const command of preExec.split(/\s*(?:&&|;)\s*/)) {
+		const tokens =
+			command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^["']|["']$/g, "")) ?? [];
+		const [program, ...args] = tokens;
+		// Flags are not paths; `--` is filtered too because it also starts with `-`.
+		const operands = args.filter((arg) => !arg.startsWith("-"));
+		if (program === "mkdir" && args.includes("-p")) {
+			created.push(...operands);
+			continue;
+		}
+		if (!["cp", "install", "mv"].includes(program) || operands.length < 2) continue;
+		const destination = operands[operands.length - 1];
+		const source = operands[operands.length - 2];
+		created.push(destination);
+		if (destination.endsWith("/") || isDirectory(destination)) {
+			created.push(join(destination, basename(source)));
+		}
+	}
+	return created;
+}
+
 const problems = [];
 const report = [];
 for (const file of readdirSync(dir).filter((name) => name.endsWith(".md")).sort()) {
@@ -47,12 +81,13 @@ for (const file of readdirSync(dir).filter((name) => name.endsWith(".md")).sort(
 	const entries = writeEntries(text);
 	if (entries.length === 0) continue;
 	// `preExec` runs unsandboxed at session start, which is the only way a role can create a path
-	// the sandbox would otherwise have to grant first. Only the paths that command actually names
-	// are excused: treating "the md has a preExec" as blanket permission hid a dead grant for a
-	// file that had been deleted, which is exactly what this check exists to catch.
+	// the sandbox would otherwise have to grant first. Excuse only the exact paths the command
+	// creates: a path merely mentioned in it (or sitting under a directory it creates) can still
+	// be dead, which is exactly what this check exists to catch.
 	const preExec = (text.match(/^\s+preExec:[ \t]*(.+)$/m) ?? [])[1] ?? "";
 	const missing = entries.filter((entry) => !exists(entry));
-	const orphaned = missing.filter((entry) => !preExec.includes(entry));
+	const created = createdPaths(preExec);
+	const orphaned = missing.filter((entry) => !created.includes(entry));
 	if (orphaned.length > 0) {
 		problems.push(`${path}: ${orphaned.join(", ")}`);
 	}

@@ -1,7 +1,9 @@
 /**
- * POLICY / PAYLOAD：读派单载荷或 profile 文件交给我们的配置对象——键白名单、
- * fail closed 的解析，以及配置对象 → `Policy` 的落点（parsePolicyObject）。
- * 这一层是纯函数，不持有会话状态；policy.ts 只做桶装再导出。
+ * POLICY / PAYLOAD：读派单载荷（extractCallConfig）并把它落成 `Policy`
+ * （parsePolicyObject）——键白名单、fail closed 的解析。角色 md 是基线层，
+ * 其 extend.permissions 由 wiring/context.ts 的 applyRoleBaseline 逐字段补进
+ * 载荷缺失的字段，bash.deny 与载荷的并集在那里是硬底线。本层是纯函数，
+ * 不持有会话状态；policy.ts 只做桶装再导出。
  */
 import { isAbsolute } from "node:path";
 import { parseBashRule } from "../bash-match.ts";
@@ -225,7 +227,7 @@ export function asObject(value: unknown): Record<string, unknown> | undefined {
  *   不写 writeScope → 等于读范围，现有派单行为不变；
  *   readOnly → 默认等价于空写范围；但**同一层写的 writeScope 优先**，这样「只读会话 + 一个
  *              报告文件」是能表达的，而不是非黑即白。派单只写 readOnly 时不写 writeScope，
- *              `mergeConfig` 已把合并结果里的 writeScope 清成空集，底层 profile 的那份压不过它；
+ *              applyRoleBaseline（wiring/context.ts）会跳过 md 基线的 writeScope，那份压不过它；
  *   写了 → 只认这一份，写超出即拒，读不受影响。
  */
 export function parseWriteScope(
@@ -259,8 +261,6 @@ export const POLICY_CONFIG_KEYS = [
 	"maxReads",
 	"maxDenies",
 	"maxWriteDenies",
-	// 不是策略字段：mergeConfig 用它表达「这一层只给这些」，消费后删除。
-	"reset",
 ] as const;
 
 export function parsePolicyObject(

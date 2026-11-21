@@ -55,11 +55,6 @@ export { buildSpec, detectPnpmStore, describeHelper, helperCandidates, sandboxWr
 export { nodeModulesWriteHint, wireDeliverable, wirePreExec, wireWorktree } from "./wiring/agent-start.ts";
 export { hasUnquotedShellControl } from "./wiring/tool-call/judge.ts";
 
-export { mergeConfig } from "./policy.ts";
-
-
-
-
 /**
  * /permission 的 allow 列：writable:false 时标注整列，不逐条判定。
  * 条目只是前缀或正则，同一条匹配的不同命令读写判定可能不同（git tag 与能跑的

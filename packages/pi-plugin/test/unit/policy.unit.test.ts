@@ -1,8 +1,8 @@
 // 策略模块的细粒度单测：直接调用纯函数，不经过 handler、不建假 pi API、不读 bindings JSON。
 //
-// test/policy.test.ts 看起来在测这一层，但 93 个调用点都走 h.call，从不直接调用
-// mergeConfig / parsePolicyObject / globToRegExp —— 模块故障与接线故障在那里分不开。
-// src/policy/ 刚拆成 payload / merge / glob，这三个模块此前没有任何直接测试。
+// test/policy.test.ts 看起来在测这一层，但它的调用点都走 h.call，从不直接调用
+// parsePolicyObject / globToRegExp —— 模块故障与接线故障在那里分不开。
+// src/policy/ 拆成 payload / glob 两个模块，这里给它们各自的直接测试。
 //
 //   node test/unit/policy.unit.test.ts
 
@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 import {
 	extractCallConfig,
 	globToRegExp,
-	mergeConfig,
 	parsePolicyObject,
 } from "../../src/policy.ts";
 
@@ -27,85 +26,6 @@ const ns = (body: unknown): string => JSON.stringify({ [NS]: body });
 /** namespace 层包一层 permissions（派单载荷的正确形状）。 */
 const perms = (permissions: unknown): string => ns({ permissions });
 
-// ---- mergeConfig（src/policy/merge.ts；白名单合并委托给 src/bash/rules.ts）----
-
-// bash.allow 与 allowTools 都是并集：底层已放行的不会被这次派单删掉。
-{
-	const merged = mergeConfig(
-		{ bash: { allow: ["a"] }, allowTools: ["x"] },
-		{ bash: { allow: ["b"] }, allowTools: ["y"] },
-	);
-	assert.deepEqual(merged?.bash, { allow: ["a", "b"] });
-	assert.deepEqual(merged?.allowTools, ["x", "y"]);
-	ok("mergeConfig: bash.allow 与 allowTools 跨层并集");
-}
-
-// deny 是硬底线：两层并集，且两个方向都成立（底层独有 / 上层独有都保留）。
-{
-	const both = mergeConfig({ bash: { deny: ["d1"] } }, { bash: { deny: ["d2"] } });
-	assert.deepEqual(both?.bash, { deny: ["d1", "d2"] });
-	const baseOnly = mergeConfig({ bash: { deny: ["d1"] } }, {});
-	assert.deepEqual(baseOnly?.bash, { deny: ["d1"] });
-	const overOnly = mergeConfig({}, { bash: { deny: ["d2"] } });
-	assert.deepEqual(overOnly?.bash, { deny: ["d2"] });
-	ok("mergeConfig: deny 两层并集，两个方向都保留");
-}
-
-// scope / writeScope 是替换，不是并集：任务范围必须能比角色默认更窄。
-{
-	const merged = mergeConfig(
-		{ scope: ["src/**"], writeScope: ["a/**"] },
-		{ scope: ["docs/**"], writeScope: ["b/**"] },
-	);
-	assert.deepEqual(merged?.scope, ["docs/**"]);
-	assert.deepEqual(merged?.writeScope, ["b/**"]);
-	ok("mergeConfig: scope / writeScope 替换而非并集");
-}
-
-// 显式空列表清空该列，与「没写」不同：没写继承底层，写了空数组就是空。
-{
-	const absent = mergeConfig({ bash: { read: ["r"] } }, {});
-	assert.deepEqual(absent?.bash, { read: ["r"] });
-	const clearedRead = mergeConfig({ bash: { read: ["r"] } }, { bash: { read: [] } });
-	assert.deepEqual(clearedRead?.bash, { read: [] });
-	const clearedAllow = mergeConfig({ bash: { allow: ["a"] } }, { bash: { allow: [] } });
-	assert.deepEqual(clearedAllow?.bash, { allow: [], write: [] });
-	ok("mergeConfig: 显式空列表清空该列，缺省则继承");
-}
-
-// reset: true 让这一层「只给这些」：白名单与 allowTools 从这一层重来，deny 不清。
-{
-	const merged = mergeConfig(
-		{ allowTools: ["x"], bash: { allow: ["a"], read: ["r"], deny: ["d1"] } },
-		{ reset: true, allowTools: ["y"], bash: { allow: ["b"], deny: ["d2"] } },
-	);
-	assert.deepEqual(merged?.allowTools, ["y"]);
-	assert.deepEqual(merged?.bash, { allow: ["b"], read: [], write: [], deny: ["d1", "d2"] });
-	assert.equal(Object.prototype.hasOwnProperty.call(merged, "reset"), false);
-	ok("mergeConfig: reset 清白名单与 allowTools，deny 仍并集");
-}
-
-// 标量调用方优先：这一层写了就以这一层为准。
-{
-	const merged = mergeConfig(
-		{ readOnly: false, maxDenies: 3, maxReads: 5, probe: "base" },
-		{ readOnly: true, maxDenies: 7, maxReads: 2, probe: "over" },
-	);
-	assert.equal(merged?.readOnly, true);
-	assert.equal(merged?.maxDenies, 7);
-	assert.equal(merged?.maxReads, 2);
-	assert.equal(merged?.probe, "over");
-	ok("mergeConfig: 标量以覆盖层为准");
-}
-
-// readOnly 且这一层没写 writeScope：写范围清空，底层那份不能抵消只读意图。
-{
-	const cleared = mergeConfig({ writeScope: ["a/**"] }, { readOnly: true });
-	assert.deepEqual(cleared?.writeScope, []);
-	const kept = mergeConfig({ writeScope: ["a/**"] }, { readOnly: true, writeScope: ["b/**"] });
-	assert.deepEqual(kept?.writeScope, ["b/**"]);
-	ok("mergeConfig: readOnly 清空 writeScope，同层显式写则保留");
-}
 
 // ---- extractCallConfig / parsePolicyObject（src/policy/payload.ts）----
 
