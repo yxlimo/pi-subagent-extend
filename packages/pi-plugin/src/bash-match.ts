@@ -14,6 +14,11 @@
 
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { ASSIGNMENT_LIKE, leadingAssignments } from "./bash/env.ts";
+import { commandSegments, RE_PREFIX, shellTokens, tokens } from "./bash/tokens.ts";
+
+export { deniedEnvAssignment, leadingAssignments, type LeadingAssignments } from "./bash/env.ts";
+export { commandSegments, pathCandidates, shellTokens, tokens } from "./bash/tokens.ts";
 
 export type BashAccess = "read" | "write";
 
@@ -74,217 +79,6 @@ export interface BashMatch {
 	entry: string;
 }
 
-const RE_PREFIX = "re:";
-
-function tokens(text: string): string[] {
-	return text.trim().split(/\s+/);
-}
-
-/**
- * 把命令切成参数，按 bash 的引号语义。
- *
- * 与 index.ts 的 `hasUnquotedShellControl` 是同一套扫描规则，但**保留引号字符本身**：
- * 下游把「含引号」当作「这段是代码或字面量，不是路径」的直接信号，剥掉反而要多猜一次。
- * 空白只在引号之外切词，所以 `-e 'require("x")'` 是两个 token，不是一个。
- */
-function shellTokens(command: string): string[] {
-	const out: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | undefined;
-	for (let i = 0; i < command.length; i += 1) {
-		const ch = command[i] as string;
-		if (quote === "'") {
-			current += ch;
-			if (ch === "'") quote = undefined;
-			continue;
-		}
-		if (quote === '"') {
-			current += ch;
-			// 双引号内反斜杠仍会转义，跳过后一个字符（与 hasUnquotedShellControl 一致）
-			if (ch === "\\" && i + 1 < command.length) {
-				current += command[i + 1] as string;
-				i += 1;
-				continue;
-			}
-			if (ch === '"') quote = undefined;
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			current += ch;
-			continue;
-		}
-		if (/\s/.test(ch)) {
-			if (current) {
-				out.push(current);
-				current = "";
-			}
-			continue;
-		}
-		current += ch;
-	}
-	// 引号没闭合时前半句照常返回：那种命令会被元字符检查先拒掉，这里不必再判一次。
-	if (current) out.push(current);
-	return out;
-}
-
-/**
- * 「像路径」的字符集：只由这些字符构成（斜杠另判，见 `pathCandidates`）。
- *
- * 斜杠是「路径」与「包名 / 裸词」在文本上唯一稳定的分界 —— `foo`、`--flag`、`HEAD` 都不含斜杠。
- * 反过来只认以 `/` 或 `./` 开头的写法会漏掉一个真实形态：cwd 下有 `escape-link -> /home/other`
- * 时，`rg foo escape-link/x` 照样读到树外，而它看起来完全不像「绝对路径」。
- *
- * 放宽这一条不会新增误拒：相对候选按 cwd 解析后落在 cwd 之下，而 cwd 本来就在允许集内。
- */
-const PATH_TOKEN = /^[-A-Za-z0-9._/@+%~]+$/;
-
-/**
- * 开头是这两种字符的不是路径：`-` 是 flag（`--file=x/y`），`@` 是 npm 包名（`@scope/pkg`）。
- * 只挡开头，`src/@types/x.ts` 这类中间出现的照样算。
- */
-const PATH_TOKEN_SKIP_HEADS = ["-", "@"];
-
-/**
- * 出现这些字符的 token 一律不当路径：动态拼接（`$DIR`、反引号）、代码片段（括号、引号）、
- * URL（冒号）、glob（`*` `?` `{}`）、以及 shell 语法残留。
- *
- * 其中大部分字符本来就进不了 `PATH_TOKEN` 的字符类，这条表因此是「判据以后放宽了也别把它们
- * 当路径」的显式记录；先跳过再判正则，也让意图只有一处。
- */
-const PATH_TOKEN_SKIP = ["$", "`", "*", "?", "(", ")", "{", "}", ",", "'", '"', ";", "|", "<", ">", ":"];
-
-/** 最多看这么多条：一条命令里的路径参数不会更多，扫描也不该无上限。 */
-const MAX_PATH_CANDIDATES = 32;
-
-/** 超长 token 直接跳过：那多半不是路径，白做一次 realpath。 */
-const MAX_PATH_TOKEN_LENGTH = 200;
-
-/**
- * 从一条命令里抽出「看起来像路径」的参数候选；纯抽取，不做授权判断。宁可漏放，不许误拒。
- *
- * 第一个 token 是程序位，它本身是路径形态时**不算**参数候选：可执行文件由 bash 通过 PATH 解析，
- * 根本不进参数表；只有把程序写成绝对路径（`/nix/store/…/bin/foo args`）时它才出现在命令开头，
- * 而那是「正在执行的工具」，不是在工具链目录里翻东西。路径形态的四种写法（绝对路径、`~/`、`./`、
- * `../`）都带斜杠，一条斜杠判据就覆盖了全部。
- */
-export function pathCandidates(command: string): string[] {
-	const out: string[] = [];
-	const words = shellTokens(command);
-	for (let i = 0; i < words.length; i += 1) {
-		const token = words[i] as string;
-		// 程序位是路径形态时跳过：它是要执行的工具，不是这条命令的参数。
-		if (i === 0 && token.includes("/")) continue;
-		if (out.length >= MAX_PATH_CANDIDATES) break;
-		if (token.length > MAX_PATH_TOKEN_LENGTH) continue;
-		if (PATH_TOKEN_SKIP.some((ch) => token.includes(ch))) continue;
-		if (PATH_TOKEN_SKIP_HEADS.some((ch) => token.startsWith(ch))) continue;
-		// 没有斜杠的一律不是路径：`foo`、`--flag`、`HEAD` 都是裸词。
-		if (!token.includes("/")) continue;
-		if (!PATH_TOKEN.test(token)) continue;
-		out.push(token);
-	}
-	return out;
-}
-
-/** 前置赋值的名字，以及剥掉前缀之后剩下的命令。 */
-export interface LeadingAssignments {
-	names: string[];
-	rest: string;
-}
-
-const ASSIGNMENT_HEAD = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
-
-/**
- * 前缀赋值里那些能改变「跑哪个程序」或者「往进程里塞代码」的名字。
- *
- * 这一层不是严格沙箱，是让子代理走在既定轨道上的辅助（定位如此：放行多了可以事后补，卡太死
- * 反而妨碍干活），所以这里是**黑名单**而不是白名单：挡住已知的注入入口，其余名字照常放行。
- * 漏一个就是一次放宽 —— 这是刻意接受的代价，每一条都对应一个可验证的注入方式：
- *
- *   LD_* / DYLD_*              往任意进程加载共享库
- *   NODE_* / npm_config_*      node 预加载模块；实测 `NODE_OPTIONS=--require=/tmp/x.js node -e ""`
- *                              直接执行了 /tmp/x.js
- *   PYTHON* / PERL* / RUBY*    解释器预加载
- *   GIT_* / PAGER / LESSOPEN   被允许的 git 子命令、分页器里跑任意程序
- *   BASH_ENV / ENV / BASH_FUNC_*  shell 启动时执行
- *   PATH / IFS                 换掉要跑的程序 / 改变词法
- *
- * 刻意**不含** HOME：它是最常见的痛点写法（`HOME=/tmp/pi-home node x.mjs`），而借它注入要
- * 额外满足若干条件（例如宿主的 pager 只在 tty 下才起）。这条边界是取舍，不是疏漏。
- */
-const DENIED_ENV_NAMES = new Set(["PATH", "IFS", "ENV", "PAGER", "LESSOPEN", "LESSCLOSE", "MANPAGER", "BASH_ENV", "SHELLOPTS"]);
-const DENIED_ENV_PREFIXES = [
-	"LD_",
-	"DYLD_",
-	"NODE_",
-	"npm_config_",
-	"NPM_CONFIG_",
-	"PYTHON",
-	"PERL",
-	"RUBY",
-	"GIT_",
-	"BASH_FUNC_",
-	"JAVA_TOOL_",
-	"_JAVA_",
-	"MALLOC_",
-];
-
-function isDeniedEnvName(name: string): boolean {
-	if (DENIED_ENV_NAMES.has(name)) return true;
-	return DENIED_ENV_PREFIXES.some((prefix) => name.startsWith(prefix));
-}
-
-/**
- * 扫出最前面连续的 `NAME=value` 赋值，返回名字与剩下的命令。
- *
- * 逐字符扫而不是按空白切词：值可以被引号包住（`HOME="/tmp/my home"`），按空白切会把它切成两半，
- * 剩下半截 `home"` 当程序名，于是另一条合法命令被误拒 —— 那正是这个补丁要修的那类失败。
- * 名字允许在 `=` 前带一个 `+`（`A+=1` 是追加赋值，bash 同样当赋值看）。
- * 引号没闭合时值一直吃到末尾，剩下的命令为空，空命令永不匹配（fail closed）。
- */
-export function leadingAssignments(command: string): LeadingAssignments {
-	const text = command.trim();
-	const names: string[] = [];
-	let i = 0;
-	for (;;) {
-		while (i < text.length && /\s/.test(text[i] as string)) i += 1;
-		const head = ASSIGNMENT_HEAD.exec(text.slice(i));
-		if (!head) break;
-		names.push(head[0].replace(/\+?=$/, ""));
-		let j = i + head[0].length;
-		let quote: string | undefined;
-		while (j < text.length) {
-			const ch = text[j] as string;
-			if (quote) {
-				if (ch === "\\" && quote === '"') {
-					j += 2;
-					continue;
-				}
-				if (ch === quote) quote = undefined;
-				j += 1;
-				continue;
-			}
-			if (ch === "'" || ch === '"') {
-				quote = ch;
-				j += 1;
-				continue;
-			}
-			if (/\s/.test(ch)) break;
-			j += 1;
-		}
-		i = j;
-	}
-	return { names, rest: i === 0 ? text : text.slice(i).trim() };
-}
-
-/**
- * 前置赋值里命中黑名单的名字，供拒绝文案点名。命中即拒：带上它，「被允许的命令」就变成了
- * 「跑我自己的代码」，白名单等于没写。
- */
-export function deniedEnvAssignment(command: string): string | undefined {
-	return leadingAssignments(command).names.find((name) => isDeniedEnvName(name));
-}
 /**
  * 离线沙箱里「一跑就挂」的网络命令判定。
  *
@@ -361,7 +155,6 @@ const WRAPPER_FLAGS: Record<string, WrapperFlags> = {
 	},
 };
 const WRAPPERS = new Set(Object.keys(WRAPPER_FLAGS));
-const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 
 /**
  * 剥掉前置的直通包装器，返回从真正程序开始的 token；判不准返回 null。
@@ -584,50 +377,6 @@ const READ_ONLY_PACKAGE_STORE_ARGS = new Set(["path", "status"]);
 const INTERPRETERS = new Set(["node", "python", "python3", "sh", "bash", "zsh", "ruby", "perl"]);
 
 type WriteVerdict = "write" | "read" | "unknown";
-
-/** 按 shell 控制符切段；引号内与反斜杠转义的字符不当分隔符。 */
-function commandSegments(command: string): string[] {
-	const out: string[] = [];
-	let current = "";
-	let quote: "'" | '"' | undefined;
-	for (let i = 0; i < command.length; i += 1) {
-		const ch = command[i] as string;
-		if (quote === "'") {
-			current += ch;
-			if (ch === "'") quote = undefined;
-			continue;
-		}
-		if (quote === '"') {
-			current += ch;
-			if (ch === "\\" && i + 1 < command.length) {
-				current += command[i + 1] as string;
-				i += 1;
-				continue;
-			}
-			if (ch === '"') quote = undefined;
-			continue;
-		}
-		if (ch === "'" || ch === '"') {
-			quote = ch;
-			current += ch;
-			continue;
-		}
-		if (ch === "\\" && i + 1 < command.length) {
-			current += ch + (command[i + 1] as string);
-			i += 1;
-			continue;
-		}
-		if (ch === ";" || ch === "|" || ch === "\n" || ch === "&") {
-			out.push(current);
-			current = "";
-			if (ch === "&" && command[i + 1] === "&") i += 1;
-			continue;
-		}
-		current += ch;
-	}
-	out.push(current);
-	return out.map((segment) => segment.trim()).filter((segment) => segment !== "");
-}
 
 interface PackageSubcommand {
 	/** 子命令所在的 token 下标。 */
