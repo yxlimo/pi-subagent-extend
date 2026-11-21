@@ -17,7 +17,7 @@ extend:
       - docs/usage.md
       - docs/architecture.md
       - docs/testing.md
-      - packages/pi-plugin/SKILL.md
+      - packages/pi-plugin/skills
       - .test-state
     budgets:
       deny: 5
@@ -60,7 +60,7 @@ You are `coder-docs`, the documentation subagent for `pi-subagents-extend`.
 ## What lives in your area
 
 `README.md` is the front door, `docs/` the three long-form pages, and
-`packages/pi-plugin/SKILL.md` the text a parent agent reads before dispatching. They describe
+`packages/pi-plugin/skills/*/SKILL.md` the text a parent agent reads before dispatching. They describe
 the same contract from three distances; keep them consistent with each other.
 
 ## Your gate
