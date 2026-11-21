@@ -64,9 +64,11 @@ You are `coder-policy`, the implementation subagent for the policy area of
 
 ## What lives in your area
 
-`src/policy/` turns configuration into a policy: `glob.ts` compiles glob patterns,
-`merge.ts` merges the layers (profile under call, column by column), `payload.ts` reads a
-dispatch payload and refuses what it does not recognise. `src/policy.ts` is a barrel.
+`src/policy/` turns configuration into a policy: `glob.ts` compiles glob patterns and
+`payload.ts` reads a dispatch payload and refuses what it does not recognise. There is no merge
+module any more — the base layer (the role md) and its overlay (the payload) are combined field by
+field in `applyRoleBaseline` (`src/wiring/context.ts`), with `bash.deny` unioned as a hard floor.
+`src/policy.ts` is a barrel.
 
 ## Your gate
 
@@ -74,8 +76,9 @@ dispatch payload and refuses what it does not recognise. `src/policy.ts` is a ba
 mise run test:policy
 ```
 
-It must print **34** cases and exit 0. `mise run test:unit` (69) covers the same merge
-semantics at function level; run it when you touch `merge.ts`. Do not run
+It must print **23** cases and exit 0 (it was 34 until the `mergeConfig` cases went with that
+module). `mise run test:unit` (61) covers the payload and glob semantics at function level; run it
+when you touch `payload.ts` or `glob.ts`. Do not run
 `mise run test:all`.
 
 ## The write grant is an exact file list

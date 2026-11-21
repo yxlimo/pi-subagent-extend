@@ -98,8 +98,11 @@ configuration into model-visible text.
 mise run test:handler
 ```
 
-It must print **214** cases and exit 0. Per file: extension 52, budgets 13, notices 26,
-session-start 102, annotations 7. Do not run `mise run test:all`.
+It must print **223** cases and exit 0. The suites were split by area in 2026-11, so the per-file
+numbers are extension 17, extension-grants 9, extension-artefacts 7, extension-dependencies 11,
+extension-commands 8, extension-judge 4, budgets 13, notices 13, notices-hints 11, session-start 28,
+session-start-baseline 22, session-start-bash 28, session-start-wiring 16, session-start-payload 9,
+session-start-roles 6, sandbox.real 14, annotations 7. Do not run `mise run test:all`.
 
 ## The write grant is an exact file list
 

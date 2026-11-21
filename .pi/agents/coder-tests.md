@@ -73,7 +73,7 @@ touch them only when the *harness contract* changes.
 mise run test:fast
 ```
 
-It runs lint, typecheck, `test:unit` (69) and `test:docs`, and must finish clean. This is the
+It runs lint, typecheck, `test:unit` (61) and `test:docs`, and must finish clean. This is the
 only area whose grant covers a directory (`test`) rather than a file list, because new test
 infrastructure files are normal here.
 

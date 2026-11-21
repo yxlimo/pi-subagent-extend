@@ -28,6 +28,8 @@ extend:
       - packages/pi-plugin/src/bash/unreachable.ts
       - packages/pi-plugin/src/bash-match.ts
       - packages/pi-plugin/test/unit/bash.unit.test.ts
+      - packages/pi-plugin/test/session-start-bash.test.ts
+      - packages/pi-plugin/test/extension-commands.test.ts
       - .test-state
     budgets:
       deny: 5
@@ -84,13 +86,16 @@ barrel — it should stay one.
 mise run test:unit
 ```
 
-It must print **69** cases and exit 0. Run `mise run typecheck` too. Do not run
+It must print **61** cases and exit 0 (`mise run test:unit`; the number dropped from 69 when
+`mergeBashConfig` and its three cases were deleted). Also run `mise run test:handler` — the command
+classification cases that used to sit in `session-start.test.ts` now live in
+`session-start-bash.test.ts`, which that task covers. Run `mise run typecheck` too. Do not run
 `mise run test:all`: several suites need a helper and a real session that are not this
 area's problem.
 
 ## The write grant is an exact file list
 
-Those nine entries are your whole write surface, and the grant lists files, not directories.
+Those eleven entries are your whole write surface, and the grant lists files, not directories.
 A new file — even under `src/bash/` — is refused. Add cases to `bash.unit.test.ts`; if a task
 truly needs a new file, stop and say so.
 
