@@ -10,7 +10,8 @@ import assert from "node:assert/strict"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { handler, workdir } from "./harness.ts"
+import { childSystemPrompt, ext, handler, workdir, writeAgentMd } from "./harness.ts"
+import type { EventHandler, Outcome, SessionContext } from "./types.ts"
 // 5. Malformed bindings fail closed with a diagnosable reason.
 {
   const h = await handler({ bindings: "{not json" })
@@ -209,59 +210,87 @@ import { handler, workdir } from "./harness.ts"
   h.restore()
   console.log("  ok   a __proto__ key inside permissions is inert")
 }
-// 275. A dispatch-level reset with the documented permissions wrapper narrows a wide session layer.
-//      Cases 130-135 put reset in profile files or harness-lifted flat fields, so a reader that
-//      accepts reset but ignores it inside a real dispatch payload would go unnoticed. Both halves
-//      are asserted: without reset the session's allowances survive, with reset only this
-//      dispatch's list remains.
-{
-  const proj = join(workdir, "proj-dispatch-reset-275")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  mkdirSync(join(proj, "src"), { recursive: true })
-  writeFileSync(
-    join(proj, ".pi/subagent-bindings.json"),
-    JSON.stringify({
-      impl: { scope: ["src/**"], allowTools: ["read", "todo_write"], bash: { allow: ["git show", "git diff"] } },
-    }),
+/**
+ * Case 275's baseline arrives through the role md in `before_agent_start`, which the shared
+ * `handler()` never fires. Activate the extension directly, fire the hook with the
+ * `<active_agent>` identity a real child reports, and return a minimal tool-call surface.
+ * The payload is passed through verbatim: the case builds the permissions wrapper itself.
+ */
+async function handlerWithRoleMd({
+  cwd,
+  role,
+  extend,
+  bindings,
+}: {
+  cwd: string
+  role: string
+  extend: Record<string, unknown>
+  bindings: string
+}): Promise<{ call: (toolName: string, input?: Record<string, unknown>) => Promise<Outcome>; restore: () => void }> {
+  writeAgentMd({ cwd, role, extend })
+  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
+  const handlers: Record<string, EventHandler> = {}
+  ext.activate({
+    on(event, fn) {
+      handlers[event] = fn
+    },
+    registerCommand() {},
+  })
+  const ctx: SessionContext = { cwd, ui: { notify: () => {} } }
+  await handlers.before_agent_start?.(
+    {
+      type: "before_agent_start",
+      systemPrompt: childSystemPrompt(role, "Stay inside the granted scope and report instead of writing outside it."),
+    },
+    ctx,
   )
-  const items = { items: [] }
-  const wide = await handler({
+  let seq = 0
+  return {
+    call: (toolName, input) =>
+      handlers.tool_call({ type: "tool_call", toolCallId: `r${++seq}`, toolName, input }, ctx) as Promise<Outcome>,
+    restore: () => {
+      if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+      else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous
+    },
+  }
+}
+// 275. The dispatch payload and the role md baseline interact per field: a field the
+//      dispatch names wins, a field it leaves out is filled from the role md. The profile
+//      layer's session baseline is gone (4868a132), and with it the child-side union/reset
+//      this case used to pin: mergeConfig consumes and deletes `reset` in the parent before
+//      the payload ships, and applyRoleBaseline fills missing fields rather than unioning
+//      two layers, so those halves are no longer testable at this layer. The baseline
+//      arrives in before_agent_start, which the shared handler() never fires, hence the
+//      helper above.
+{
+  const proj = join(workdir, "proj-role-baseline-275")
+  const wide = await handlerWithRoleMd({
     cwd: proj,
-    profile: "impl",
-    rawBindings: true,
-    bindings: JSON.stringify({
-      "pi-subagents-extend/1": {
-        permissions: { scope: ["."], allowTools: ["read"], bash: { allow: ["git diff"] } },
+    role: "impl",
+    extend: {
+      permissions: {
+        scope: ["src/**"],
+        allowTools: ["read", "todo_write"],
+        bash: { allow: ["git show", "git diff"] },
       },
+    },
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { permissions: { scope: ["."], allowTools: ["read"] } },
     }),
   })
+  const droppedTool = await wide.call("todo_write", { items: [] })
+  assert.equal(droppedTool?.block, true, "a field the dispatch names wins: the md's extra tools do not leak in")
+  assert.match(String(droppedTool?.reason), /not on the allow list/, "the refusal is the allow list rule")
+  // bash is a field the dispatch leaves out, so the md's allowlist is in force.
   assert.equal(
     await wide.call("bash", { command: "git show" }),
     undefined,
-    "without reset the session's bash entry survives the dispatch's own list",
+    "the md's bash entry is in force where the dispatch is silent",
   )
-  assert.equal(
-    await wide.call("todo_write", items),
-    undefined,
-    "without reset the session's tool allowance survives too",
-  )
+  assert.equal(await wide.call("bash", { command: "git diff" }), undefined, "and the rest of the md's list too")
   wide.restore()
-
-  const dispatch = JSON.stringify({
-    "pi-subagents-extend/1": {
-      permissions: { scope: ["."], reset: true, allowTools: ["read"], bash: { allow: ["git diff"] } },
-    },
-  })
-  const narrow = await handler({ cwd: proj, profile: "impl", rawBindings: true, bindings: dispatch })
-  const droppedBash = await narrow.call("bash", { command: "git show" })
-  assert.equal(droppedBash?.block, true, "reset drops the bash entry the session layer supplied")
-  assert.match(String(droppedBash?.reason), /command not in the allowlist/, "the refusal is the allowlist rule")
-  const droppedTool = await narrow.call("todo_write", items)
-  assert.equal(droppedTool?.block, true, "reset drops the tool the session layer allowed")
-  assert.match(String(droppedTool?.reason), /not on the allow list/, "the reader is told which key to change")
-  assert.equal(await narrow.call("bash", { command: "git diff" }), undefined, "the dispatch's own entry still runs")
-  narrow.restore()
-  console.log("  ok   dispatch-level reset narrows both the session bash allowlist and allowTools")
+  console.log("  ok   the role md baseline fills only the fields the dispatch payload leaves out")
 }
 rmSync(workdir, { recursive: true, force: true })
 console.log("\npolicy module tests passed")

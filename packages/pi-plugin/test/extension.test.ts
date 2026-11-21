@@ -12,13 +12,15 @@ import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type {
+  CommandSpec,
   EventHandler,
   FakeExtensionApi,
   Harness,
   Outcome,
   SandboxSpec,
+  SessionContext,
 } from "./types.ts"
-import { handler, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext } from "./harness.ts"
+import { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext } from "./harness.ts"
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
@@ -682,63 +684,98 @@ await withoutGitConfigCount(async () => {
   console.log("  ok   内核 ABI 不足时 bash 被拒绝，文案说清缺的版本")
 }
 
-// 28. A declared profile supplies defaults when the call passes no bindings: file access
-// is denied (the role does not know the task's paths) but its bash allowlist still works.
+/**
+ * A child whose policy comes from a role md instead of bindings. The role wiring runs in
+ * before_agent_start, which `handler()` never emits, and this suite may only touch this file —
+ * so the two events are driven here, mirroring handler()'s activation exactly. `bindings` is
+ * the env value verbatim, already in the documented dispatch shape.
+ */
+interface MdChild {
+  call(toolName: string, input?: Record<string, unknown>): Promise<Outcome>
+  commands: Record<string, CommandSpec>
+  restore(): void
+}
+
+async function mdChild({ cwd, prompt, bindings }: { cwd: string; prompt: string; bindings?: string }): Promise<MdChild> {
+  const previous = process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  if (bindings === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+  else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = bindings
+  const handlers: Record<string, EventHandler> = {}
+  const commands: Record<string, CommandSpec> = {}
+  const api: FakeExtensionApi = {
+    on(event, fn) {
+      handlers[event] = fn
+    },
+    registerCommand(name, spec) {
+      commands[name] = spec
+    },
+  }
+  ext.activate(api)
+  const ctx: SessionContext = { cwd, ui: { notify() {} }, actions: { abort() {} } }
+  if (handlers.session_start) await handlers.session_start({ type: "session_start" }, ctx)
+  if (handlers.before_agent_start) await handlers.before_agent_start({ type: "before_agent_start", systemPrompt: prompt }, ctx)
+  let seq = 0
+  return {
+    call: async (toolName, input) =>
+      (await handlers.tool_call({ type: "tool_call", toolCallId: `t${++seq}`, toolName, input }, ctx)) as Outcome,
+    commands,
+    restore: () => {
+      if (previous === undefined) delete process.env.PI_SUBAGENT_EXTENSION_BINDINGS
+      else process.env.PI_SUBAGENT_EXTENSION_BINDINGS = previous
+    },
+  }
+}
+
+// 28. A role md whose extend block has no scope denies file access (the role does not know the
+//     task's paths), but its bash allowlist still applies when the dispatch passes no bindings:
+//     the md is the only policy source left.
 {
-  const proj = join(workdir, "proj-profile")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
+  const proj = join(workdir, "proj-role-md")
   mkdirSync(join(proj, "src"), { recursive: true })
-  writeFileSync(
-    join(proj, ".pi/subagent-bindings.json"),
-    JSON.stringify({
-      default: { bash: { read: ["mise run typecheck"], write: ["mise run fix"] } },
-      impl: { bash: { read: ["mise run test"], write: ["mise run fix"] } },
-    }),
-  )
-  const h = await handler({ cwd: proj, profile: "impl" })
+  const body = "Role policy for impl: run the listed commands; report instead of writing files."
+  writeAgentMd({ cwd: proj, role: "impl", extend: { permissions: { bash: { allow: ["mise run test"] } } }, body })
+  const h = await mdChild({ cwd: proj, prompt: childSystemPrompt("impl", body) })
   const blocked = await h.call("read", { path: "src/a.ts" })
-  assert.equal(blocked?.block, true, "a profile without scope denies file access")
-  assert.match(blocked.reason, /profile impl/, "the denial names the profile as the source")
+  assert.equal(blocked?.block, true, "a role md without scope denies file access")
+  assert.match(blocked.reason, /role md/, "the denial names the role md as the source")
   const input = { command: "mise run test" }
-  assert.equal(await h.call("bash", input), undefined, "the profile's allowlist applies with no bindings")
+  assert.equal(await h.call("bash", input), undefined, "the md's allowlist applies with no bindings")
   assert.match(input.command, /--spec/, "allowed commands still run under the sandbox")
   const outside = await h.call("bash", { command: "curl https://example.com" })
-  assert.equal(outside?.block, true, "commands outside the profile allowlist are denied")
+  assert.equal(outside?.block, true, "commands outside the md allowlist are denied")
   h.restore()
-  console.log("  ok   profile 默认值：漏传 bindings 时文件全拒、命令只放白名单")
+  console.log("  ok   角色 md 默认值：漏传 bindings 时文件全拒、命令只放白名单")
 }
 
 
-// 31. `bash.deny` is a restriction: it unions across layers and no allowlist re-allows it.
+// 31. `bash.deny` is a restriction: it applies however the session is configured, and no
+//     allowlist re-allows it. The dispatch may carry scope and budgets, but the deny itself
+//     lives in the role md.
 {
   const proj = join(workdir, "proj-deny")
-  mkdirSync(join(proj, ".pi"), { recursive: true })
-  writeFileSync(
-    join(proj, ".pi/subagent-bindings.json"),
-    JSON.stringify({ default: { bash: { read: ["git diff"], deny: ["git stash", "git checkout"] } } }),
-  )
-  const h = await handler({
+  const body = "Role policy for review: inspect with git; the deny list is a hard floor."
+  writeAgentMd({
     cwd: proj,
-    profile: "review",
-    bindings: JSON.stringify({
-      "pi-subagents-extend/1": {
-        scope: ["src/**"],
-        maxDenies: 0,
-        bash: { write: ["git stash", "git checkout --"] },
-      },
-    }),
+    role: "review",
+    extend: { permissions: { bash: { allow: ["git diff"], deny: ["git stash", "git checkout"] } } },
+    body,
+  })
+  const h = await mdChild({
+    cwd: proj,
+    prompt: childSystemPrompt("review", body),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { permissions: { scope: ["src/**"], maxDenies: 0 } } }),
   })
   const stash = await h.call("bash", { command: "git stash" })
-  assert.equal(stash?.block, true, "a deny entry cannot be re-allowed by the caller")
+  assert.equal(stash?.block, true, "a deny entry from the role md blocks the command")
   assert.match(stash.reason, /blocked by the project profile/, "the denial says the command is forbidden")
   const checkout = await h.call("bash", { command: "git checkout -- src/a.ts" })
   assert.equal(checkout?.block, true, "deny entries use the same prefix matching")
   h.restore()
 
-  // Without a call-side bash the profile's own allowlist survives, so its read entries work.
-  const plain = await handler({ cwd: proj, profile: "review" })
+  // Without call-side bindings the md's own allowlist survives, so its read entry works.
+  const plain = await mdChild({ cwd: proj, prompt: childSystemPrompt("review", body) })
   const diff = await plain.call("bash", { command: "git diff" })
-  assert.equal(diff, undefined, "the profile's own read entry passes when the call sends no bash")
+  assert.equal(diff, undefined, "the md's own read entry passes when the call sends no bindings")
   const plainStash = await plain.call("bash", { command: "git stash" })
   assert.equal(plainStash?.block, true, "deny still applies")
 
@@ -746,22 +783,9 @@ await withoutGitConfigCount(async () => {
   await plain.commands.permission.handler("", { cwd: proj, ui: { notify: (m: string) => messages.push(m) } })
   assert.match(messages.join("\n"), /bash deny \(cannot be lifted\)/, "/permission shows the non-overridable list")
   plain.restore()
-  console.log("  ok   bash.deny 不可被 bindings 放宽（含 /permission 可见）")
+  console.log("  ok   bash.deny 是硬底线（含 /permission 可见），md 自己的白名单照常生效")
 }
 
-// 32. A declared profile that cannot be resolved fails closed instead of running open.
-{
-  const proj = join(workdir, "proj-missing")
-  mkdirSync(proj, { recursive: true })
-  const h = await handler({ cwd: proj, profile: "impl" })
-  const blocked = await h.call("read", { path: "a.ts" })
-  assert.equal(blocked?.block, true, "a broken profile denies everything")
-  assert.match(blocked.reason, /not found/, "the denial says the profile file is missing")
-  const brokenBash = await h.call("bash", { command: "ls" })
-  assert.equal(brokenBash?.block, true, "bash is refused too")
-  h.restore()
-  console.log("  ok   profile 缺失时失败关闭，不是退回不设限")
-}
 
 
 // 36. linked worktree：索引与 HEAD 在 worktree 自己的 gitdir 里，ref 与对象在主仓 common dir

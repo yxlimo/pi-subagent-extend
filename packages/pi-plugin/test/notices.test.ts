@@ -389,37 +389,6 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	console.log("  ok   软链 cwd：真实祖先里的 manifest 也算；没有 manifest 时照旧判不可达")
 }
 
-// 147. `allow` 与 `write` 是同一列的两种写法（`parseBashRule` 把两者接起来），所以清空哪一边
-//      都要清空另一边。早先只做了 `write: []` → 清 `allow` 这一个方向，反向的 `allow: []`
-//      让 profile 用新字段 `bash.write` 写下的授权静默留着 —— 与「显式空列表 = 清空该列」
-//      是同一个失败，方向相反。
-{
-	const proj = join(workdir, "proj-empty-allow")
-	mkdirSync(join(proj, ".pi"), { recursive: true })
-	mkdirSync(join(proj, "src"), { recursive: true })
-	writeFileSync(
-		join(proj, ".pi/subagent-bindings.json"),
-		JSON.stringify({ impl: { bash: { read: ["git status"], write: ["git commit"] } } }),
-	)
-	// 正控：profile 的写授权本来生效，否则「它不生效了」证明不了任何事。
-	const open = await handler({ cwd: proj, profile: "impl" })
-	assert.equal(await open.call("bash", { command: "git status" }), undefined, "the profile's read entry runs")
-	assert.equal(await open.call("bash", { command: "git commit -m x" }), undefined, "the profile's write entry runs on its own")
-	open.restore()
-
-	const h = await handler({
-		cwd: proj,
-		profile: "impl",
-		bindings: JSON.stringify({
-			"pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0, bash: { read: ["git status"], allow: [] } },
-		}),
-	})
-	const denied = await h.call("bash", { command: "git commit -m x" })
-	assert.equal(denied?.block, true, "an explicit empty allow column drops the profile's write grant")
-	h.restore()
-	console.log("  ok   allow:[] 同时清掉继承来的 write：两个方向都不再静默保留授权")
-}
-
 // 148. 注解该问的是「allowlist 用**哪一条**放行了这条命令」，不是「白名单里哪一条匹配得上」。
 //      白名单里有一条**比命令短**的宽条目（`pnpm`）时，可达命令失败仍会被安上那条宽条目的
 //      诊断 —— 它自己确实不可达，但它不是放行这条命令的那一条。判据与放行必须同源。
@@ -466,49 +435,6 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	rmSync(repo, { recursive: true, force: true })
 	rmSync(outside, { recursive: true, force: true })
 	console.log("  ok   只看物理祖先链：字面链上的 manifest 不把死授权洗成可达")
-}
-
-// 150. `write`/`allow` 是一列的两个拼法，所以「这一列只留 x」不能因为用的是哪个拼法而有两种结果。
-//      两边都写、其中一边为空时，这一列同样要从底层清空。
-{
-	const proj = join(workdir, "proj-both-columns")
-	mkdirSync(join(proj, ".pi"), { recursive: true })
-	mkdirSync(join(proj, "src"), { recursive: true })
-	writeFileSync(
-		join(proj, ".pi/subagent-bindings.json"),
-		JSON.stringify({ impl: { bash: { read: ["git status"], write: ["git commit"] } } }),
-	)
-	const h = await handler({
-		cwd: proj,
-		profile: "impl",
-		bindings: JSON.stringify({
-			"pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0, bash: { read: ["git status"], allow: [], write: ["git status"] } },
-		}),
-	})
-	assert.equal(await h.call("bash", { command: "git status" }), undefined, "the column's own entry still runs")
-	const denied = await h.call("bash", { command: "git commit -m x" })
-	assert.equal(denied?.block, true, "emptying one spelling clears the column even though the other spelling is written")
-	h.restore()
-
-	// 镜像：profile 用旧拼法，派单用新拼法清空。
-	const proj2 = join(workdir, "proj-both-columns-mirror")
-	mkdirSync(join(proj2, ".pi"), { recursive: true })
-	mkdirSync(join(proj2, "src"), { recursive: true })
-	writeFileSync(
-		join(proj2, ".pi/subagent-bindings.json"),
-		JSON.stringify({ impl: { bash: { read: ["git status"], allow: ["git commit"] } } }),
-	)
-	const h2 = await handler({
-		cwd: proj2,
-		profile: "impl",
-		bindings: JSON.stringify({
-			"pi-subagents-extend/1": { scope: ["src/**"], maxDenies: 0, maxWriteDenies: 0, bash: { read: ["git status"], write: [], allow: ["git status"] } },
-		}),
-	})
-	const denied2 = await h2.call("bash", { command: "git commit -m x" })
-	assert.equal(denied2?.block, true, "the mirror direction behaves the same")
-	h2.restore()
-	console.log("  ok   write 与 allow 合成一列：任一边显式为空都清空整列")
 }
 
 // 151. 候选被截断时得说一句「没列全」：否则文案让人去挑，而没显示出来的恰好是它挑不了的那几个。

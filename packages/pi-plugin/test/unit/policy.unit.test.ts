@@ -7,16 +7,12 @@
 //   node test/unit/policy.unit.test.ts
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
 	extractCallConfig,
 	globToRegExp,
 	mergeConfig,
 	parsePolicyObject,
 } from "../../src/policy.ts";
-import { readProfile } from "../../src/wiring/session-start.ts";
 
 let passed = 0;
 function ok(label: string): void {
@@ -171,26 +167,6 @@ const perms = (permissions: unknown): string => ns({ permissions });
 	ok("parsePolicyObject: requireScope 区分派单与 profile 默认值");
 }
 
-// ---- readProfile（src/wiring/session-start.ts）：profile 文件的形状契约 ----
-
-// profile 文件是每角色一层平铺；带 permissions 包装（派单载荷的形状）整份拒绝。
-{
-	const dir = mkdtempSync(join(tmpdir(), "pi-policy-unit-"));
-	try {
-		writeFileSync(
-			join(dir, "profile.json"),
-			JSON.stringify({ default: { permissions: { scope: ["src/**"] } } }),
-		);
-		const res = readProfile(dir, "coder", "profile.json");
-		assert.ok(res.error);
-		assert.match(res.error, /carries a "permissions" wrapper/);
-		assert.match(res.error, /everything is refused/);
-		assert.equal(res.config, undefined);
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
-	}
-	ok("readProfile: 带 permissions 包装的 profile 文件被拒绝");
-}
 
 // ---- globToRegExp（src/policy/glob.ts）----
 
