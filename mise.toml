@@ -44,6 +44,10 @@ run = """
 node packages/pi-plugin/test/doc-payload.test.ts &&
 node packages/pi-plugin/test/version-consistency.test.ts
 """
+[tasks."check:grants"]
+description = "Role md write grants — a path typo turns a role into a blanket refusal"
+run = "node scripts/check-role-grants.mjs"
+
 
 # --- 需要 helper 的区域 ---
 
