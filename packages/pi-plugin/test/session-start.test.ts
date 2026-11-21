@@ -8,7 +8,7 @@
 //   node test/extension.test.ts
 
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { createHash } from "node:crypto"
@@ -21,27 +21,8 @@ import type {
   SessionContext,
 } from "./types.ts"
 import { handler, specOf, ext, workdir, repo, writeAgentMd, childSystemPrompt } from "./harness.ts"
-import { described, helperBin } from "./support.ts"
+import "./support.ts"
 
-// Cases that execute the helper for real need a kernel that can enforce the
-// sandbox. With the stub there is nothing to enforce, so those parts are skipped
-// instead of asserting on the stub's silence.
-if (described()?.landlock?.supported) {
-  process.env.PI_SUBAGENTS_EXTEND_HELPER = helperBin()
-} else {
-  const stubDir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-stub-"))
-  const stub = join(stubDir, "pi-subagents-extend-helper")
-  writeFileSync(
-    stub,
-    `#!/bin/sh\nprintf '%s\\n' '{"landlock":{"kernel_abi":7,"required_abi":7,"supported":true,"reason":null},"network_namespace":true,"resolver_sockets":[]}'\n`,
-  )
-  chmodSync(stub, 0o755)
-  process.env.PI_SUBAGENTS_EXTEND_HELPER = stub
-  console.log(
-    `  note  kernel Landlock ABI ${described()?.landlock?.kernel_abi ?? "unknown"} is below the required 7;` +
-      " the suite runs against a stub helper that reports ABI 7",
-  )
-}
 
 /**
  * The documented dispatch payload nests policy under `permissions`. Most cases in this suite

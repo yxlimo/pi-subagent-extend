@@ -5,9 +5,10 @@
 // 两个套件若在同一个进程里先后导入本模块，ESM 的模块缓存让这里的顶层代码只执行一次：
 // 不会建第二个状态目录，也不会重复注册 exit 与信号处理器。
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { join } from "node:path"
+import { tmpdir } from "node:os"
 import { repo } from "./harness.ts"
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
@@ -96,4 +97,23 @@ export function described(): HelperDescription | undefined {
     descriptionResolved = true
   }
   return resolvedDescription
+}
+// Cases that execute the helper for real need a kernel that can enforce the
+// sandbox. With the stub there is nothing to enforce, so those parts are skipped
+// instead of asserting on the stub's silence.
+if (described()?.landlock?.supported) {
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = helperBin()
+} else {
+  const stubDir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-stub-"))
+  const stub = join(stubDir, "pi-subagents-extend-helper")
+  writeFileSync(
+    stub,
+    `#!/bin/sh\nprintf '%s\\n' '{"landlock":{"kernel_abi":7,"required_abi":7,"supported":true,"reason":null},"network_namespace":true,"resolver_sockets":[]}'\n`,
+  )
+  chmodSync(stub, 0o755)
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = stub
+  console.log(
+    `  note  kernel Landlock ABI ${described()?.landlock?.kernel_abi ?? "unknown"} is below the required 7;` +
+      " the suite runs against a stub helper that reports ABI 7",
+  )
 }
