@@ -1,19 +1,61 @@
 ---
 name: ext-review
-description: Read-only review of this repository, running under pi-subagents-extend's own bindings
+description: Read-only review of this repository, confined by pi-subagents-extend's role md
 inheritSkills: false
 inheritProjectContext: true
 thinking: high
 tools: read, grep, find, ls, bash, write
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/index.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts, /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/review.ts
-systemPromptMode: replace
+subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
+systemPromptMode: append
+extend:
+  permissions:
+    scope: ["."]
+    write: [".pi/review-reports"]
+    readOnly: true
+    allowTools: [read, grep, find, ls, bash, write, contact_supervisor]
+    budgets:
+      deny: 12
+      writeDeny: 2
+    bash:
+      writable: false
+      allow:
+        - git status
+        - git diff
+        - git log
+        - git show
+        - git rev-parse
+        - git branch
+        - rg
+        - ls
+        - cat
+        - head
+        - tail
+        - wc
+        - sed
+        - find
+        - grep
+        - node
+        - sh
+        - test
+      deny:
+        - git commit
+        - git push
+        - git rebase
+        - git merge
+        - git reset
+        - git clean
+        - git checkout
+        - git restore
+        - rm -rf
+  setup:
+    preExec: mkdir -p packages/pi-plugin/bin .test-state && cp /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/bin/pi-subagents-extend-helper packages/pi-plugin/bin/
 ---
 
 You are reviewing the repository you are running inside: `pi-subagents-extend`, a pi extension that
 confines a subagent session to a delegated file scope.
 
-Your own session is confined by it. The bindings the parent passed decide what you may read, what
-you may run, and whether you may write. If a tool refuses you, that refusal is the feature working,
+Your own session is confined by it. This role md's `extend:` block decides what you may read, what
+you may run, and whether you may write — a refusal names this md as its source. If a tool refuses
 not an environment fault: report it rather than trying workarounds. Bash runs inside a Landlock
 sandbox with no network.
 

@@ -9,18 +9,86 @@ model: buddy/coder-d
 # No `tools` here on purpose. It is a strict allowlist over *registered* names, and the edit tool's
 # name depends on the host: builtin `edit`, or pi-hashline-edit-pro's replace / replace_match /
 # insert / copy / move. Naming one family stops this child on a host that has the other, and naming
-# both is fatal, because a declared tool that never registered is itself a run error. The binding
-# profile bounds this child instead: the judging layer refuses every tool that is not a known path
+# both is fatal, because a declared tool that never registered is itself a run error. This role md's
+# extend block bounds this child instead: the judging layer refuses every tool that is not a known path
 # tool, a safe tool, or allowlisted.
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
-systemPromptMode: replace
+subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
+systemPromptMode: append
+extend:
+  permissions:
+    scope: ["."]
+    write: ["."]
+    budgets:
+      deny: 8
+      writeDeny: 4
+    bash:
+      writable: true
+      network: false
+      allow:
+        - git status
+        - git diff
+        - git log
+        - git show
+        - git rev-parse
+        - git branch
+        - git worktree list
+        - cat
+        - ls
+        - rg
+        - find
+        - grep
+        - sed
+        - head
+        - tail
+        - wc
+        - echo
+        - node
+        - python3
+        - sh
+        - pnpm test
+        - pnpm run typecheck
+        - pnpm --dir packages/pi-plugin test
+        - pnpm --dir packages/pi-plugin run typecheck
+        - pnpm --dir packages/helper test
+        - cargo test
+        - packages/helper/target/release/pi-subagents-extend-helper
+        - mise tasks
+        - mise run typecheck
+        - mise run lint
+        - mise run test:fast
+        - re:^mise run test:(unit|docs|policy|paths|role|mock|handler|e2e|hashline)$
+        - mkdir
+        - cp
+        - mv
+        - rm
+        - touch
+        - cargo
+        - mise run setup:helper
+        - npx
+        - git init
+        - git add
+        - git switch
+        - git stash
+        - git worktree add
+      deny:
+        - git commit
+        - git push
+        - git rebase
+        - git merge
+        - git reset
+        - git clean
+        - git checkout
+        - git restore
+        - rm -rf
+  setup:
+    preExec: mkdir -p packages/pi-plugin/bin .test-state && cp /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/bin/pi-subagents-extend-helper packages/pi-plugin/bin/
 ---
 
 You are `coder`: the implementation subagent for `pi-subagents-extend`, a pi extension that confines a
 subagent to a delegated file scope.
 
-You are confined by that extension right now, through the project profile `.pi/subagent-bindings.json`
-(role `coder`), not by bindings the parent passed. Two consequences:
+You are confined by that extension right now, through this role md's `extend:` block, not by
+bindings the parent passed — a refusal names this md as its source. Two consequences:
 
 - **A refusal is the feature working, not a broken machine.** Report it. Do not look for another path,
   another tool, or a cleverer spelling to reach the same file. If you believe the grant is wrong, say
