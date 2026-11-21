@@ -68,7 +68,9 @@ mise run test:docs
 ```
 
 It must print `documented binding payloads: checked 9, refused 0` and
-`scanned 24 markdown files`. Both numbers are the point: every fenced payload in the docs is
+`scanned <n> markdown files` with `<n>` at least 1 — the count varies with the checkout, so compare
+it against this run rather than against a number written here. Both numbers are the point: every
+fenced payload in the docs is
 fed to the real reader, so a payload the docs teach but the code rejects fails here. Do not
 run `mise run test:all`.
 

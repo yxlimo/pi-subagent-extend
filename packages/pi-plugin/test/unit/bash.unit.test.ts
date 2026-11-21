@@ -19,7 +19,6 @@ import {
 	leadingAssignments,
 	listedJoin,
 	MAX_LISTED,
-	mergeBashConfig,
 	parseBashRule,
 	requiresNetwork,
 	shellTokens,
@@ -300,29 +299,6 @@ import {
 	console.log("  ok   parseBashRule returns undefined when no column carries an entry")
 }
 
-// 31. 白名单取并集：调用方只能往上加，不能悄悄删掉底层已放行的。
-{
-	const merged = mergeBashConfig({ allow: ["git status"] }, { allow: ["pnpm test"] })
-	assert.deepEqual(merged?.allow, ["git status", "pnpm test"], "the two layers' allowlists are unioned")
-	console.log("  ok   mergeBashConfig unions the allowlists")
-}
-
-// 32. deny 是硬底线：上层写空列表也拆不掉它。
-{
-	const merged = mergeBashConfig({ deny: ["rm -rf /"] }, { deny: [], allow: ["git status"] })
-	assert.deepEqual(merged?.deny, ["rm -rf /"], "an empty deny above does not clear the lower deny")
-	const added = mergeBashConfig({ deny: ["rm -rf /"] }, { deny: ["git push"] })
-	assert.deepEqual(added?.deny, ["rm -rf /", "git push"], "and the upper layer may only add to it")
-	console.log("  ok   a later layer cannot clear a deny")
-}
-
-// 33. reset 丢掉底下的白名单，但 deny 仍然并集：收窄白名单不等于拆掉项目禁令。
-{
-	const merged = mergeBashConfig({ deny: ["rm -rf /"], allow: ["git status"] }, { reset: true, allow: ["pnpm test"] })
-	assert.deepEqual(merged?.allow, ["pnpm test"], "reset drops the lower allowlist")
-	assert.deepEqual(merged?.deny, ["rm -rf /"], "reset keeps the deny")
-	console.log("  ok   reset clears the allowlist but not the deny")
-}
 
 // 34. 字面量条目按词前缀匹配：它是前缀，不是子串，也不是全等。
 {

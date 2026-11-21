@@ -14,7 +14,6 @@ extend:
     scope: ["."]
     write:
       - packages/pi-plugin/src/policy/glob.ts
-      - packages/pi-plugin/src/policy/merge.ts
       - packages/pi-plugin/src/policy/payload.ts
       - packages/pi-plugin/src/policy.ts
       - packages/pi-plugin/test/policy.test.ts
