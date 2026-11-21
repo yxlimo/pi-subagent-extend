@@ -237,6 +237,45 @@ Rules:
 - When the profile cannot be read, everything is refused; it does not fall back to no restriction.
 - The main session does not load these loaders, so the main agent is not locked down by accident.
 - **`worktree: true` is a dispatch default, not a permission.** It applies to `subagent` and to the nested `subagent_launch` pi-subagents sends before workflow children, so `tasks[]`, `chain` and script workflows get the same treatment. A call that says `worktree: false` keeps its shared working tree: the fill is `??=`, so only a missing or `null` value becomes `true`. No call is refused and no deny budget is charged for this.
+## Area roles: one md per code area, policy inside the md
+
+When the code is split into areas, give each area its own agent definition and keep the policy
+there — `.pi/agents/coder-<area>.md` — instead of adding a key per area to
+`.pi/subagent-bindings.json`. Dispatch then needs only `agent`, `model` and `task`, and one file
+holds the area's write grant, its allowlist, its budget and the one command that decides the work.
+
+The mechanism: the extension is loaded by a loader that passes **no** profile name
+(`.pi/agent-profiles/md-role.ts`, which is just `export default activate`). The policy then comes
+from the role md's `extend.permissions`, because the reader recomputes the policy from the merged
+fields — a md that supplies `scope` produces an active policy with no bindings entry at all.
+
+What bites, in the order it bit here:
+
+- **`systemPromptMode: append`, not `replace`.** `replace` drops the `<active_agent>` tag; identity
+  then falls back to matching the md body against the prompt, and when identity is not resolved the
+  policy stays inactive — **fail open**, not fail closed. A role md whose body is empty can never
+  be identified.
+- **`write` entries are relative to the session cwd, which is the worktree root.** Write
+  `packages/pi-plugin/src/paths.ts`, never `src/paths.ts`: the short spelling matches nothing, so
+  *every* write is refused and it reads exactly like the area boundary working correctly.
+- **The grant is an exact file list.** A new file is refused even inside the area. Grant a directory
+  (e.g. `packages/pi-plugin/test`) for areas that legitimately add files.
+- **A fresh worktree has no sandbox helper.** `packages/pi-plugin/bin` is gitignored and
+  `mise run setup:helper` cannot create it once the sandbox is up, so a gate that needs the helper
+  dies before its first case. `extend.setup.preExec` runs **unsandboxed** at session start; use it
+  to copy the prebuilt helper in and to create the scratch directory:
+  `mkdir -p packages/pi-plugin/bin .test-state && cp <main-checkout>/packages/pi-plugin/bin/… packages/pi-plugin/bin/`.
+- **Local green does not prove sandbox green.** Anything that falls back to a working path outside
+  the sandbox (the harness falls back to a package-local scratch directory when `.test-state` is
+  absent) passes locally and fails in a child. Verify a role by dispatching to it and reading what
+  it measured, not by running the gate yourself.
+- `mise run test:all` is deliberately not in any area's allowlist: the parent runs the full set
+  before merging. Give each area the narrowest task that covers it, and state its case count in the
+  md — a count that moves is a case copied or lost.
+
+`setup` and `output` are role contract, not dispatch input: a dispatch that supplies them is
+warned about and ignored, because a caller must not be able to install a dependency or move a
+deliverable.
 
 ## bash in a worktree
 
