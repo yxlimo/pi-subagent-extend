@@ -6,6 +6,8 @@ node_modules/
 # 测试夹具：有的必须建在包目录里（落在 /tmp 下的写授权会被沙箱的私有 tmpfs 盖掉），
 # 按名忽略，别让它们出现在 git status 或被 `git add -A` 卷进补丁。
 packages/pi-plugin/.test-*
+# 沙箱里可写的 scratch 根：preExec 在工作树根建它，harness 在里面建每次运行的目录
+.test-state/
 # 内部文档：开发日志、实测记录，不对外
 docs/internal/
 # review 角色的报告落在仓库内（/tmp 在沙箱里是不可写的私有 tmpfs）
