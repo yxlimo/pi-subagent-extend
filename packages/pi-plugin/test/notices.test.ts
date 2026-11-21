@@ -616,3 +616,25 @@ function unreachableEntries(entries: string[], cwd: string): UnreachableEntry[] 
 	rmSync(tree, { recursive: true, force: true })
 	console.log("  ok   注解只按命令自身是否需要 manifest 归因；bun 的旗标值与 dlx 也认")
 }
+
+// 156. 拒绝提示不能静默丢掉 re: 正则条目：同首 token 的字面条照列，但还得点明另有正则
+//      条目可能放行 —— 否则子代理只看到三个「mise」字面条，以为这个程序没被允许，
+//      却不知道有一条它看不到的正则兜底，于是照着字面条改参数再撞一次。
+{
+	const notices = (await import(join(repo, "src", "notices.ts"))) as unknown as {
+		headEntriesHint: (rule: unknown, command: string, cwd: string) => string
+	}
+	const match = (await import(join(repo, "src", "bash-match.ts"))) as unknown as {
+		parseBashRule: (raw: unknown) => unknown
+	}
+	const rule = match.parseBashRule({ read: ["mise run typecheck", "re:^mise run test:(paths|policy)$"] })
+	const hint = notices.headEntriesHint(rule, "mise run test:all", workdir)
+	assert.match(hint, /mise run typecheck/, "the literal same-program entry is still listed")
+	assert.match(hint, /plus 1 regex entry/, "the hint says a regex entry may also match")
+	// 复数与「没有字面条时仍给提示」：只有正则条目时 listed 读 none，后缀照给。
+	const regexOnly = match.parseBashRule({ read: ["re:^mise run test:(paths|policy)$", "re:^mise run lint$"] })
+	const regexHint = notices.headEntriesHint(regexOnly, "mise run test:all", workdir)
+	assert.match(regexHint, /plus 2 regex entries/, "the plural form counts every regex entry")
+	assert.match(regexHint, /: none \(plus 2 regex entries/, "with no literal siblings the hint still reports the regex entries")
+	console.log("  ok   拒绝提示点明 re: 正则条目：字面条照列，正则条目计数（含复数与无字面条时）")
+}
