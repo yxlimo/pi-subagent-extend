@@ -157,10 +157,12 @@ export function headEntriesHint(rule: BashRule, command: string, cwd: string): s
 	// 会算成 `HOME=/tmp/x`，与白名单里的 `pnpm` 对不上。
 	const head = firstToken(leadingAssignments(command).rest);
 	if (!head) return "";
-	const siblings = allEntries(rule)
-		.filter((entry) => !entry.startsWith("re:") && firstToken(entry) === head)
-		.slice(0, 3);
-	if (siblings.length === 0) return "";
+	const mine = allEntries(rule).filter((entry) => entry.startsWith("re:") ? false : firstToken(entry) === head);
+	// 正则条目无法按首 token 归到某一组，但又确实可能是唯一放行这条命令的条目：只数不列，
+	// 否则既可能很长，也可能让子代理以为「列出的都对不上 = 这个程序没被允许」。
+	const patterns = allEntries(rule).filter((entry) => entry.startsWith("re:")).length;
+	const siblings = mine.slice(0, 3);
+	if (siblings.length === 0 && patterns === 0) return "";
 	const unreachable = unreachableEntries(allEntries(rule), cwd);
 	const details = siblings.map((entry) => {
 		const bad = unreachable.find((item) => item.entry === entry);
@@ -172,7 +174,9 @@ export function headEntriesHint(rule: BashRule, command: string, cwd: string): s
 	// 东西，所以它的改法也写进去。
 	const own = unreachableEntries([command], cwd)[0];
 	const ownFix = own?.fix ? `; run it as: ${own.fix}` : "";
-	return ` — entries for \`${head}\`: ${details.join(", ")}; a prefix entry matches only if the command starts with it word for word, and there is no \`cd\` — commands run in ${cwd}${ownFix}`;
+	const listed = details.length > 0 ? details.join(", ") : "none";
+	const other = patterns > 0 ? ` (plus ${patterns} regex ${patterns === 1 ? "entry" : "entries"} that may match anything, not evaluated here)` : "";
+	return ` — entries for \`${head}\`: ${listed}${other}; a prefix entry matches only if the command starts with it word for word, and there is no \`cd\` — commands run in ${cwd}${ownFix}`;
 }
 
 /**
