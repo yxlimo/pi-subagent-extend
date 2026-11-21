@@ -29,6 +29,8 @@ import type {
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, "..")
+// Worktree root: three levels above this test directory (`<worktree>/packages/pi-plugin/test`).
+const repoRoot = join(here, "..", "..", "..")
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
@@ -41,14 +43,15 @@ const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
 // Inside a sandboxed child the package directory is not a write grant, so every
 // suite here dies with `EACCES: mkdtemp` before its first case. The parent's
 // session setup provides `<repo-root>/.test-state` for us to create in (the
-// `mkdir -p … .test-state` preExec creates it at the worktree root, one level
-// above `repo`). Probe it by creating, not with `accessSync(W_OK)` — a Landlock
+// `mkdir -p … .test-state` preExec creates it at the worktree root — three
+// levels above this test directory, two above the package dir). Probe it by
+// creating, not with `accessSync(W_OK)` — a Landlock
 // denial is invisible to an access check, so a try/catch around the first
 // mkdtempSync is the honest test. Without that directory (a plain local
 // `mise run …`) the probe fails with ENOENT and today's layout is unchanged.
 let testState: string
 try {
-  testState = mkdtempSync(join(repo, "..", ".test-state", "run-"))
+  testState = mkdtempSync(join(repoRoot, ".test-state", "run-"))
 } catch {
   testState = mkdtempSync(join(repo, ".test-state-"))
 }
