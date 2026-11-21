@@ -31,6 +31,13 @@ before it — no module imports `index.ts`, which is what keeps the layers one-w
 | Module | What it owns |
 | --- | --- |
 | `wiring/context.ts` | the session state and the three functions that mutate it (`stop`, `armProbe`, `applyRoleBaseline`) |
+| `bash-match.ts` | the barrel every caller imports: allow-list rules, merge semantics, the single command matcher |
+| `bash/tokens.ts` | quote-aware tokenizing, command segments, path candidates |
+| `bash/env.ts` | leading environment assignments; refuses a `PATH`/`IFS`/`LD_PRELOAD` redefinition |
+| `bash/programs.ts` | the read/write program tables, wrapper peeling, package-manager subcommand rules |
+| `bash/network.ts` | which commands need a round trip, with the local-query carve-out |
+| `bash/rules.ts` | rule parsing and merge, `classifyCommand`, the entry listing |
+| `bash/unreachable.ts` | the manifest walk that reports an entry no invocation can reach |
 | `policy.ts` | payload parsing, the merge semantics of profile and dispatch, globs |
 | `paths.ts` | real paths, working-tree versus scope comparison, hidden-grant reporting |
 | `dependencies.ts` | lockfile discovery, the dependency gate, scratch-directory probing |
@@ -370,7 +377,7 @@ that cannot start working. Both apply **only when the command actually failed** 
 *output* mentions `EACCES` is annotated: measured on a subagent running `git diff`, whose own patch
 contained such a string and came back carrying "this is outside the writes the parent granted".
 
-**Network commands are refused before they run.** With `bash.network` off, `requiresNetwork` in
+`bash.network` off, `requiresNetwork` in `src/bash/network.ts` names a fixed list of programs and subcommands that only make sense with a round
 `bash-match.ts` names a fixed list of programs and subcommands that only make sense with a round
 trip: `curl`, `wget`, the netcat family, `telnet`, `ssh`/`scp`/`sftp`, the DNS and host-reachability
 probes, `gh`, `docker pull|push|login`, `npm|pnpm|yarn publish`, and `git clone|fetch|pull|push|ls-remote`
