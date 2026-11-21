@@ -63,6 +63,14 @@ for f in packages/pi-plugin/test/paths.test.ts \
          packages/pi-plugin/test/bash-paths.test.ts; do node "$f" || exit 1; done
 """
 
+[tasks."test:sandbox"]
+description = "The sandbox itself: grants, Landlock reality, and a real bash session"
+depends = ["setup:helper"]
+run = """
+node packages/pi-plugin/test/sandbox.real.test.ts &&
+node packages/pi-plugin/test/e2e-bash.test.ts
+"""
+
 [tasks."test:handler"]
 description = "The tool_call / tool_result / session handlers: sandbox, budgets, notices, roles"
 depends = ["setup:helper"]
