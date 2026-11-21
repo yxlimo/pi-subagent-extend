@@ -91,7 +91,8 @@ The extension ships three skills, offered to the agent that loads it:
 | Document | Contents |
 | --- | --- |
 | [docs/usage.md](docs/usage.md) | the field reference, recommended scenarios, role defaults, and running without a parent agent |
-| [docs/architecture.md](docs/architecture.md) | the three entry points, the refusal model, probes, the denial budget, the hard stop |
+| [docs/architecture.md](docs/architecture.md) | the three entry points, how the code is divided, configuration sources, context isolation, role defaults |
+| [docs/architecture-refusals.md](docs/architecture-refusals.md) | the refusal model, the three write layers, probes, the denial budget, the hard stop |
 | [docs/sandbox.md](docs/sandbox.md) | what the helper does: Landlock, the namespaces, capabilities, and why offline means "no route out" |
 | [docs/worktrees.md](docs/worktrees.md) | the worktree setup hook, the `node_modules` link, and what a worktree run delivers |
 | [docs/testing.md](docs/testing.md) | the offline suites, the mock model, and the four CI legs |

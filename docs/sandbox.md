@@ -69,7 +69,7 @@ that directory has to be granted whole:
     it; in a worktree it cannot
 - `<cwd>/node_modules`, resolved through symlinks, because pnpm writes the shims in `.bin`
 - the artefact directories of the toolchains the project uses (see
-  [architecture](architecture.md#the-three-write-layers))
+  [architecture](architecture-refusals.md#the-three-write-layers))
 - `bash.writablePaths` entries, and the device nodes below
 - the temporary directories: the one the command itself uses (the host's `TMPDIR`, or a `TMPDIR`
   pinned through `bash.env`, `/tmp` when neither is set) and the conventional `/tmp`, which the

@@ -42,7 +42,7 @@ The namespace key never holds policy fields directly: a dispatch wraps them in `
 | `tools` | `permissions` | `object` | Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `access` is `read` or `write`; `path` names the argument holding the target path, or is `false` for a tool with no path argument (a write tool declared that way is always refused); `transferSource` (`read`/`write`) says how a two-file tool's **source** is judged — `copy` reads its source while `move` deletes from it, and the built-in defaults already say so. The path argument name is taken from the tool's own schema when omitted, so anchors-based tools usually need only `access`. A malformed entry refuses everything. |
 | `maxDenies` | `permissions` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
 | `maxWriteDenies` | `permissions` | `number` | The same budget for write refusals, which are counted separately; defaults to 2. |
-| `probe` | `permissions` | `object \| boolean` | Circles-and-collisions detection; see [probes](architecture.md#probes). |
+| `probe` | `permissions` | `object \| boolean` | Circles-and-collisions detection; see [probes](architecture-refusals.md#probes). |
 
 ### bash
 
@@ -63,7 +63,7 @@ The namespace key never holds policy fields directly: a dispatch wraps them in `
 
 How the extension judges read or write from a command in `bash.allow`: a program table plus argument predicates — git subcommands and their flags (`git branch -d` writes, `git tag -l` does not), `sed -i`, `find`'s `-delete`/`-exec`/`-fprint*` actions, package-manager subcommands (`pnpm list` reads; `config`, `store` and `version` are judged by their second token, so `npm version patch` writes), interpreters, and `xargs`. A `;`/`|`/`&&` chain is judged segment by segment, and any segment that writes makes the whole command a write. When the classifier cannot pin a command down — a git or package-manager global flag it does not know, or what an `xargs` will run — the command is judged as a write: with `bash.writable: false` it is refused before it runs, and the refusal counts against the write budget (`maxWriteDenies`, default 2; the second consecutive refusal carries a warning, the third stops the run). A program outside every table is judged a read: it runs, and because the sandbox always mounts `/tmp` and the device nodes writable, it can still write there — what it cannot do is write outside the granted set, and a failure of that kind is annotated with a note saying the extension could not tell that the program writes.
 
-Two limits are deliberate. The classifier does not interpret git config semantics: `git -c core.pager='rm x' log` is judged by its subcommand, `log`, and the sandbox bounds what such a command could write. And with the network off, `git push /some/local/path` and `nc -z localhost` are refused as network commands even though both could complete offline (see [architecture](architecture.md#what-a-refusal-adds)).
+Two limits are deliberate. The classifier does not interpret git config semantics: `git -c core.pager='rm x' log` is judged by its subcommand, `log`, and the sandbox bounds what such a command could write. And with the network off, `git push /some/local/path` and `nc -z localhost` are refused as network commands even though both could complete offline (see [architecture](architecture-refusals.md#what-a-refusal-adds)).
 
 ### What bash may read
 
