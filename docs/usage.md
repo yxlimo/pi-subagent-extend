@@ -174,7 +174,7 @@ The report is longer than a reply can carry, and a reviewer that cannot write ha
 {
   "scope": ["."],
   "readOnly": true,
-  "writeScope": ["/tmp/pi-review-reports"],
+  "writeScope": [".pi/review-reports"],
   "allowTools": ["read", "grep", "find", "ls", "bash", "write", "contact_supervisor"],
   "maxDenies": 12,
   "maxWriteDenies": 2,
@@ -258,7 +258,7 @@ extend:
   permissions:
     scope: ["."]
     readOnly: true
-    write: ["/tmp/pi-review-reports"]
+    write: [".pi/review-reports"]
     bash:
       deny: ["git push"]
 ---
@@ -325,7 +325,7 @@ as having no `bash` field at all.
 
 A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the role md carries
 one (`review`'s report directory is that shape): the read-only intent would otherwise be cancelled by
-a grant the dispatch never asked for. Add `"writeScope": ["/tmp/pi-review-reports"]` in the same
+a grant the dispatch never asked for. Add `"writeScope": [".pi/review-reports"]` in the same
 dispatch to keep "read-only except this one directory".
 
 When both layers are in play the refusal's `source:` names both —

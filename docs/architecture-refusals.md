@@ -149,7 +149,7 @@ entry is compared by prefix against the target's real path instead, so it can na
 the tree. That is deliberate rather than an exception to the rule — an absolute path is the parent
 naming a destination, and a subagent cannot construct one to escape with. It is how a read-only
 review is given exactly one file to write: `readOnly: true` together with
-`writeScope: ["/tmp/pi-review-reports"]`, plus `write` in `allowTools`. Without an explicit
+`writeScope: [".pi/review-reports"]`, plus `write` in `allowTools`. Without an explicit
 `writeScope`, `readOnly` still means no writes at all.
 
 The repeating-command criterion means "the same thing repeated **without progress**", so write

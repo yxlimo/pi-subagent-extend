@@ -66,7 +66,7 @@ network — is off until named. A reviewer, for example, reads the repository an
 report file:
 
 ```json
-{ "pi-subagents-extend/1": { "permissions": { "scope": ["."], "readOnly": true, "writeScope": ["/tmp/pi-review-reports"] } } }
+{ "pi-subagents-extend/1": { "permissions": { "scope": ["."], "readOnly": true, "writeScope": [".pi/review-reports"] } } }
 ```
 
 That report path reaches the `write` tool but not `bash`: the helper mounts a private tmpfs over

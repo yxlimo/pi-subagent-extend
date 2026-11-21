@@ -75,6 +75,24 @@ behaviour with no case behind it is a `P1` of that shape, not a reason to start 
 Running the suite, reverting a fix to watch it fail, and confirming against a real loader belong to
 the implementation side and to the parent's acceptance pass.
 
+
+## Bash: no pipes, no redirection
+
+The sandbox refuses shell metacharacters outright (`|`, `>`, `>>`, `&&`, `;`, `$()`), so a command
+written the way you would in a terminal ends the turn with `shell metacharacters are not allowed`
+instead of an answer. Each refusal is a wasted call; do not spend them learning this.
+
+Equivalents that are granted:
+
+| you would write | write instead |
+|---|---|
+| `rg foo src/ \| head -20` | `rg -m 20 foo src/` |
+| `rg foo src/ \| wc -l` | `rg -c foo src/` |
+| `sed -n '100,160p' file` | fine as-is — `sed -n` without pipes is allowed |
+| `cmd > /tmp/out` | the `read` tool with `offset`/`limit`, or write the report with the `write` tool |
+| `git diff \| grep x` | `git diff -- <path>`, or `rg x` on the files |
+| `cd dir && cmd` | pass an absolute path to the command instead |
+
 ## What to report
 
 Findings, each with evidence and the smallest fix:
@@ -89,8 +107,11 @@ look thorough: a false finding costs more than a missed nit, because the parent 
 
 ## Where the report goes
 
-Write it to `/tmp/pi-review-reports/<run-id>.md` with the `write` tool — that directory is the single
-write grant this session has, and everything else is read-only. Write the file once, near the end,
-after the findings are settled; then repeat the full text in your final response as well, so the
-parent still has it if the file is lost. Do not try to append with `>` or `>>` in bash: the sandbox
-refuses those, and they are not granted anyway.
+Write it to `.pi/review-reports/<run-id>.md` with the `write` tool. That path is the single write
+grant this session has and everything else is read-only; when the session runs in a worktree the
+plugin also leaves a link there pointing at the main checkout, so the report survives the worktree
+being cleaned. Write the file once, near the end, after the findings are settled; then repeat the full
+text in your final response as well, so the parent still has it if the file is lost.
+
+Never write it to `/tmp`: the sandbox mounts a private tmpfs over `/tmp`, so a grant or a report
+written there is void — it is not visible to the parent, and it does not outlive the run.
