@@ -307,7 +307,11 @@ export async function wireAgentStart(w: Wiring, event: BeforeAgentStartEvent, ct
 				warning += `\npi-subagents-extend: a role md declares an extend block, but the prompt has no <active_agent> tag and no md body matched; systemPromptMode: replace drops the tag — use append (or keep the md body intact) so the role can be identified.`;
 			}
 			w.uiWarning?.(warning);
-			w.roleResolved = true;
+			// 这次发射没有身份（无标签、正文也无唯一命中）：不能在这里闩上
+			// roleResolved——会话重发且第二次带上 <active_agent> 标签时，角色 md 必须
+			// 仍然生效（preExec 也从未跑过，晚到的那次接线照跑一次）。落闩的只有两条
+			// 路：认出角色走完整接线（见本函数末尾），以及 md 坏掉的 denyAll 路径
+			// （坏 md 绝不静默降级成「无角色」，也不逐轮重试）。
 			return;
 		}
 		const file = resolveAgentFile(role, cwd, home);
