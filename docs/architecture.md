@@ -30,7 +30,7 @@ before it — no module imports `index.ts`, which is what keeps the layers one-w
 
 | Module | What it owns |
 | --- | --- |
-| `wiring/context.ts` | the session state and the three functions that mutate it (`stop`, `armProbe`, `applyRoleBaseline`) |
+| `wiring/context.ts` | the session state and the three functions that mutate it (`stop`, `armProbe`, `applyRoleBaseline` — which merges the role md with the dispatch payload) |
 | `bash-match.ts` | the barrel every caller imports: allow-list rules, merge semantics, the single command matcher |
 | `bash/tokens.ts` | quote-aware tokenizing, command segments, path candidates |
 | `bash/env.ts` | leading environment assignments; refuses a `PATH`/`IFS`/`LD_PRELOAD` redefinition |
@@ -48,8 +48,8 @@ before it — no module imports `index.ts`, which is what keeps the layers one-w
 | `role-config.ts` | role-md resolution, the `extend` block, identity from the prompt |
 | `deliverable.ts` | the main-checkout anchor and the deliverable link |
 | `context-scope.ts` | marker stripping and `.pi/main-only.md` injection |
-| `wiring/session-start.ts` | the role md read, the merge, the startup warnings, probe arming |
-| `wiring/agent-start.ts` | the child's prompt sections, deliverable wiring, `preExec`, the worktree decision |
+| `wiring/session-start.ts` | the startup warnings, probe arming |
+| `wiring/agent-start.ts` | the child's prompt sections, the role md read, deliverable wiring, `preExec`, the worktree decision |
 | `wiring/tool-call/paths.ts` | whether a path argument may be touched |
 | `wiring/tool-call/anchor.ts` | which file an anchor belongs to, from the sidecar |
 | `wiring/tool-call/judge.ts` | the tool_call gate chain, in order |
@@ -143,19 +143,18 @@ Merging runs over two layers, and the direction is one way: role md → dispatch
 | Layer | Source | Relation to the layer below |
 | --- | --- | --- |
 | role md | the role's `extend` block in `.pi/agents/<role>.md` | the role's default |
-| dispatch | `extensionBindings` of one call | appends to the role |
+| dispatch | `extensionBindings` of one call | the dispatch's values for the fields it names; the fields it omits keep the role's default |
 
-Rules per field — never one layer over another:
+Rules per field — a field the dispatch names wins, a field it omits is filled from the md:
 
-- **union** — `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths`. The base
-  entries come first and the call's are appended, so a dispatch adds an authorisation instead of
-  restating the list, and cannot drop one it did not name. For `bash.read` / `bash.write` /
-  `bash.allow`, an **explicitly empty array in the dispatch** is a different instruction: it
-  empties that column rather than adding nothing. Reading `"read": []` as "add zero entries" left
-  the role md's whole allowlist in place, so a dispatch that meant to close bash kept the grant.
-  `bash.write` and `bash.allow` merge as one column (emptying either empties both) while meaning
-  different things: `write` grants write, `allow` leaves the read/write judgement to the extension.
-  `allowTools` and `bash.writablePaths` have no empty-list form; `reset: true` clears the former.
+- **replaced** — `allowTools`, `bash.read`, `bash.write`, `bash.allow`, `bash.writablePaths`. A
+  field the dispatch names replaces the role md's list; a field it omits is filled from the md.
+  These are grants, so a caller narrowing them is legitimate — a dispatch is made tighter than its
+  role simply by writing a shorter list. For these columns an **explicitly empty array in the
+  dispatch** is a different instruction: it empties that column rather than adding nothing.
+  Reading `"read": []` as "add zero entries" left the role md's whole allowlist in place, so a
+  dispatch that meant to close bash kept the grant. `bash.write` and `bash.allow` are separate
+  columns: `write` grants write, `allow` leaves the read/write judgement to the extension.
 - **union, hard floor** — `bash.deny`: **no caller can relax it**. That is what makes a project's
   structural prohibition different from an ordinary allowlist.
 - **replaced** — `scope`, `writeScope`. A task range has to be able to be *narrower* than the role
@@ -169,11 +168,6 @@ Rules per field — never one layer over another:
   dispatch's read-only intent, because the merged config then had an "explicit" write scope and
   explicit scope wins. Naming a `writeScope` in the same layer still expresses "read-only plus this
   one directory".
-- `reset: true` on a layer drops what it inherited — `bash.read` / `bash.write` / `bash.allow` **and**
-  `allowTools` — before the layer's own lists are applied: "only these entries this time". A dispatch
-  uses it to be tighter than its role md. `bash.deny` is still unioned, so narrowing an
-  allowlist never lifts a prohibition. `bash.reset: true` is the same for the bash columns alone (no
-  `allowTools`) and stays for callers that only mean the commands.
 - A `bash` written as anything but an object is not ignored: the merged `bash` is empty, so bash is
   refused. Field-by-field merging made a broken layer fall through to the role md's whole
   allowlist — a typo kept every grant, the opposite of what a broken grant should do.
@@ -183,8 +177,10 @@ Rules per field — never one layer over another:
 - A role md may omit `scope`, since a role does not know a task's paths. File access is then
   refused entirely while the bash allowlist still applies, so a forgotten binding fails loudly on
   the first read instead of silently permitting everything.
-- A role md that cannot be read — missing file, malformed `extend` block — results in deny-all
-  rather than no restriction.
+- A role md that exists but cannot be parsed, or whose `extend` block is invalid, results in
+  deny-all rather than no restriction. A role with **no md at all** is different, and deliberately
+  so: it leaves the policy unchanged — the builtin agents (`worker`, `scout`, `delegate`) have no
+  role md, so a missing md cannot be treated as an error.
 
 The main session never loads the role md, so project defaults cannot lock it down by accident.
 

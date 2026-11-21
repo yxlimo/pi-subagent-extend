@@ -84,7 +84,9 @@ for f in packages/pi-plugin/test/extension.test.ts \
          packages/pi-plugin/test/notices.test.ts \
          packages/pi-plugin/test/session-start.test.ts \
          packages/pi-plugin/test/sandbox.real.test.ts \
-         packages/pi-plugin/test/annotations.test.ts; do node "$f" || exit 1; done
+         packages/pi-plugin/test/annotations.test.ts \
+         packages/pi-plugin/test/notices-hints.test.ts \
+         packages/pi-plugin/test/session-start-roles.test.ts; do node "$f" || exit 1; done
 """
 
 [tasks."test:role"]

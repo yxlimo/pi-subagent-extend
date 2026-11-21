@@ -36,6 +36,7 @@ extend:
       - packages/pi-plugin/test/extension-writable.test.ts
       - packages/pi-plugin/test/extension-dependencies.test.ts
       - packages/pi-plugin/test/extension-commands.test.ts
+      - packages/pi-plugin/test/extension-judge.test.ts
       - packages/pi-plugin/test/session-start-roles.test.ts
       - packages/pi-plugin/test/session-start-worktree.test.ts
       - packages/pi-plugin/test/session-start-warnings.test.ts

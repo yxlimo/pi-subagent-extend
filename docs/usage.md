@@ -36,8 +36,7 @@ The namespace key never holds policy fields directly: a dispatch wraps them in `
 | `writeScope` | `permissions` | `string[]` | Globs describing what a write tool may touch (`edit`/`write`, or the host's anchored-editing family: `replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`). Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
 | `readOnly` | `permissions` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. A **dispatch** that sets this without its own `writeScope` is read-only even when the role md carries one (`review`'s report directory is the shape): the dispatch's intent wins. Name a `writeScope` in the same layer to keep "read-only except this one file". |
 | `maxReads` | `permissions` | `number` | Cap on successful reads. |
-| `allowTools` | `permissions` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. Unioned with the role md's list; `reset: true` (below) drops that list so a dispatch can be narrower than its role. |
-| `reset` | `permissions` | `boolean` | On a layer that has one below it (the dispatch over the role md): "only these entries this time". Clears the lower layer's `bash.read` / `bash.write` / `bash.allow` **and** its `allowTools` before this layer's own lists are applied, so both a command allowlist and a tool allowlist can be made tighter than the layer below. `bash.deny` is not cleared. `bash.reset` is the same thing for the bash columns alone. See [Role defaults](#role-defaults). |
+| `allowTools` | `permissions` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. A dispatch naming it replaces the role md's list; an omitted field is filled from the role md. |
 | `worktree` | dispatch (sibling of `permissions`) | `boolean` | Optional, defaults to `false`. When `true`, a `subagent` or nested `subagent_launch` call whose `agent` resolves to this strategy gets `worktree: true` filled in if the caller did not supply one (`??=`: `null` and `undefined` count as absent; an explicit `false` wins). This is a default, not a grant: no call is refused and neither deny budget changes. No resolvable strategy means no fill. |
 | `tools` | `permissions` | `object` | Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `access` is `read` or `write`; `path` names the argument holding the target path, or is `false` for a tool with no path argument (a write tool declared that way is always refused); `transferSource` (`read`/`write`) says how a two-file tool's **source** is judged — `copy` reads its source while `move` deletes from it, and the built-in defaults already say so. The path argument name is taken from the tool's own schema when omitted, so anchors-based tools usually need only `access`. A malformed entry refuses everything. |
 | `maxDenies` | `permissions` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
@@ -50,13 +49,12 @@ The namespace key never holds policy fields directly: a dispatch wraps them in `
 | --- | --- | --- |
 | `bash.allow` | `string[]` | The allowlist column. It answers only *may this command run here*; whether the command reads or writes is judged from the command itself (see below). Matching is per token as a prefix, or `re:` regexes (which see the command exactly as written). |
 | `bash.read` / `bash.write` | `string[]` | Legacy columns, kept with their exact old meaning: a `read` entry grants read-only, a `write` entry grants write. Matching is per token as a prefix, or `re:` regexes (which see the command exactly as written). A leading `NAME=value` assignment is stripped before matching — `HOME=/tmp/x node a.ts` matches an entry `node` — so an entry must start with the program name: `HOME=/tmp node` is a rule that can never fire. Names that change which program runs or load code into it (`LD_*`, `NODE_*`, `GIT_*`, `PYTHON*`, `PATH`, `IFS`, `PAGER`, `BASH_ENV`, …) are refused instead, because they would turn an allowlisted command into arbitrary code. A config that spells them gets one migration warning per source; in an agent-md `permissions.bash` block they are rejected — that block takes only `allow`, `deny`, `writable` and `network`. |
-| `bash.reset` | `boolean` | Only meaningful on a layer that has one below it: drop that layer's `bash.read`, `bash.write` and `bash.allow` before this layer's lists are applied — "only these entries this time", so a task can be tighter than its role. `bash.deny` is not dropped. The top-level `reset` does the same and also clears `allowTools`; see [Role defaults](#role-defaults). |
 | `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directories and `node_modules` are added, so `git add`/`commit` and an install work. Only scope entries that cover a whole subtree open a directory; file-level entries open just the files they match. In a linked worktree git's grant excludes `.git/hooks` and `.git/config`; in a plain checkout it cannot. This is the ceiling: `allow` never implies write, and with `writable: false` there is no write access at all — `writablePaths` entries are not granted, and the sandbox mounts nothing writable except `/tmp` and the device nodes. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
-| `bash.deny` | `string[]` | Commands no caller can re-allow. A role md's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one, and neither `reset` nor `bash.reset` lifts them. |
+| `bash.deny` | `string[]` | Commands no caller can re-allow. A role md's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one. |
 | `bash.dependencyGate` | `boolean \| string[]` | Defaults to `true`. Before a write-classified command or a package-manager invocation runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also show an install — `node_modules/.bin`, or `.pnp.cjs` for a Yarn PnP project; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. An array lists directory prefixes to skip, for a lockfile nobody installs — a `fixtures/` sample, a vendored example: a plain path covers that directory and everything below it (the same reading as a `scope` entry), resolved against the working directory, but the match stops at a path boundary, so `fixtures` does not cover `fixtures-old`. Entries are literal paths, not globs; a glob is named in the refusal rather than silently matching nothing. `[]` skips nothing, the same as `true`. `false` turns the check off. |
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. When set, the helper samples the CPU time of the whole command tree — it is PID 1 of a private PID namespace, so the tree is what `/proc` shows — and kills it once the tree has used **no** CPU for that many seconds, printing why and exiting `79`. The point is to separate a deadlock from a slow build, which a wall-clock limit cannot: a compiling tree gains CPU in every sample, a tree waiting on a lock, a socket, or an orphaned child gains none. Two limits to know before turning it on: a command that deliberately waits (`sleep 300`, a backoff loop) also uses no CPU and will be killed, and the helper cannot see output because stdio is inherited rather than piped, so "no output" cannot corroborate the reading. That is why nothing is armed by default — pick a number well above your slowest quiet gap between CPU bursts. The kill is annotated with `[sandbox]` in the result, saying a retry will stall the same way. |
 
@@ -278,17 +276,19 @@ Two layers, one direction — role md → dispatch:
 | Layer | Where it is written | What it does |
 | --- | --- | --- |
 | role md | the role's `extend` block in `.pi/agents/<role>.md` | the role's default: its write grant, its allowlist, its budget |
-| dispatch | the `extensionBindings` of one call | **adds to** the role's default |
+| dispatch | the `extensionBindings` of one call | the dispatch's values for the fields it names; the fields it omits keep the role md's default |
 
-A dispatch inherits the role md's defaults. Narrowing is the separate, explicit act described below
-(`reset: true`) — a dispatch cannot be made tighter just by writing a shorter list.
+A dispatch inherits the role md's defaults only in the fields it does not name. Naming a field
+replaces the md's list, so a dispatch is made tighter than its role simply by writing a shorter
+list — and `bash.deny` is the one field no dispatch can narrow.
 
-Merging is **per field** — never one layer replacing another — and the field list is the whole rule:
+Merging is **per field**: a field the dispatch names wins, a field it omits is filled from the
+role md, and the field list is the whole rule:
 
 | Category | Fields | Why |
 | --- | --- | --- |
-| **union** | `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths` | the role md's entries stay and the call's are appended (base first, duplicates dropped), so a dispatch can authorise one more command without restating the list it already has. An **empty array written in the dispatch** is not "add nothing" — it empties that column (see below), and `bash.write` / `bash.allow` are merged as one column, so emptying either empties both — the spellings no longer mean the same thing: a `write` entry grants write, an `allow` entry leaves the read/write judgement to the extension; `allowTools` has no empty-list form, `reset: true` is how that list is cleared |
-| **union, hard floor** | `bash.deny` | a deny entry is a restriction, not a grant, and no layer can lift one: "structurally forbidden" has to survive a dispatch that rewrites the allowlist |
+| **replaced** | `allowTools`, `bash.read`, `bash.write`, `bash.allow`, `bash.writablePaths` | a field the dispatch names replaces the role md's list; a field it omits is filled from the md. These are grants, so a caller narrowing them is legitimate — a dispatch is made tighter than its role simply by writing a shorter list. An **empty array written in the dispatch** is not "add nothing" — it empties that column (see below). `bash.write` and `bash.allow` are separate columns: a `write` entry grants write, an `allow` entry leaves the read/write judgement to the extension |
+| **union, hard floor** | `bash.deny` | a deny entry is a restriction, not a grant, and no layer can lift one: "structurally forbidden" has to survive a dispatch that rewrites the allowlist. That is why it is unioned while the grant fields are replaced: a restriction survives, a grant may be narrowed |
 | **replaced** | `scope`, `writeScope` | a task's range has to be able to be **narrower** than the role default. A union would grow file access on every dispatch — the wrong direction for the one field that decides what may be read, and it would make "narrower than the role" inexpressible |
 | **the call wins** | `readOnly`, `maxReads`, `maxDenies`, `maxWriteDenies`, `probe`, `tools`, `worktree`, `bash.writable`, `bash.network`, `bash.dependencyGate`, `bash.cpuStallSeconds`, `bash.scratchPaths` | these describe *this* task, so the dispatch's value is the value. `probe` and `tools` are replaced whole, not deep-merged. `bash.env` merges per variable name, the call winning on a collision |
 
@@ -296,16 +296,16 @@ Why `deny` can never be anything but a union: the role md's deny list is where a
 not happen at all (`git push`, `git reset`). If a call could replace it, every dispatch would have to
 restate the whole list, and the one that forgets silently opens the command.
 
-`reset: true` is how a layer says "only these entries this time" — the one way to be **narrower** than
-the layer below. It clears the role md's `bash.read` / `bash.write` / `bash.allow` **and** its
-`allowTools` before the dispatch's own lists are applied:
+`reset` (and `bash.reset`) is still accepted by the parser but **does nothing**: the merge step
+that gave the key its meaning is gone, so a dispatch carrying `reset: true` simply inherits the
+role md's lists. To narrow a dispatch, name the fields you want instead — a named field replaces
+the role md's list, an omitted field is filled from it:
 
 ```json
 {
   "pi-subagents-extend/1": {
     "permissions": {
       "scope": ["src/auth/**"],
-      "reset": true,
       "allowTools": ["read"],
       "bash": { "read": ["pnpm run typecheck"] }
     }
@@ -313,28 +313,15 @@ the layer below. It clears the role md's `bash.read` / `bash.write` / `bash.allo
 }
 ```
 
-That dispatch may run `pnpm run typecheck` and nothing else, and its `allowTools` is exactly `["read"]`
-rather than a union with the role's list, however many commands and tools that role md carries.
-`bash.reset: true` is the same thing for the bash columns alone — it does not touch `allowTools`. It
-predates the top-level key and still reads well beside `bash.read`.
-
-`bash.deny` is **not** reset by either key: the project's prohibitions still apply, which is the point
-of it being a floor rather than a default.
+That dispatch may run `pnpm run typecheck` and nothing else, and its `allowTools` is exactly
+`["read"]`, not a union with the role's list, however many commands and tools that role md carries.
 
 An explicit empty list is a third instruction, distinct from both "omitted" and "one more entry":
-`"read": []` says *this column is empty* and drops the column it inherited, while omitting `read`
-inherits it and `"read": ["x"]` appends to it. So `"bash": { "read": [], "write": [] }` turns bash off
-for a dispatch even when its role carries a long allowlist — writing the empty lists is how you say
-"none of it", and it is the same refusal as having no `bash` field at all.
-
-`bash.write` and `bash.allow` are merged **as one column, not as two keys**: emptying either of
-them empties the column, even when the other spelling is written in the same object. The two spellings
-answer different questions now: a `write` entry authorises the command as a write, an `allow` entry
-authorises it to run and the extension judges read or write from the command itself. `"allow": []` with
-`"write": ["git status"]` therefore drops a `write` the role md supplied and keeps only `git status`, and
-the mirror image behaves identically. Key-wise merging got this wrong: the same intent ("keep only this
-one") produced two different columns depending on which spelling the role md had used, which is the same
-silent retention the empty list exists to prevent, only harder to see.
+`"read": []` says *this column is empty* and replaces the column the role md supplied, while
+omitting `read` inherits it and `"read": ["x"]` replaces it with one entry. So
+`"bash": { "read": [], "write": [] }` turns bash off for a dispatch even when its role carries a
+long allowlist — writing the empty lists is how you say "none of it", and it is the same refusal
+as having no `bash` field at all.
 
 A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the role md carries
 one (`review`'s report directory is that shape): the read-only intent would otherwise be cancelled by
