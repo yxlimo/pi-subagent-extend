@@ -1,0 +1,20 @@
+# Case 4: a network command fails fast instead of hanging.
+# The child sandbox has no network (bare netns: packets are dropped, not
+# refused), so curl would hang forever if it were allowed to spawn. The
+# plugin refuses it pre-spawn by name (src/bash-match.ts requiresNetwork)
+# with "the network is off per the parent's bindings". The test asserts the
+# refusal wording and that the whole case finishes well under the session
+# timeout — a hang here is the failure mode this case exists for.
+name: bash-network
+sessions:
+  - name: bash-network
+    when:
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: bash
+              args:
+                command: "curl http://example.invalid/ping"
+      - reply:
+          text: "DONE"

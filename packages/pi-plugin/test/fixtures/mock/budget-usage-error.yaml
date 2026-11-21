@@ -1,0 +1,35 @@
+# 用法错误不消耗预算：read 带空 path 过得了宿主的参数校验（path 是 string，
+# 空串合法），到本层才是「缺目标」的用法错——deny 不计数。连撞 3 次
+# （超过 maxDenies: 1）之后，真授权拒绝必须还是警告档：计数器显示
+# "Refusal 1 in a row"，那个 1 就是「三次用法错误都没进预算」的直接证据。
+# 若实现把它们计了进去，第 2 次用法错误就已经硬停，后面两轮根本到不了。
+name: budget-usage-error
+sessions:
+  - name: main
+    when: {}
+    turns:
+      # 第 1-3 轮：用法错误（缺目标路径），不计数。
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: ""
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: ""
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: ""
+      # 第 4 轮：真授权拒绝（范围外读）→ 仍是警告（不计数所以还在第 1 次档）。
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: outside.md
+      # 第 5 轮：警告不是停机，本轮继续到收尾文本。
+      - reply:
+          text: "DONE"

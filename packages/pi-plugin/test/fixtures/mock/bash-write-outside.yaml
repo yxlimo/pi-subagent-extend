@@ -1,0 +1,19 @@
+# Case 2: a write outside the granted scope does not happen.
+# Same policy as bash-write-ok, but the command targets blocked/escape.md,
+# which exists as a directory on the host yet is not in the write grant. The
+# Landlock sandbox denies the open with EACCES, and the tool_result handler
+# appends the "[sandbox] ... outside the writes the parent granted" note. The
+# test asserts the file never lands and the result names the real mechanism.
+name: bash-write-outside
+sessions:
+  - name: bash-write-outside
+    when:
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: bash
+              args:
+                command: "cp seed.txt blocked/escape.md"
+      - reply:
+          text: "DONE"

@@ -1,0 +1,16 @@
+# 零配置对照：会话不挂任何 bindings，扩展对普通会话不做任何判定。
+# 模型读一个任何策略都会拒的路径（范围外文件），应当原样成功 ——
+# 没有这条对照，前面所有守卫用例都可能活在「什么都拒」的世界里。
+name: guards-zero-config
+sessions:
+  - name: session
+    # 单会话场景，没有第二个会话要分流：空 when 匹配任何对话。
+    when: {}
+    turns:
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: outside.md
+      - reply:
+          text: "DONE"

@@ -1,0 +1,38 @@
+# Legacy flat dispatch payload: the dispatch contract refuses it outright, so
+# even an in-scope read never happens and no file content leaks into the answer.
+name: dispatch-payload-flat
+sessions:
+  - name: parent
+    when:
+      # pi 的系统提示首句（实测自安装包）：父会话独有，子代理的提示词里没有这句。
+      # 实测：两端 pi 版本首句不同（1.4「expert coding assistant operating inside pi」、
+      # 1.5「a coding assistant running inside pi」），取共有的尾段才不会随版本翻车。
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: subagent
+              args:
+                agent: probe-scope
+                # 折行，避免超 80 列
+                task: >-
+                  Read in-scope.txt; quote it verbatim as the answer.
+                async: false
+                worktree: false
+                extensionBindings:
+                  pi-subagents-extend/1:
+                    scope:
+                      - in-scope.txt
+      - reply:
+          text: "Parent finished."
+  - name: child
+    when:
+      systemPromptContains: "probe-scope"
+    turns:
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: in-scope.txt
+      - reply:
+          text: "{{lastToolResult}}"

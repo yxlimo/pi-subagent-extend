@@ -1,0 +1,40 @@
+# Role md layer: extend.output.deliverable grants one real file in the main
+# checkout and injects a prompt section naming its short path. The child writes
+# that file and a neighbour; the neighbour is outside the one-file grant.
+name: role-deliverable
+sessions:
+  - name: parent
+    when:
+      # Shared tail of pi's system prompt across versions.
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: subagent
+              args:
+                agent: role-deliverable
+                task: >-
+                  Write role-report.md with DELIVERABLE-OK, then try writing
+                  other-report.md with FORBIDDEN. Report both results.
+                async: false
+                worktree: false
+      - reply:
+          text: "Parent finished."
+  - name: child
+    when:
+      systemPromptContains: "role-deliverable"
+    turns:
+      - reply:
+          calls:
+            - name: write
+              args:
+                path: role-report.md
+                content: DELIVERABLE-OK
+      - reply:
+          calls:
+            - name: write
+              args:
+                path: other-report.md
+                content: FORBIDDEN
+      - reply:
+          text: "{{toolResults}}"

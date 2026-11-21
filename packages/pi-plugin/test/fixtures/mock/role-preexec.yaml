@@ -1,0 +1,33 @@
+# Role md layer: extend.setup.preExec runs in the child cwd before the child
+# works. The child's first call reads the marker; the marker content can only
+# be there if preExec already ran, and exactly one line proves it ran once.
+name: role-preexec
+sessions:
+  - name: parent
+    when:
+      # Shared tail of pi's system prompt across versions.
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: subagent
+              args:
+                agent: role-preexec
+                task: >-
+                  Read preexec-marker.txt as your first tool call and
+                  quote it verbatim.
+                async: false
+                worktree: false
+      - reply:
+          text: "Parent finished."
+  - name: child
+    when:
+      systemPromptContains: "role-preexec"
+    turns:
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: preexec-marker.txt
+      - reply:
+          text: "{{toolResults}}"

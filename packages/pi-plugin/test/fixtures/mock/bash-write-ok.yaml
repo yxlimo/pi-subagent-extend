@@ -1,0 +1,20 @@
+# Case 1: an allowed write command really writes inside the granted scope.
+# The policy grants bash with write scope over the project's out/ subtree;
+# the scripted model runs `cp seed.txt out/ok.txt`. The test asserts the file
+# exists on the host with the seed's content, so a refusal reported as success
+# or a sandbox that silently drops the write fails here.
+name: bash-write-ok
+sessions:
+  - name: bash-write-ok
+    when:
+      # 父/子会话的公共判定串（与 dispatch-payload-wrapped.yaml 同源）：
+      # 本套件只起单会话，这个条件负责把会话钉到本 fixture。
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: bash
+              args:
+                command: "cp seed.txt out/ok.txt"
+      - reply:
+          text: "DONE"

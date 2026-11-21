@@ -1,0 +1,25 @@
+# deny 预算先警告后停机：maxDenies: 2 时实测节拍是
+#   第 1 次拒绝 = 平拒（还不到阈值，不带预算措辞）
+#   第 2 次 = 警告（"Refusal 2 in a row"，点名再撞一次就停）
+#   第 3 次 = 硬停（"criterion: denial budget"，之后 mock 不再收到请求）
+# DenyCounter 在第 maxDenies 次连续拒绝时给警告（deny-count.ts 的注释），停机在其后。
+name: budget-deny-warn
+sessions:
+  - name: main
+    when: {}
+    turns:
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: outside.md
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: outside.md
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: outside.md

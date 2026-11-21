@@ -21,6 +21,39 @@ pi's frontmatter has two fields that matter here: `subagentOnlyExtensions` (this
 subagents) and `extensions` (same, plus the session itself). Foreground subagents load only what
 is declared there; background subagents additionally load ambient extensions.
 
+## How the code is divided
+
+`src/index.ts` is the assembly layer: it reads the bindings once, creates the session
+state, and registers seven event handlers as one-line delegations. It holds no
+judgement of its own. Everything below depends only on `node:*` and the modules
+before it — no module imports `index.ts`, which is what keeps the layers one-way.
+
+| Module | What it owns |
+| --- | --- |
+| `wiring/context.ts` | the session state and the three functions that mutate it (`stop`, `armProbe`, `applyRoleBaseline`) |
+| `policy.ts` | payload parsing, the merge semantics of profile and dispatch, globs |
+| `paths.ts` | real paths, working-tree versus scope comparison, hidden-grant reporting |
+| `dependencies.ts` | lockfile discovery, the dependency gate, scratch-directory probing |
+| `budgets.ts` | the two refusal counters and their defaults |
+| `notices.ts` | what the extension says about a grant: unreachable entries, legacy columns, the compat layer |
+| `sandbox.ts` | the helper process, the granted path set, the spec written per call, command wrapping |
+| `probe.ts` | gateway probing and the classification of a failure body |
+| `role-config.ts` | role-md resolution, the `extend` block, identity from the prompt |
+| `deliverable.ts` | the main-checkout anchor and the deliverable link |
+| `context-scope.ts` | marker stripping and `.pi/main-only.md` injection |
+| `wiring/session-start.ts` | the profile read, the merge, the startup warnings, probe arming |
+| `wiring/agent-start.ts` | the child's prompt sections, deliverable wiring, `preExec`, the worktree decision |
+| `wiring/tool-call/paths.ts` | whether a path argument may be touched |
+| `wiring/tool-call/anchor.ts` | which file an anchor belongs to, from the sidecar |
+| `wiring/tool-call/judge.ts` | the tool_call gate chain, in order |
+| `wiring/tool-result.ts` | the annotations appended to a tool result |
+| `wiring/misc.ts` | resource discovery, shutdown, handoff notes |
+
+The order in `wiring/tool-call/judge.ts` is the semantics, not an implementation
+detail: safe tools pass before a stopped session blocks anything, configuration errors
+precede scope checks, and a refusal is charged to a budget only when more permission
+could have fixed it. A passing work call resets both counters; the three safe tools do
+not, so a child cannot stay in the warning tier by asking for help between probes.
 ## Configuration sources
 
 Two, and either can stand alone:

@@ -1,0 +1,37 @@
+# Role md layer: the agent md's extend.permissions is the only scope source.
+# The parent dispatch carries no extensionBindings, so the refusal must name
+# the role md itself. The same turn also reads one in-scope file, so a dead
+# binding that refuses everything cannot pass the refusal checks alone.
+name: role-scope
+sessions:
+  - name: parent
+    when:
+      # pi's system prompt first line varies by version; this tail is shared.
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: subagent
+              args:
+                agent: role-scope
+                task: >-
+                  Read outside/out-of-scope.txt and in-scope.txt;
+                  quote both verbatim.
+                async: false
+                worktree: false
+      - reply:
+          text: "Parent finished."
+  - name: child
+    when:
+      systemPromptContains: "role-scope"
+    turns:
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: outside/out-of-scope.txt
+            - name: read
+              args:
+                path: in-scope.txt
+      - reply:
+          text: "{{toolResults}}"

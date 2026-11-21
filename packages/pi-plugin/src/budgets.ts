@@ -1,4 +1,11 @@
 /**
+ * BUDGETS 层：拒绝预算 —— 连续拒绝对计数器与它的缺省值。计数器自己合成两类拒绝的出路
+ * 文案（授权不够去求援，写范围不够改回报告）；index.ts 只做接线。
+ * 模块拆分第五步：DenyCounter 从 deny-count.ts 原样搬入，缺省预算从 policy.ts 原样搬入，
+ * 行为不变；policy.ts 反过来从本模块导入缺省值，依赖方向无环。
+ */
+
+/**
  * 撞权限判据：连续被范围规则拒绝 maxDenies 次，多半是父代理的授权写错了，不是子代理
  * 走错了目录。计满后第一次给 warn 级拒绝（要求向父代理报告缺什么），再撞一次就停。
  */
@@ -76,3 +83,7 @@ export class DenyCounter {
 		return this.#limit > 0 ? `${this.#count}/${this.#limit}` : "off";
 	}
 }
+
+/** 撞权限的缺省预算；两处都要用，所以提出来。 */
+export const DEFAULT_MAX_DENIES = 5;
+export const DEFAULT_MAX_WRITE_DENIES = 2;

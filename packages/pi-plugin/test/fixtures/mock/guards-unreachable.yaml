@@ -1,0 +1,17 @@
+# 不可达授权：探针工程里没有 package.json（祖先目录也没有），bash.allow 里的
+# `pnpm test` 在会话工作目录下永远跑不起来。启动时应收到一条「这条授权永远
+# 命中不了」的报告；真跑这条命令失败时，工具结果里应补上点名条目、原因与
+# 出路的 [sandbox] 注解 —— 注解才是进模型上下文的那一份。
+name: guards-unreachable
+sessions:
+  - name: session
+    # 单会话场景，没有第二个会话要分流：空 when 匹配任何对话。
+    when: {}
+    turns:
+      - reply:
+          calls:
+            - name: bash
+              args:
+                command: pnpm test
+      - reply:
+          text: "DONE"

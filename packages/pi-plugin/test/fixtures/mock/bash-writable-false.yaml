@@ -1,0 +1,20 @@
+# Case 3: bash.writable: false refuses a write command before it spawns.
+# The command is in bash.allow (so the allowlist match succeeds) but the role
+# sets writable: false, which is a write ceiling: the plugin refuses it
+# pre-spawn with the "bash.writable: false gives no write access" write
+# refusal. The test asserts the refusal text and that the file the command
+# would have written — inside the very subtree case 1 writes successfully —
+# does not exist.
+name: bash-writable-false
+sessions:
+  - name: bash-writable-false
+    when:
+      systemPromptContains: "a coding agent harness"
+    turns:
+      - reply:
+          calls:
+            - name: bash
+              args:
+                command: "touch out/nope.txt"
+      - reply:
+          text: "DONE"

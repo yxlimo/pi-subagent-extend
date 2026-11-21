@@ -1,0 +1,26 @@
+# allowTools 双向闸门：名单内的 read 真执行，名单外的 subagent 被拒且拒因点名 allowTools。
+#
+# 三轮各一个调用（不混批）：放行的调用会把两类连续计数清零，混在同一批里时它和
+# 拒绝的先后取决于宿主的批内执行顺序，会把预算节拍变成不确定的东西——这里把
+# read 放在拒绝发生之前，计数器从 0 开始，节拍就只由拒绝次数决定。
+name: budget-allowtools
+sessions:
+  - name: main
+    when: {}
+    turns:
+      # 第 1 轮：名单内的 read（对照组：真执行，文件内容回到模型）。
+      - reply:
+          calls:
+            - name: read
+              args:
+                path: src/a.ts
+      # 第 2 轮：名单外的 subagent——第 1 次拒绝 = 预算警告。
+      - reply:
+          calls:
+            - name: subagent
+              args: {}
+      # 第 3 轮：重试同一个名单外工具——第 2 次拒绝 = 硬停，之后不再有下一轮。
+      - reply:
+          calls:
+            - name: subagent
+              args: {}
