@@ -1,0 +1,135 @@
+# 分级测试任务。
+#
+# 原则：改哪一部分就跑哪一部分，不要一条命令全量跑。全量只在合进 main 之前跑一次。
+# 需要沙箱 helper 的任务明确声明 depends，不需要的任务不碰 cargo —— 否则改一个纯测试
+# 文件的人会被迫先编译 Rust。
+
+# CARGO_TARGET_DIR is deliberately NOT set globally: a handler case runs `cargo test`
+# inside the sandbox and asserts it succeeds, and a target dir pointing at the main
+# checkout makes that command fail with a permission error instead.
+
+[tasks."setup:helper"]
+description = "Build the sandbox helper binary once"
+run = """
+if [ ! -x packages/pi-plugin/bin/pi-subagents-extend-helper ]; then
+  cargo build --release --manifest-path packages/helper/Cargo.toml --locked &&
+  mkdir -p packages/pi-plugin/bin &&
+  cp packages/helper/target/release/pi-subagents-extend-helper packages/pi-plugin/bin/
+fi
+"""
+sources = ["packages/helper/src/**/*.rs", "packages/helper/Cargo.toml"]
+outputs = ["packages/pi-plugin/bin/pi-subagents-extend-helper"]
+
+[tasks.lint]
+description = "ESLint the plugin"
+dir = "packages/pi-plugin"
+run = "pnpm exec eslint ."
+
+[tasks.typecheck]
+description = "Typecheck src and tests (strict: unused locals and parameters)"
+dir = "packages/pi-plugin"
+run = "pnpm exec tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters"
+
+# --- 不需要 helper 的区域：改这些文件不需要编译 Rust ---
+
+[tasks."test:unit"]
+description = "Pure-function unit tests for the policy, path and bash modules"
+run = """
+for f in packages/pi-plugin/test/unit/*.unit.test.ts; do node "$f" || exit 1; done
+"""
+
+[tasks."test:docs"]
+description = "Documented payloads, binding version consistency"
+run = """
+node packages/pi-plugin/test/doc-payload.test.ts &&
+node packages/pi-plugin/test/version-consistency.test.ts
+"""
+
+# --- 需要 helper 的区域 ---
+
+[tasks."test:policy"]
+description = "Scope, glob, merge and payload contract — through the handler"
+depends = ["setup:helper"]
+run = """
+for f in packages/pi-plugin/test/policy*.test.ts; do node "$f" || exit 1; done
+"""
+
+[tasks."test:paths"]
+description = "Path argument, anchors, bash path candidates"
+depends = ["setup:helper"]
+run = """
+for f in packages/pi-plugin/test/paths.test.ts \
+         packages/pi-plugin/test/anchors.test.ts \
+         packages/pi-plugin/test/bash-paths.test.ts; do node "$f" || exit 1; done
+"""
+
+[tasks."test:handler"]
+description = "The tool_call / tool_result / session handlers: sandbox, budgets, notices, roles"
+depends = ["setup:helper"]
+run = """
+for f in packages/pi-plugin/test/extension.test.ts \
+         packages/pi-plugin/test/budgets.test.ts \
+         packages/pi-plugin/test/notices.test.ts \
+         packages/pi-plugin/test/session-start.test.ts \
+         packages/pi-plugin/test/sandbox.real.test.ts \
+         packages/pi-plugin/test/annotations.test.ts; do node "$f" || exit 1; done
+"""
+
+[tasks."test:role"]
+description = "Deliverable module, extend blocks, and their wiring"
+depends = ["setup:helper"]
+run = """
+for f in packages/pi-plugin/test/role-phase3*.test.ts; do node "$f" || exit 1; done
+"""
+
+[tasks."test:mock"]
+description = "Mock-LLM sessions and the dispatch-payload contract"
+depends = ["setup:helper"]
+run = """
+for f in packages/pi-plugin/test/context.test.ts \
+         packages/pi-plugin/test/mock-engine.test.ts \
+         packages/pi-plugin/test/mock-session.test.ts \
+         packages/pi-plugin/test/dispatch-payload.test.ts; do node "$f" || exit 1; done
+"""
+
+[tasks."test:e2e"]
+description = "Real sessions: bash sandbox, budgets, guards, roles"
+depends = ["setup:helper"]
+run = """
+for f in packages/pi-plugin/test/e2e-bash.test.ts \
+         packages/pi-plugin/test/e2e-budgets.test.ts \
+         packages/pi-plugin/test/e2e-guards.test.ts \
+         packages/pi-plugin/test/e2e-role.test.ts; do node "$f" || exit 1; done
+"""
+
+# hashline-e2e 硬编码 ~/tmp 作为临时根（/tmp 被沙箱换成私有 tmpfs），
+# 在受限的子代理里必然 EACCES。只在有 ~/tmp 写授权时跑。
+[tasks."test:hashline"]
+description = "hashtool end-to-end (needs write access to ~/tmp)"
+depends = ["setup:helper"]
+run = "node packages/pi-plugin/test/hashline-e2e.test.ts"
+
+# --- 全量：只在合进 main 前跑 ---
+
+[tasks."test:fast"]
+description = "Everything that does not need the helper"
+depends = ["lint", "typecheck", "test:unit", "test:docs"]
+
+[tasks."test:all"]
+description = "The whole suite. Use only before merging to main."
+# Sequential on purpose: several suites start their own sandbox and a real pi session,
+# and running them in parallel makes them interfere (a spawned command reports no
+# exit status at all). `depends` would run them concurrently.
+run = """
+mise run lint &&
+mise run typecheck &&
+mise run test:unit &&
+mise run test:docs &&
+mise run test:policy &&
+mise run test:paths &&
+mise run test:role &&
+mise run test:mock &&
+mise run test:handler &&
+mise run test:e2e &&
+mise run test:hashline
+"""

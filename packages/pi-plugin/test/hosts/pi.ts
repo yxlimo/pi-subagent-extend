@@ -77,7 +77,7 @@ function hostEnv(agentDir: string): NodeJS.ProcessEnv {
 export const piDriver: HostDriver = {
 	name: "pi",
 
-	async run({ project, mockUrl, agentDir, prompt, timeoutMs }): Promise<HostRun> {
+	async run({ project, agentDir, prompt, timeoutMs }): Promise<HostRun> {
 		// pi-subagents activates its tools lazily by default; a scripted parent
 		// has no chance to call subagents_enable, so make them active up front.
 		const configPath = join(agentDir, "extensions", "subagent", "config.json");
