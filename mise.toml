@@ -45,7 +45,7 @@ node packages/pi-plugin/test/doc-payload.test.ts &&
 node packages/pi-plugin/test/version-consistency.test.ts
 """
 [tasks."check:grants"]
-description = "Role md write grants — a path typo turns a role into a blanket refusal"
+description = "Role md config — dead write grants and missing deny entries"
 run = "node scripts/check-role-grants.mjs"
 
 

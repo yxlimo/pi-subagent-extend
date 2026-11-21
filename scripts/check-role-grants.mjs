@@ -59,13 +59,46 @@ for (const file of readdirSync(dir).filter((name) => name.endsWith(".md")).sort(
 			(hasPreExec ? " (preExec present)" : ""),
 	);
 }
+// There is no project-wide floor any more: the bindings file that used to supply `git commit`,
+// `git push` and the rest to every role is gone, so a role md that omits the deny list simply has
+// none. A subagent that can commit and push is the exact failure the floor used to prevent, and
+// nothing else would notice — so the omission is an error here.
+const REQUIRED_DENY = [
+	"git commit",
+	"git push",
+	"git rebase",
+	"git merge",
+	"git reset",
+	"git clean",
+	"git checkout",
+	"git restore",
+	"rm -rf",
+];
+
+for (const file of readdirSync(dir).filter((name) => name.endsWith(".md")).sort()) {
+	const path = join(dir, file);
+	const text = readFileSync(path, "utf8");
+	if (!/^\s+bash:/m.test(text)) continue;
+	const block = text.match(/^[ \t]*deny:[ \t]*\n((?:[ \t]+-[ \t]+.*\n)+)/m);
+	const denied = block
+		? block[1]
+				.split("\n")
+				.map((value) => value.replace(/^[ \t]*-[ \t]*/, "").trim())
+				.filter(Boolean)
+		: [];
+	const absent = REQUIRED_DENY.filter((entry) => !denied.includes(entry));
+	if (absent.length > 0) {
+		problems.push(`${path}: deny list is missing ${absent.join(", ")}`);
+	}
+}
+
 
 for (const line of report) console.log(line);
 
 if (problems.length > 0) {
 	console.error(
-		`\n${problems.length} role md(s) grant a path that neither exists nor is created by setup.preExec — those grants refuse every write:\n${problems.join("\n")}`,
+		`\n${problems.length} role md problem(s) — a dead write grant refuses every write, and a missing deny entry lets the role commit or push:\n${problems.join("\n")}`,
 	);
 	process.exit(1);
 }
-console.log("\nrole grants: every non-existent entry is produced by setup.preExec");
+console.log("\nrole config: every write grant is reachable, every deny list complete");
