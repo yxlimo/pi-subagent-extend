@@ -47,16 +47,18 @@ for (const file of readdirSync(dir).filter((name) => name.endsWith(".md")).sort(
 	const entries = writeEntries(text);
 	if (entries.length === 0) continue;
 	// `preExec` runs unsandboxed at session start, which is the only way a role can create a path
-	// the sandbox would otherwise have to grant first.
-	const hasPreExec = /^\s+preExec:/m.test(text);
+	// the sandbox would otherwise have to grant first. Only the paths that command actually names
+	// are excused: treating "the md has a preExec" as blanket permission hid a dead grant for a
+	// file that had been deleted, which is exactly what this check exists to catch.
+	const preExec = (text.match(/^\s+preExec:[ \t]*(.+)$/m) ?? [])[1] ?? "";
 	const missing = entries.filter((entry) => !exists(entry));
-	const orphaned = hasPreExec ? [] : missing;
+	const orphaned = missing.filter((entry) => !preExec.includes(entry));
 	if (orphaned.length > 0) {
 		problems.push(`${path}: ${orphaned.join(", ")}`);
 	}
 	report.push(
 		`${path}: ${entries.length} entries, ${missing.length} created at session start` +
-			(hasPreExec ? " (preExec present)" : ""),
+			(preExec ? " (preExec present)" : ""),
 	);
 }
 // There is no project-wide floor any more: the bindings file that used to supply `git commit`,

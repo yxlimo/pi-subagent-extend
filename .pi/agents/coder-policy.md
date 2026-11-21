@@ -18,7 +18,6 @@ extend:
       - packages/pi-plugin/src/policy/payload.ts
       - packages/pi-plugin/src/policy.ts
       - packages/pi-plugin/test/policy.test.ts
-      - packages/pi-plugin/test/policy-profile.test.ts
       - packages/pi-plugin/test/policy-contract.test.ts
       - packages/pi-plugin/test/unit/policy.unit.test.ts
       - .test-state
