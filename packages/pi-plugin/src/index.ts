@@ -5,18 +5,15 @@
  * 范围之外的 tool_call 一律拒绝（fail closed），防止子代理漫无目的地扫仓库。
  *
  * 配置有两条来源：
- * 1. pi-subagents 的 extensionBindings。父代理在 subagent 工具调用里传：
+ * 1. pi-subagents 的 extensionBindings（派单载荷）。父代理在 subagent 工具调用里传：
  *      extensionBindings: { "pi-subagents-extend/1": { "permissions": { "scope": ["src/auth/**"], "maxReads": 20 } } }
  *    命名空间键下只放 permissions；worktree 是它的同级键，不放进 permissions。
- *    项目 profile .pi/subagent-bindings.json 仍是每个角色一层平铺，不套 permissions。
  *    pi-subagents 把它编码进 PI_SUBAGENT_EXTENSION_BINDINGS 传给子代理，本扩展在
  *    激活时（factory）一次性读取。前台子代理的这个环境变量只在会话启动前存在，
  *    之后父进程环境被恢复，所以不能在 tool_call 里懒读。
- * 2. agent profile（src/profile.ts）：agent 定义里声明一份两行 loader，角色默认值
- *    写在项目 .pi/subagent-bindings.json。调用方的 bindings 按字段合并：白名单
- *    （bash.read / bash.write / allowTools）与 bash.deny 取并集、deny 不可放宽；
- *    scope / writeScope 替换（任务范围可以比角色默认更窄）；其余标量调用方优先。
- *    profile 是文件，按会话 cwd 读，所以在 session_start 解析。
+ * 2. 角色 md（.pi/agents/<role>.md 等，见 role-config.ts）的 extend 块：子代理侧按
+ *    <active_agent> 身份解析成基线，只补 bindings 没给的字段；worktree 的派单默认值
+ *    也从这里解析。
  *
  * 两条都没有时扩展不生效：父会话和未绑定范围的子代理不受影响。
  *
@@ -172,7 +169,7 @@ export function activate(pi: ExtensionAPI, options: ActivateOptions = {}) {
 					`Reads: ${w.allowedReads}${w.policy.maxReads > 0 ? `/${w.policy.maxReads}` : ""}`,
 					...(w.probe ? w.probe.status() : ["Probe: off"]),
 				].filter((l): l is string => Boolean(l))
-				: ["Inactive (no pi-subagents-extend bindings and no profile declared in this session)"];
+				: ["Inactive (no pi-subagents-extend bindings in this session)"];
 			ctx.ui.notify(`pi-subagents-extend:\n${lines.join("\n")}`, "info");
 		},
 	});

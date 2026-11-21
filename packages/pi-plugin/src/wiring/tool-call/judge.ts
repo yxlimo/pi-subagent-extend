@@ -1,15 +1,15 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
 import { allEntries, classifyCommand, commandAccess, commandMatches, deniedEntry, deniedEnvAssignment, pathCandidates, requiresNetwork, type BashRule } from "../../bash-match.ts";
 import { headEntriesHint, warnUntrackedWorktreeProfile } from "../../notices.ts";
 import { STOP_NOTICE } from "../../probe.ts";
 import { shouldDefaultWorktree, WORKTREE_TOOLS } from "../../worktree-default.ts";
-import { BINDING_NAMESPACE, bindingKey } from "../../role-config.ts";
-import { asObject, matches, mergeConfig, type Policy } from "../../policy.ts";
+import { BINDING_NAMESPACE, bindingKey, readExtendBlock, resolveAgentFile, worktreeFromBlock } from "../../role-config.ts";
+import { asObject, matches, type Policy } from "../../policy.ts";
 import { dependencyGateVerdict } from "../../dependencies.ts";
 import { expandPath, privatisedDirs, resolveComparable, underRoot } from "../../paths.ts";
 import { buildSpec, detectPnpmStore, describeHelper, dropSpecFile, helperPath, SANDBOX_DEVICE_PATHS, scratchDir, wrapInSandbox, writeSpecFile } from "../../sandbox.ts";
 import type { ActivateOptions, Wiring } from "../context.ts";
-import { readProfile } from "../session-start.ts";
 import { bail, deny, pathToolVerdict, preview, writeBail } from "./paths.ts";
 
 /**
@@ -168,32 +168,34 @@ function foreignBashPath(command: string, cwd: string, rule: BashRule, policy: P
 let warnedDispatchVersion = false;
 
 /**
- * 派单目标角色的 worktree 默认值。按 input.agent 从 profile 里解析：default 打底，
- * 角色层与本次 bindings 依次覆盖（标量调用方优先）。读不到对应角色时，只有调用方
- * bindings 里的 `worktree === true` 才算策略（写 false、字符串等都不算）；两者都没有
- * 就返回 undefined（fail open）。
+ * 派单目标角色的 worktree 默认值。按 input.agent 解析角色 md（与子代理侧同一套
+ * resolveAgentFile / readExtendBlock，父子不会对「md 在哪」各说各话），取
+ * extend.worktree.enabled。enabled: true 且派单没带 worktree（undefined / null，
+ * `??=` 语义）时补一个 true；显式 false 或其它值一律不动。md 缺席、没有 extend 块、
+ * 块写坏、enabled: false 都按「没配置」处理：不拒绝、不计数、不告警（fail open）。
  *
- * `fromProfile` 标记这个值是否来自磁盘 profile 文件：派单自带 bindings 走的不是文件，
- * 补值时不需要提示「worktree 副本里没有那份 profile」。
+ * `fromMd` 标记这个值是否来自角色 md：派单自带 bindings 走的不是 md，补值时
+ * 不需要提示「worktree 副本里没有那份 md」。mdFile 只在 fromMd 时有意义，
+ * 未跟踪告警要用它点名文件。
  */
 interface WorktreeStrategy {
 	worktree?: unknown;
-	fromProfile: boolean;
+	fromMd: boolean;
+	mdFile?: string;
 }
 
 function worktreePolicyFor(
 	cwd: string,
-	options: ActivateOptions,
 	call: Record<string, unknown> | undefined,
 	agent: string,
 ): WorktreeStrategy {
-	const resolved = readProfile(cwd, agent, options.profileFile);
-	if (!resolved.config) {
-		return call?.worktree === true ? { worktree: true, fromProfile: false } : { fromProfile: false };
+	const mdFile = resolveAgentFile(agent, cwd, homedir()) ?? undefined;
+	const block = mdFile ? readExtendBlock(mdFile).block : undefined;
+	const enabled = worktreeFromBlock(block ?? {}).worktree?.enabled === true;
+	if (enabled && call?.worktree === undefined) {
+		return { worktree: true, fromMd: true, mdFile };
 	}
-	const merged = mergeConfig(resolved.config, call);
-	const fromProfile = call?.worktree === undefined && resolved.config.worktree === true;
-	return { worktree: merged?.worktree, fromProfile };
+	return call?.worktree === true ? { worktree: true, fromMd: false } : { fromMd: false };
 }
 
 /** 工具名 → schema 里的路径入参名；一处缓存，避免每次调用都问一遍注册表。缓存由 activate 持有并传入。 */
@@ -246,7 +248,7 @@ const toolKindOf = (
 export const judgeToolCall = async (
 	pi: ExtensionAPI,
 	w: Wiring,
-	options: ActivateOptions,
+	_options: ActivateOptions,
 	schemaPathArgs: Map<string, string | undefined>,
 	event: ToolCallEvent,
 	ctx: ExtensionContext,
@@ -256,7 +258,7 @@ export const judgeToolCall = async (
 		const ui = ctx.ui as { notify?: (m: string, t?: string) => void } | undefined;
 		ui?.notify?.(message, "warning");
 	};
-	// 派单默认值先于范围判定：父会话没有 bindings 时同样按角色 profile 补上。
+	// 派单默认值先于范围判定：父会话没有 bindings 时同样按角色 md 补上。
 	// 补值不是拒绝，不进 deny 预算；策略解析不到就什么都不做。
 	if (WORKTREE_TOOLS.has(event.toolName)) {
 		const candidate = event.input as { agent?: unknown; worktree?: unknown; extensionBindings?: unknown } | undefined;
@@ -266,10 +268,10 @@ export const judgeToolCall = async (
 			// 只有 worktree 这一个决策把本次派单自带的 bindings 叠在会话 bindings 之上；
 			// 其余策略解析仍用会话启动时定格的那一份，范围不因单次派单而变。
 			const own = asObject(candidate.extensionBindings)?.[bindingKey()];
-			const strategy = worktreePolicyFor(cwd, options, { ...w.call.config, ...w.call.blocks, ...asObject(own) }, agent.trim());
+			const strategy = worktreePolicyFor(cwd, { ...w.call.config, ...w.call.blocks, ...asObject(own) }, agent.trim());
 			if (shouldDefaultWorktree(strategy, event.toolName, event.input)) {
 				candidate.worktree = true;
-				if (strategy.fromProfile) warnUntrackedWorktreeProfile(cwd, options.profileFile, w.uiWarning);
+				if (strategy.fromMd && strategy.mdFile) warnUntrackedWorktreeProfile(cwd, strategy.mdFile, w.uiWarning);
 			}
 		}
 	}

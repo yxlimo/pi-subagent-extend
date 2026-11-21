@@ -1,6 +1,6 @@
 /**
  * NOTICES 层：扩展说给人（父代理的 UI 告警）与模型（注解、提示）听的话里，关于授权本身的
- * 那一部分：不可达条目的原因与改法、legacy 配置的迁移提示、profile 未跟踪的告警。
+ * 那一部分：不可达条目的原因与改法、legacy 配置的迁移提示、角色 md 未跟踪的告警。
  * 措辞只在这里写一份；index.ts 只做接线。UI 告警通道由调用方传入：模块级函数拿不到 `ctx`。
  * 模块拆分第五步：以下声明从 index.ts 原样搬出，行为不变。
  */
@@ -10,13 +10,13 @@ import { relative, resolve } from "node:path";
 import { allEntries, classifyCommand, commandNeedsNoManifest, firstToken, leadingAssignments, listedJoin, MAX_LISTED, unreachableEntries, type BashRule, type UnreachableEntry } from "./bash-match.ts";
 import { mainRepoRoot } from "./deliverable.ts";
 
-/** agent 角色默认 bindings 的默认位置（相对会话 cwd）。 */
+/** 旧一代 bindings 文件的位置（相对会话 cwd），仅用于兼容层提示。 */
 export const PROFILE_FILE = ".pi/subagent-bindings.json";
 
 /** 老一代 agent profile 目录（相对会话 cwd），仅用于兼容层提示。 */
 const AGENT_PROFILES_DIR = ".pi/agent-profiles";
 
-/** worktree 默认值依赖的 profile 文件：确认未被 git 跟踪的只提示一次（session_start 清空）。 */
+/** worktree 默认值依赖的角色 md：确认未被 git 跟踪的只提示一次（session_start 清空）。 */
 export const reportedUntrackedWorktreeProfiles = new Set<string>();
 /** 迁移告警：legacy bash.read / bash.write 只说一次（session_start 清空）。 */
 export const warnedLegacyBashColumns = new Set<string>();
@@ -180,11 +180,11 @@ export function headEntriesHint(rule: BashRule, command: string, cwd: string): s
 }
 
 /**
- * profile 文件在 git 里是否被跟踪。三态：true 已跟踪、false 确认未跟踪、undefined 判不了
+ * 文件在 git 里是否被跟踪。三态：true 已跟踪、false 确认未跟踪、undefined 判不了
  * （不在仓库里、git 不在 PATH、超时）。`--error-unmatch` 的退出码 1 才是「没跟踪」这个确定
  * 答案；其它失败一律当未知，宁可少说也不误报。
  */
-function profileTrackedInGit(cwd: string, relPath: string): boolean | undefined {
+function trackedInGit(cwd: string, relPath: string): boolean | undefined {
 	try {
 		execFileSync("git", ["ls-files", "--error-unmatch", "--", relPath], {
 			cwd,
@@ -214,9 +214,9 @@ export function warnLegacyBashColumns(config: Record<string, unknown> | undefine
 }
 
 /**
- * 老的 .pi 配置文件还在时各提示一次：新配置写在角色 md 的 extend 块，老文件暂时继续可用。
+ * 老的 .pi 配置文件还在时各提示一次：它们已被忽略，也不会再被读取；配置写在角色 md 的 extend 块。
  * worktree 的 cwd 里没有主检出的配置，所以主检出根和 cwd 都查；两个文件路径只认普通文件，
- * 目录会让 existsSync 为真却让 readProfile 报 EISDIR，那句「旧文件还能用」就是假的。
+ * 目录会让 existsSync 为真；老一代 profile 目录本身就是一个目录，由下面的 existsSync 分支单独判。
  */
 export function warnCompatLayer(cwd: string, warn: ((message: string) => void) | undefined): void {
 	const isFile = (path: string): boolean => {
@@ -233,7 +233,7 @@ export function warnCompatLayer(cwd: string, warn: ((message: string) => void) |
 		if (isFile(bindingsFile) && !warnedCompatLayer.has(bindingsFile)) {
 			warnedCompatLayer.add(bindingsFile);
 			warn?.(
-				`pi-subagents-extend: ${PROFILE_FILE} is from the older configuration layer; put configuration in the role md's extend: block instead. The old file keeps working meanwhile.`
+				`pi-subagents-extend: ${PROFILE_FILE} is from the older configuration layer and is now ignored; put configuration in the role md's extend: block.`
 			);
 		}
 		// 目录按目录判：老一代 profile 目录本身就是一个目录，不能套用上面的 isFile。
@@ -241,23 +241,23 @@ export function warnCompatLayer(cwd: string, warn: ((message: string) => void) |
 		if (existsSync(profilesDir) && !warnedCompatLayer.has(profilesDir)) {
 			warnedCompatLayer.add(profilesDir);
 			warn?.(
-				`pi-subagents-extend: ${AGENT_PROFILES_DIR}/*.ts is from the older configuration layer; put configuration in the role md's extend: block instead. The old files keep working meanwhile.`
+				`pi-subagents-extend: ${AGENT_PROFILES_DIR}/*.ts is from the older configuration layer and is now ignored; put configuration in the role md's extend: block.`
 			);
 		}
 	}
 }
 /**
- * 补 worktree 默认值时，若策略来自磁盘 profile 而该文件没被 git 跟踪，告诉父代理一次：
- * worktree 副本里不会有这个文件，子代理读不到 profile 会被全拒。只在确认未跟踪时提示，
- * 判不了就不说；同一路径只提示一次（集合在 session_start 清空）。
+ * 补 worktree 默认值时，若默认值来自角色 md 而该文件没被 git 跟踪，告诉父代理一次：
+ * worktree 副本里不会有这份 md，子代理认不出自己的角色，也就没有任何角色策略
+ * （fail open）。只在确认未跟踪时提示，判不了就不说；同一路径只提示一次
+ * （集合在 session_start 清空）。
  */
-export function warnUntrackedWorktreeProfile(cwd: string, profileFile: string | undefined, warn: ((message: string) => void) | undefined): void {
-	const file = resolve(cwd, profileFile ?? PROFILE_FILE);
-	if (reportedUntrackedWorktreeProfiles.has(file)) return;
-	const relPath = relative(cwd, file);
-	if (profileTrackedInGit(cwd, relPath) !== false) return;
-	reportedUntrackedWorktreeProfiles.add(file);
+export function warnUntrackedWorktreeProfile(cwd: string, mdFile: string, warn: ((message: string) => void) | undefined): void {
+	if (reportedUntrackedWorktreeProfiles.has(mdFile)) return;
+	const relPath = relative(cwd, mdFile);
+	if (trackedInGit(cwd, relPath) !== false) return;
+	reportedUntrackedWorktreeProfiles.add(mdFile);
 	warn?.(
-		`pi-subagents-extend: \`worktree: true\` runs the subagent in a worktree copy, but the profile file ${relPath} is not tracked by git, so the copy will not contain it and the subagent will be denied every call because it cannot read its profile. Commit that file, or pass the configuration in the dispatch's own bindings instead.`
+		`pi-subagents-extend: \`worktree: true\` runs the subagent in a worktree copy, but the role md ${relPath} is not tracked by git, so the worktree copy will not contain it and the child will run with no role policy. Commit the role md so the worktree child can identify its role.`
 	);
 }

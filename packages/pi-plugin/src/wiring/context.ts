@@ -3,13 +3,8 @@ import { bindingKey, type RolePolicy } from "../role-config.ts";
 import { BINDINGS_ENV, denyAll, extractCallConfig, parsePolicyObject, type Policy } from "../policy.ts";
 import { Probe, parseProbeConfig } from "../probe.ts";
 
-/** agent 角色的默认 bindings 名与 profile 文件路径，由宿主入口（profile()）传入。 */
-export interface ActivateOptions {
-	/** agent 角色的默认 bindings 名；由 profile() 传入。 */
-	profileName?: string;
-	/** profile 文件路径，默认 .pi/subagent-bindings.json（相对会话 cwd）。 */
-	profileFile?: string;
-}
+/** activate() 的接线选项。profile 层已移除，目前没有字段；新选项按需加在这里。 */
+export interface ActivateOptions {}
 
 /** 未配置时的策略：全拒、只读、不计数。与 denyAll 的「坏了」不同，这是「没配」。 */
 const INACTIVE: Policy = {
@@ -37,12 +32,12 @@ const INACTIVE: Policy = {
 export interface WiringState {
 	/**
 	 * bindings 在激活时定格：前台子代理的 bindings 环境变量只在会话启动前存在，
-	 * tool_call 里读不到，必须在这里取。profile 的文件反过来——要按会话 cwd 读，
-	 * 所以在 session_start 里解析。
+	 * tool_call 里读不到，必须在这里取。角色 md（含派单的 worktree 默认值）按会话 cwd
+	 * 读，在各自的事件处理器里解析。
 	 */
 	call: ReturnType<typeof extractCallConfig>;
 	policy: Policy;
-	/** 角色 md 的基线：before_agent_start 里按子代理身份填入，只补 bindings / profile 没给的字段。 */
+	/** 角色 md 的基线：before_agent_start 里按子代理身份填入，只补 bindings 没给的字段。 */
 	roleBaseline: RolePolicy | undefined;
 	roleSource: string | undefined;
 	roleResolved: boolean;
@@ -84,10 +79,10 @@ export interface WiringState {
 /** 状态加上三个改状态的方法：处理器读字段、调方法，不再碰闭包。 */
 export interface Wiring extends WiringState {
 	stop(reason: string): { block: true; reason: string; terminate: true };
-	/** 按当前 policy 建探针。profile 要到 session_start 才读出，所以这里可重跑。 */
+	/** 按当前 policy 建探针。角色基线重算策略后会重新上探针，所以这里可重跑。 */
 	armProbe(): void;
 	/**
-	 * bindings / profile 已经有值的键优先，md 基线只填缺失的那几个
+	 * bindings 已经有值的键优先，md 基线只填缺失的那几个
 	 * （scope、writeScope、readOnly、allowTools、maxDenies、maxWriteDenies）。
 	 */
 	applyRoleBaseline(): void;
@@ -164,7 +159,7 @@ export function createWiring(): Wiring {
 			// md 一个字段都没补进来就不重算策略：来源也不能凭空多出一层。
 			if (!mdContributed) return;
 			// 拒绝文案里的 source 是父代理判断「该改哪个文件」的唯一线索，只列真正贡献过的层。
-			// baseSource 已经是 profile 与本次 bindings 的合成结果（见 profilePolicy），排在 md 之前。
+			// baseSource 是激活时定格的 bindings 来源（createWiring），排在 md 之前。
 			const mdLabel = this.roleSource ?? "role md";
 			const source = this.baseConfig ? `${this.baseSource} + ${mdLabel}` : mdLabel;
 			this.probe?.dispose();
