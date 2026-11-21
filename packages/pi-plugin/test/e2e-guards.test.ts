@@ -18,8 +18,7 @@
 //   PI_MOCK_KEEP=1 ...              保留临时工程，便于翻会话记录
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piDriver } from "./hosts/pi.ts";
@@ -27,6 +26,7 @@ import type { HostRun } from "./hosts/types.ts";
 import { loadMockFixture } from "./mock-fixture.ts";
 import { startMockLlm, startMockLlmFromFixture } from "./mock-llm.ts";
 import type { ScriptedStep } from "./mock-llm.ts";
+import { redirectStateDir, stateDir } from "./state-dir.ts";
 
 const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const EXT = join(PKG_DIR, "src", "index.ts");
@@ -45,16 +45,18 @@ function tail(stderr: string): string {
 	return stderr.slice(-800);
 }
 
+
+// 会话内扩展自己的状态目录（沙箱 spec、git-excludes、xdg-cache）也挪出真实 ~/.cache：
+// 受限子代理对 ~/.cache 没有写授权，第一条沙箱 bash 就会死在 spec 落盘上。
+redirectStateDir("pi-e2e-guards-state-", ".test-e2e-guards-state-");
+
 /**
- * 临时根。放在 ~/tmp 下而不是 os.tmpdir()，是为了和手动实验分开；
- * 但那个目录可能不存在（被清过、或干净机器上），所以先建再 mkdtemp。
+ * 临时根。走 test/state-dir.ts 的共享 scratch 约定：有共享 .test-state 时落在那里
+ * （受限子代理的写授权覆盖它）；否则退回包目录下的 .test-* 前缀（已 gitignore）。
  */
 function tempRoot(prefix: string): string {
-	const base = join(homedir(), "tmp");
-	mkdirSync(base, { recursive: true });
-	return mkdtempSync(join(base, prefix));
+	return stateDir(prefix, `.test-${prefix}`);
 }
-
 /**
  * 探针工程。关键特征：整棵目录树（含祖先）里没有 package.json —— 用例 1 的
  * 不可达判定靠的就是这个事实。in-scope.txt / outside.md 服务其余用例；

@@ -12,12 +12,12 @@
 //   PI_MOCK_KEEP=1 ...          保留临时工程
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startMockLlm } from "./mock-llm.ts";
 import type { Scripted } from "./mock-llm.ts";
+import { stateDir } from "./state-dir.ts";
 
 const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const EXT = join(PKG_DIR, "src", "index.ts");
@@ -47,9 +47,7 @@ function hostExtension(): string {
 const HOST = hostExtension();
 
 function tempRoot(prefix: string): string {
-	const base = join(homedir(), "tmp");
-	mkdirSync(base, { recursive: true });
-	return mkdtempSync(join(base, prefix));
+	return stateDir(prefix, `.test-${prefix}`);
 }
 
 interface Files {

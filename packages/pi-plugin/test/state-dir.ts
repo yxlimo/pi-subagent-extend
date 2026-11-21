@@ -10,7 +10,7 @@
 // its own; suites that must not import the harness (it resolves the helper and
 // loads the extension at import time) import the module directly.
 
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -34,4 +34,36 @@ export function stateDir(prefix: string, legacyPrefix = prefix): string {
   } catch {
     return mkdtempSync(join(repo, legacyPrefix))
   }
+}
+
+/**
+ * A scratch directory for the extension's own state — sandbox spec files, `git-excludes`
+ * and the `xdg-cache` toolchain cache — plus the environment redirect that makes the
+ * extension use it.
+ *
+ * Suites that spawn real pi sessions call this before the spawn: the child inherits
+ * `PI_SUBAGENTS_EXTEND_STATE` through its environment, so the extension's writes land in
+ * the shared `.test-state` tree instead of the developer's real `~/.cache`. Without the
+ * redirect a sandboxed child dies on its first sandboxed bash call: that spec write is
+ * outside every grant. Cleanup runs on `exit` and on the terminating signals, so a failed
+ * assertion does not leave the directory behind for `git add -A` to sweep into a patch.
+ */
+export function redirectStateDir(prefix: string, legacyPrefix = prefix): string {
+  const dir = stateDir(prefix, legacyPrefix)
+  const previous = process.env.PI_SUBAGENTS_EXTEND_STATE
+  process.env.PI_SUBAGENTS_EXTEND_STATE = dir
+  const restore = (): void => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_EXTEND_STATE
+    else process.env.PI_SUBAGENTS_EXTEND_STATE = previous
+    rmSync(dir, { recursive: true, force: true })
+  }
+  process.on("exit", restore)
+  // `exit` does not run on a signal: Ctrl-C during a run would leave the directory behind.
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(signal, () => {
+      restore()
+      process.exit(130)
+    })
+  }
+  return dir
 }

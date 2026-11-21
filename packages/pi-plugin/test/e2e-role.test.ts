@@ -10,14 +10,15 @@
 // 单独跑：node test/e2e-role.test.ts（包目录内）
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piDriver } from "./hosts/pi.ts";
 import type { HostRun } from "./hosts/types.ts";
 import { loadMockFixture } from "./mock-fixture.ts";
 import { startMockLlmFromFixture, type MockLlm } from "./mock-llm.ts";
+import { stateDir } from "./state-dir.ts";
 
 const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const EXT = join(PKG_DIR, "src", "index.ts");
@@ -26,11 +27,9 @@ const KEEP = process.env.PI_MOCK_KEEP === "1";
 // 真会话要跑两轮（父派单 + 子执行），按单会话预算的两倍放宽。
 const TIMEOUT_MS = Number(process.env.PI_MOCK_TIMEOUT_MS ?? 120_000);
 
-/** 临时根放在 ~/tmp，与手动实验分开；目录可能不存在，先建再 mkdtemp。 */
+/** 临时根走 test/state-dir.ts 的共享 scratch 约定（受限子代理的写授权覆盖 .test-state）。 */
 function tempRoot(prefix: string): string {
-  const base = join(homedir(), "tmp");
-  mkdirSync(base, { recursive: true });
-  return mkdtempSync(join(base, prefix));
+  return stateDir(prefix, `.test-${prefix}`);
 }
 
 /**
@@ -39,6 +38,11 @@ function tempRoot(prefix: string): string {
  */
 function makeProject(role: string, md: string[]): string {
   const root = tempRoot("pi-role-");
+  // 交付物接线按「主检出锚点」找仓库根。探针工程落在共享 .test-state 里就在工作树
+  // 仓库之内，git 会把锚点定位到真主检出，交付物就写进开发者的检出；git init 让
+  // 探针工程自己是独立仓库，锚点回到工程本身——与落在 ~/tmp 时「无 git 证据 →
+  // 回退 cwd」的行为一致。
+  execFileSync("git", ["init", "-q"], { cwd: root, stdio: "ignore" });
   writeFileSync(join(root, "in-scope.txt"), "IN-SCOPE-OK\n");
   mkdirSync(join(root, "outside"), { recursive: true });
   writeFileSync(join(root, "outside", "out-of-scope.txt"), "OUT-OF-SCOPE-LEAK\n");

@@ -16,9 +16,9 @@
 
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stateDir } from "./state-dir.ts";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
 import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
@@ -31,7 +31,9 @@ const KEEP = process.env.PI_E2E_KEEP === "1";
 const CASE_TIMEOUT_MS = Number(process.env.PI_E2E_TIMEOUT_MS ?? 180_000);
 
 // 必须落在 $HOME 下：项目级扩展只在被信任的目录里加载，/tmp 不算。
-const WORK_ROOT = join(homedir(), "tmp");
+// 临时根走 test/state-dir.ts 的共享 scratch 约定（受限子代理对 ~/tmp 没有写授权）。
+// 项目级扩展只在被信任的目录里加载：这里仍依赖用户的信任库覆盖检出所在的路径。
+const WORK_ROOT = stateDir("extend-e2e-", ".test-extend-e2e-");
 
 const ESCALATION_CODE = "ZULU-77";
 const DELIVERY_CODE = "YANKEE-42";

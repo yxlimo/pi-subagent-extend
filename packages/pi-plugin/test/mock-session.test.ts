@@ -10,12 +10,12 @@
 //   PI_MOCK_KEEP=1 ...        保留临时工程，便于翻会话记录
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startMockLlm } from "./mock-llm.ts";
 import type { ScriptedStep } from "./mock-llm.ts";
+import { stateDir } from "./state-dir.ts";
 
 const PKG_DIR = fileURLToPath(new URL("..", import.meta.url));
 const EXT = join(PKG_DIR, "src", "index.ts");
@@ -28,13 +28,11 @@ const TIMEOUT_MS = Number(process.env.PI_MOCK_TIMEOUT_MS ?? 60_000);
 const MARKER = "DONE";
 
 /**
- * 临时根。放在 ~/tmp 下而不是 os.tmpdir()，是为了和手动实验分开；
- * 但那个目录可能不存在（被清过、或干净机器上），所以先建再 mkdtemp。
+ * 临时根。走 test/state-dir.ts 的共享 scratch 约定：有共享 .test-state 时落在那里
+ * （受限子代理的写授权覆盖它）；否则退回包目录下的 .test-* 前缀（已 gitignore）。
  */
 function tempRoot(prefix: string): string {
-	const base = join(homedir(), "tmp");
-	mkdirSync(base, { recursive: true });
-	return mkdtempSync(join(base, prefix));
+	return stateDir(prefix, `.test-${prefix}`);
 }
 
 /** 一个最小工程：src/a.ts 在范围内，outside.md 在范围外。 */

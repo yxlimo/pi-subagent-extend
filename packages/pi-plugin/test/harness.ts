@@ -8,13 +8,13 @@
 // Each suite imports only the pieces it actually uses.
 
 import assert from "node:assert/strict"
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join, dirname } from "node:path"
 import { stringify } from "yaml"
 import { fileURLToPath } from "node:url"
-import { stateDir } from "./state-dir.ts"
+import { redirectStateDir, stateDir } from "./state-dir.ts"
 import type {
   CommandSpec,
   EventHandler,
@@ -46,34 +46,11 @@ const repo = join(here, "..")
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
 // the run. Not `tmpdir()`: the helper mounts a private tmpfs over `/tmp`, so a grant underneath
 // it cannot take effect — the helper refuses such a spec (exit 77) and names the tmpfs as the
-// cause.
-// Redirecting `HOME` instead is too blunt: on CI `cargo` is rustup's shim and tries to create
-// `$HOME/.rustup`, which the sandbox refuses because the package directory is not a write grant.
-const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
-// Inside a sandboxed child the package directory is not a write grant, so every
-// suite here would die with `EACCES: mkdtemp` before its first case. The
-// probe-then-fallback lives once in ./state-dir.ts; this harness takes its own
-// run directory from there, and suites reach for `stateDir(prefix)` when they
-// need a scratch directory too.
-const testState = stateDir("run-", ".test-state-")
-process.env.PI_SUBAGENTS_EXTEND_STATE = testState
-
-// Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise
-// leave `.test-state-*` behind as an untracked directory, and pi-subagents' own patch capture
-// (`git add -A`) would sweep it into a patch. Both steps are idempotent.
-const restoreState = (): void => {
-  if (realState === undefined) delete process.env.PI_SUBAGENTS_EXTEND_STATE
-  else process.env.PI_SUBAGENTS_EXTEND_STATE = realState
-  rmSync(testState, { recursive: true, force: true })
-}
-process.on("exit", restoreState)
-// `exit` does not run on a signal: Ctrl-C during a run would leave the directory behind.
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-  process.on(signal, () => {
-    restoreState()
-    process.exit(130)
-  })
-}
+// cause. Redirecting `HOME` instead is too blunt: on CI `cargo` is rustup's shim and tries to
+// create `$HOME/.rustup`, which the sandbox refuses because the package directory is not a
+// write grant. The redirect itself (and the probe-then-fallback for where it lands) lives once
+// in ./state-dir.ts; suites that spawn real sessions call it there too.
+redirectStateDir("run-", ".test-state-")
 
 // The sandbox helper is a Rust binary. Tests execute the cargo build output and
 // never the copy in `bin/`: that copy belongs to a loaded extension, so writing to
