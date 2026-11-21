@@ -10,6 +10,11 @@ inheritSkills: false
 systemPromptMode: append
 subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts
 extend:
+  # A fresh worktree has no helper binary: packages/pi-plugin/bin is gitignored, and
+  # `mise run setup:helper` cannot create it because that path is outside the write grant.
+  # preExec runs unsandboxed at session start, which is exactly what it is for.
+  setup:
+    preExec: mkdir -p packages/pi-plugin/bin && cp /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/bin/pi-subagents-extend-helper packages/pi-plugin/bin/
   permissions:
     # Read the whole repository: judging a path means knowing who calls it.
     scope: ["."]
@@ -77,6 +82,13 @@ mise run test:paths
 
 It must print **33** cases and exit 0. Run `mise run typecheck` as well; it must be clean for
 your files. Do not run `mise run test:all`.
+
+## The write grant is an exact file list
+
+Those four files are your whole write surface. A **new** file is not in the grant, even one
+under `test/` with a name of your own — the grant lists files, not directories. Extend the
+existing suites instead; if a task genuinely cannot be done without a new file, stop and say
+so rather than adding one and explaining afterwards.
 
 ## What this area has been wrong about before
 
