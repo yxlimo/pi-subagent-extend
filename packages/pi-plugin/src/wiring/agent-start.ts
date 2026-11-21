@@ -3,8 +3,10 @@ import { spawn } from "node:child_process";
 import { closeSync, lstatSync, mkdirSync, openSync, readlinkSync, realpathSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { DenyCounter } from "../budgets.ts";
 import { deliverableTarget, ensureDeliverableLink, mainRepoRoot } from "../deliverable.ts";
 import { canonical } from "../paths.ts";
+import { denyAll } from "../policy.ts";
 import { agentMdDirs, outputFromBlock, parseRoleName, policyFromBlock, readExtendBlock, resolveAgentFile, resolveRoleFromPrompt, setupFromBlock, worktreeFromBlock } from "../role-config.ts";
 import { setDeliverableTargetPath } from "../sandbox.ts";
 import type { Wiring } from "./context.ts";
@@ -318,10 +320,24 @@ export async function wireAgentStart(w: Wiring, event: BeforeAgentStartEvent, ct
 		}
 		const read = readExtendBlock(file);
 		const converted = read.block ? policyFromBlock(read.block) : { problems: [] as string[] };
-		for (const problem of [...read.problems, ...converted.problems]) {
+		const problems = [...read.problems, ...converted.problems];
+		for (const problem of problems) {
 			w.uiWarning?.(`pi-subagents-extend: ${role} (${file}): ${problem}`);
 		}
-		if (converted.policy && Object.keys(converted.policy).length > 0) {
+		// md 存在且声明了策略却用不上 = 配置坏了，必须 fail closed：用户配的限制一样都没生效，
+		// 静默放开比全拒危险。全拒并把 md 路径与问题原文点名进拒绝文案——那是父代理改错的唯一线索。
+		// 两个不算问题的缺口保持原样：md 没有 extend 块（不表达限制是合法角色）与找不到 md
+		// （内置角色本来就没有，全拒会把普通子代理锁死）。
+		if (problems.length > 0) {
+			w.roleSource = `role md ${file}`;
+			w.probe?.dispose();
+			w.policy = denyAll(
+				`role md ${file} could not be applied (${problems.join("; ")}); everything is refused — fix the extend block in the md, then dispatch again`,
+			);
+			w.denyCounter = new DenyCounter(w.policy.maxDenies);
+			w.writeDenyCounter = new DenyCounter(w.policy.maxWriteDenies, "write");
+			w.armProbe();
+		} else if (converted.policy && Object.keys(converted.policy).length > 0) {
 			w.roleBaseline = converted.policy;
 			w.roleSource = `role md ${file}`;
 			w.applyRoleBaseline();

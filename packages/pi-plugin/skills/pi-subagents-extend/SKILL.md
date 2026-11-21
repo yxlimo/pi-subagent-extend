@@ -202,8 +202,11 @@ The mechanism: the extension is loaded by a loader that passes **no** profile na
 (`.pi/agent-profiles/md-role.ts`, which is just `export default activate`), declared in the role
 md's `subagentOnlyExtensions`. Nothing reads a bindings file; the reader recomputes the policy
 from the merged fields, so a md that supplies `scope` produces an active policy with no other
-configuration at all. A dispatch that carries neither bindings nor a role md with an `extend`
-block leaves the extension loaded and inactive — fail open.
+A dispatch that carries neither bindings nor a role md with an `extend`
+block leaves the extension loaded and inactive — fail open. A md that **exists and declares
+an `extend` block but cannot be applied** — unreadable file, invalid YAML, `extend` not an
+object, unknown block names, bad field values — fails **closed**: every tool call is refused
+and the refusal names the md path and the problems, so a typo cannot silently drop a grant.
 
 What bites, in the order it bit here:
 
