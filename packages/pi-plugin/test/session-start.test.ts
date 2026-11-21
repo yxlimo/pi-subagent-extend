@@ -345,6 +345,26 @@ if (!gitAvailable) {
   console.log("  ok   a dispatch's own worktree: true fills in, with no role-md warning")
 }
 
+
+// 182a. md 里 worktree.enabled: false 是明确的「不用」：派单没写 worktree 时既不补值也不拒绝。
+{
+  const proj = join(workdir, "proj-worktree-default")
+  writeAgentMd({
+    cwd: proj,
+    role: "wt-md-false",
+    extend: {
+      permissions: { scope: ["."], allowTools: ["subagent"] },
+      worktree: { enabled: false },
+    },
+  })
+  const h = await handler({ cwd: proj })
+  const input: Record<string, unknown> = { agent: "wt-md-false", task: "x" }
+  assert.equal(await h.call("subagent", input), undefined, "an explicit no-worktree role is not a refusal")
+  assert.ok(!Object.hasOwn(input, "worktree"), "enabled: false must not fill a default")
+  h.restore()
+  console.log("  ok   a role md's worktree.enabled: false leaves the input untouched")
+}
+
 // 183-200. Role config source and versioned namespace (phase 1).
 const rc = (await import(join(repo, "src", "role-config.ts"))) as unknown as typeof import("../src/role-config.ts")
 
