@@ -21,82 +21,13 @@ import type {
   SessionContext,
 } from "./types.ts"
 import { handler, writeAgentMd, childSystemPrompt, specOf, specPathOf, liveSandbox, fakeClock, defaultProbe, workdir, repo, ext } from "./harness.ts"
+import { described, helperBin, restoreState, testState } from "./support.ts"
 
-// The suite must not write into the developer's real home. Spec files, `git-excludes` and the
-// `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
-// the run. Not `tmpdir()`: the helper mounts a private tmpfs over `/tmp`, so a grant underneath
-// it cannot take effect — the helper refuses such a spec (exit 77) and names the tmpfs as the
-// cause.
-// Redirecting `HOME` instead is too blunt: on CI `cargo` is rustup's shim and tries to create
-// `$HOME/.rustup`, which the sandbox refuses because the package directory is not a write grant.
-const realState = process.env.PI_SUBAGENTS_EXTEND_STATE
-const testState = mkdtempSync(join(repo, ".test-state-"))
-process.env.PI_SUBAGENTS_EXTEND_STATE = testState
-
-// Cleanup runs on `exit` too, not only on the success path: a failed assertion would otherwise
-// leave `.test-state-*` behind as an untracked directory, and pi-subagents' own patch capture
-// (`git add -A`) would sweep it into a patch. Both steps are idempotent.
-const restoreState = (): void => {
-  if (realState === undefined) delete process.env.PI_SUBAGENTS_EXTEND_STATE
-  else process.env.PI_SUBAGENTS_EXTEND_STATE = realState
-  rmSync(testState, { recursive: true, force: true })
-}
-process.on("exit", restoreState)
-// `exit` does not run on a signal: Ctrl-C during a run would leave the directory behind.
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-  process.on(signal, () => {
-    restoreState()
-    process.exit(130)
-  })
-}
-
-// The sandbox helper is a Rust binary. Tests execute the cargo build output and
-// never the copy in `bin/`: that copy belongs to a loaded extension, so writing to
-// it during a test run would swap the binary out from under a running session —
-// `ETXTBSY` at best, a silent behaviour change between calls at worst. An explicit
-// override wins, so a stub can be substituted; then the build output; a packaged
-// `bin/` copy is the last resort for a checkout with no Rust toolchain.
-function resolveHelperBin(): string {
-  const candidates = [
-    process.env.PI_SUBAGENTS_EXTEND_HELPER?.trim(),
-    join(repo, "..", "helper", "target", "release", "pi-subagents-extend-helper"),
-    join(repo, "bin", "pi-subagents-extend-helper"),
-  ].filter((candidate): candidate is string => Boolean(candidate))
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate
-  }
-  throw new Error(
-    "no sandbox helper found; run `cargo build --release --manifest-path packages/helper/Cargo.toml`",
-  )
-}
-const helperBin = resolveHelperBin()
-
-// These cases inspect the command the extension rewrites and the spec it writes;
-// none of them executes the helper, so the kernel's Landlock ABI only decides
-// whether bash is offered at all. Where the ABI is below the required 7 the real
-// helper refuses bash, and the suite would report a failure that says nothing about
-// the extension. Point the environment at a stub instead: enforcement is covered by
-// the helper's own cargo tests and by running this suite on a 6.15 or later kernel.
-interface HelperDescription {
-  landlock?: { kernel_abi?: number; supported?: boolean }
-  network_namespace?: boolean
-}
-
-function helperAbi(bin: string): HelperDescription | undefined {
-  const out = spawnSync(bin, ["--describe"], { encoding: "utf8" });
-  try {
-    return JSON.parse(out.stdout) as HelperDescription;
-  } catch {
-    return undefined;
-  }
-}
-
-const described = helperAbi(helperBin);
 // Cases that execute the helper for real need a kernel that can enforce the
 // sandbox. With the stub there is nothing to enforce, so those parts are skipped
 // instead of asserting on the stub's silence.
-if (described?.landlock?.supported) {
-  process.env.PI_SUBAGENTS_EXTEND_HELPER = helperBin
+if (described()?.landlock?.supported) {
+  process.env.PI_SUBAGENTS_EXTEND_HELPER = helperBin()
 } else {
   const stubDir = mkdtempSync(join(tmpdir(), "pi-subagents-extend-stub-"))
   const stub = join(stubDir, "pi-subagents-extend-helper")
@@ -107,7 +38,7 @@ if (described?.landlock?.supported) {
   chmodSync(stub, 0o755)
   process.env.PI_SUBAGENTS_EXTEND_HELPER = stub
   console.log(
-    `  note  kernel Landlock ABI ${described?.landlock?.kernel_abi ?? "unknown"} is below the required 7;` +
+    `  note  kernel Landlock ABI ${described()?.landlock?.kernel_abi ?? "unknown"} is below the required 7;` +
       " the suite runs against a stub helper that reports ABI 7",
   )
 }
@@ -1029,7 +960,7 @@ async function mdChild({ cwd, prompt, bindings }: { cwd: string; prompt: string;
 // 49. A real toolchain can write its own artefacts through the rewritten command.
 // Guards: a real sandbox on this kernel, and the toolchain installed.
 {
-  const liveSandbox = described?.landlock?.supported === true
+  const liveSandbox = described()?.landlock?.supported === true
   const have = (bin: string): boolean => spawnSync("sh", ["-c", `command -v ${bin}`], { encoding: "utf8" }).status === 0
   const gitEnv = {
     ...process.env,
