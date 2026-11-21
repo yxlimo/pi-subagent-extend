@@ -20,7 +20,7 @@ import type {
   Outcome,
   SessionContext,
 } from "./types.ts"
-import { handler, specOf, ext, workdir, repo, writeAgentMd } from "./harness.ts"
+import { handler, specOf, ext, workdir, repo, writeAgentMd, childSystemPrompt } from "./harness.ts"
 
 // The suite must not write into the developer's real home. Spec files, `git-excludes` and the
 // `xdg-cache` tree live in the extension's state directory, so point that at a throwaway one for
@@ -626,6 +626,81 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   console.log("  ok   the role md names itself as the source when it is the only configuration")
 }
 
+
+// 202. A payload key and an md deny union name both layers, in contribution order.
+//      A refusal's source is the parent agent's only clue about which file to edit, so it names
+//      every layer that actually contributed — extensionBindings first, then the role md — and
+//      only those layers. Here the md contributes through the deny union alone: the payload
+//      declares scope and bash, so the md's only way in is its deny entry joining the union.
+{
+  const proj = join(workdir, "role-proj-202")
+  const md = writeAgentMd({
+    cwd: proj,
+    role: "source-label-coder-202",
+    extend: { permissions: { scope: ["src/**"], bash: { deny: ["git stash"] } } },
+  })
+  const run = await childRun({
+    cwd: proj,
+    home: workdir,
+    systemPrompt: childSystemPrompt("source-label-coder-202", "Contribution-order role for the deny union."),
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["git status", "git stash"] } },
+    }),
+  })
+  assert.equal(await run.call("bash", { command: "git status" }), undefined, "the payload's own allowlist still runs its commands")
+  const denied = await run.call("bash", { command: "git stash" })
+  assert.ok(denied && denied.block, "the md's deny entry blocks a command the payload's own allowlist names")
+  assert.ok(
+    denied.reason.includes(`(source: extensionBindings pi-subagents-extend/1 + role md ${md})`),
+    `the reason must name the bindings layer then the md layer, got: ${denied.reason}`,
+  )
+  run.restore()
+
+  // Negative control: the union is inert — the payload's deny already carries the entry — so the
+  // source must not gain the md layer. Without this, a "names both layers" assertion would pass
+  // even when the union added nothing.
+  const inertMd = writeAgentMd({
+    cwd: proj,
+    role: "union-inert-coder-202",
+    extend: { permissions: { scope: ["src/**"], bash: { deny: ["git stash"] } } },
+  })
+  const inert = await childRun({
+    cwd: proj,
+    home: workdir,
+    systemPrompt: childSystemPrompt("union-inert-coder-202", "Inert-union control for the deny union."),
+    bindings: JSON.stringify({
+      "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["git status"], deny: ["git stash"] } },
+    }),
+  })
+  const sharedDeny = await inert.call("bash", { command: "git stash" })
+  assert.ok(sharedDeny && sharedDeny.block, "the deny entry both layers carry still blocks the command")
+  assert.ok(
+    sharedDeny.reason.includes("(source: extensionBindings pi-subagents-extend/1)") && !sharedDeny.reason.includes(inertMd),
+    `an unchanged deny must not name the md as a source, got: ${sharedDeny.reason}`,
+  )
+  inert.restore()
+
+  // Second control: the md declares bash but no deny, so the union has nothing to add either.
+  const noDenyMd = writeAgentMd({
+    cwd: proj,
+    role: "no-deny-coder-202",
+    extend: { permissions: { scope: ["src/**"], bash: { allow: ["cat f"] } } },
+  })
+  const plain = await childRun({
+    cwd: proj,
+    home: workdir,
+    systemPrompt: childSystemPrompt("no-deny-coder-202", "Deny-less control for the deny union."),
+    bindings: JSON.stringify({ "pi-subagents-extend/1": { scope: ["**"], bash: { allow: ["git status"] } } }),
+  })
+  const missed = await plain.call("bash", { command: "git commit" })
+  assert.ok(missed && missed.block, "a command outside the payload allowlist is refused")
+  assert.ok(
+    missed.reason.includes("(source: extensionBindings pi-subagents-extend/1)") && !missed.reason.includes(noDenyMd),
+    `an md bash block without deny must not name the md as a source, got: ${missed.reason}`,
+  )
+  plain.restore()
+  console.log("  ok   the bindings key and an md deny union name both layers, in contribution order")
+}
 // 203. A role tag below the first line still applies the md scope.
 {
   const home = join(workdir, "role-home-203")
