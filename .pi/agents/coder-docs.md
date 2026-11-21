@@ -13,10 +13,8 @@ extend:
   permissions:
     scope: ["."]
     write:
+      - docs
       - README.md
-      - docs/usage.md
-      - docs/architecture.md
-      - docs/testing.md
       - packages/pi-plugin/skills
       - .test-state
     budgets:
