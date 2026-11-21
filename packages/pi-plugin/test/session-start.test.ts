@@ -652,8 +652,10 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
 //      every layer that actually contributed — extensionBindings first, then the role md — and
 //      only those layers. Here the md contributes through the deny union alone: the payload
 //      declares scope and bash, so the md's only way in is its deny entry joining the union. The
-//      denied command is read-class (`git status`), so the deny list — not the bash.writable write
-//      gate — is the blocking cause; a write-gate refusal would keep the case green without the union.
+//      denied command is read-class (`git status`) so the assertion pins *which* gate stopped it:
+//      the deny check runs before the write gate and before the allowlist check, so a read-class
+//      command can only be stopped by the deny. A write-class fixture is blocked too, but by a
+//      message that says nothing about deny — it would pin less than this case claims.
 {
   const proj = join(workdir, "role-proj-202")
   const md = writeAgentMd({
@@ -672,8 +674,10 @@ const childRun = async (opts: { cwd: string; home: string; systemPrompt: string;
   assert.equal(await run.call("bash", { command: "git diff" }), undefined, "the payload's own allowlist still runs its commands")
   const denied = await run.call("bash", { command: "git status" })
   assert.ok(denied && denied.block, "the md's deny entry blocks a command the payload's own allowlist names")
-  // The refusal must come from the deny list, not the write gate: git status is read-class, so
-  // bash.writable plays no part, and a write-gate message here would mean the case regressed.
+  // The refusal must be the deny's: `git status` is read-class, so the write gate cannot be the
+  // cause, and a write-gate message here would mean this case lost the claim it makes. (The deny
+  // runs before the write gate, so a write-class fixture would also be denied — by a message that
+  // never mentions deny.)
   assert.ok(
     denied.reason.includes("command blocked by the project profile"),
     `the refusal must be a deny refusal, not a write-gate refusal, got: ${denied.reason}`,
