@@ -1,11 +1,11 @@
 ---
 name: pi-subagents-extend
-description: When delegating a pi-subagents subagent, use extensionBindings to confine its file reads and writes and the commands it may run to this task's scope — every out-of-scope tool_call is refused, and commands on the bash allowlist run in a Landlock sandbox (no network by default, writes confined to the allowed directories). When the project declares the role in `.pi/subagent-bindings.json`, dispatch with `agent`, `model` and `task` only and let the profile carry the scope. Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, to install dependencies or run verification in a worktree, and to set per-role default scopes (profiles). Probe criteria and stopping are covered by pi-subagents-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagents-extend-context.
+description: Use when delegating a pi-subagents subagent that must be confined to a file and command scope, and when giving each code area its own role. Declare the role once in its agent definition — `.pi/agents/<role>.md`, an `extend:` block holding the write grant, the command allowlist, the deny budget and the deliverable — then dispatch with `agent`, `model` and `task` only; a per-dispatch `extensionBindings` payload narrows one task further. Every out-of-scope tool_call is refused, allowlisted commands run in a Landlock sandbox (no network by default, writes confined to the grants), and a refusal names the file that decided it. Use it to keep a subagent from sweeping the whole repository, to allow typecheck/test, or to install dependencies in a worktree. Probe criteria and stopping are covered by pi-subagents-extend-probes, and stripping the main-agent-only sections of AGENTS.md by pi-subagents-extend-context.
 ---
 
 # pi-subagents-extend: confine a subagent to the task scope
 
-When delegating a subagent, pass the scope of this task through `extensionBindings` — unless the project declares the role in `.pi/subagent-bindings.json`, in which case the profile carries the scope and the dispatch passes only `agent`, `model` and `task` (see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time)). In the subagent's session, every tool_call outside that scope is refused (fail closed): this keeps the subagent from wandering through the repository aimlessly.
+When delegating a subagent, pass the scope of this task through `extensionBindings` — or rely on the role md's `extend` block when the role already declares the default there (see [Area roles](#area-roles-one-md-per-code-area-policy-inside-the-md)). In the subagent's session, every tool_call outside that scope is refused (fail closed): this keeps the subagent from wandering through the repository aimlessly.
 
 ## When to use it
 
@@ -16,7 +16,7 @@ When delegating a subagent, pass the scope of this task through `extensionBindin
 | A read-only reviewer still needs to write its report somewhere outside the tree | `readOnly` + an absolute `writeScope` entry + `write` in `allowTools` | [The scope field](#the-scope-field) |
 | The subagent has to run typecheck, tests or a build itself | `bash.allow` plus `writable: true` for commands whose program can write (`pnpm`/`npm`/`yarn`/`bun` with `run`/`test`/`exec` are refused at the gate without it; it also lets artefacts land on disk) | [The bash field](#the-bash-field) |
 | The subagent runs in `worktree: true` and has to install dependencies | The project commits `.pi/worktree-setup.sh`, together with `writablePaths` / `network` | [bash in a worktree](#bash-in-a-worktree) |
-| You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | agent profile | "Profiles (per-role defaults)" below |
+| You do not want to hand-write the scope on every dispatch (it gets forgotten when you are busy) | the role md's `extend` block | [Area roles](#area-roles-one-md-per-code-area-policy-inside-the-md) |
 | The subagent starts idling or going in circles | The other half of this package: probes | skill `pi-subagents-extend-probes` |
 | AGENTS.md mixes in rules only the main agent should see | The other half of this package: context isolation | skill `pi-subagents-extend-context` |
 
@@ -35,27 +35,25 @@ The delegated agent must be able to load this extension. Choose one:
 
 Without the extension loaded, passing bindings does nothing: no interception happens.
 
-Under a project profile the role's loader is declared instead of the entry point: it imports the extension itself, so listing `…/src/index.ts` is not needed (see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time)).
-
+A role md loads the extension through the md-role loader (`.pi/agent-profiles/md-role.ts`, which passes no profile name), so listing `…/src/index.ts` beside it is not needed (see [Area roles](#area-roles-one-md-per-code-area-policy-inside-the-md)).
 If the project uses the `<!-- main-agent-only:start -->` marker, add `, …/src/child-context.ts` to the same line, otherwise the subagent reads the main-agent-only sections (see skill `pi-subagents-extend-context`).
 
 Allowlisted commands run under the sandbox helper (the Rust binary in `packages/helper`): the file scope is enforced by Landlock, the network is off by default (all outbound TCP/UDP is cut and DNS resolution fails, but loopback works inside the sandbox, so a local server can be started and reached), and processes and capabilities are isolated as well (the host processes are invisible, the command has no capability at all). The host needs Landlock ABI 7 (Linux 6.15+); when the helper is missing or the kernel is too old, bash stays disabled (the remaining features are unaffected).
 
 ## Call template
 
-**When the project declares a profile for the role, pass only `agent`, `model` and `task`:**
+**When the role md already carries the default, pass only `agent`, `model` and `task`:**
 
 ```text
 subagent(agent: "coder", model: "buddy/coder-d", task: "<task description>")
 ```
 
-Hand-written `extensionBindings` is the path for a one-off scope, not the default, because it fails in two ways:
+Hand-written `extensionBindings` narrows one task further than its role md, and is also the only way to bind a role whose md does not declare an `extend` block. It fails in two ways when used as the default:
 
 - **A fan-out cannot carry it.** `extensionBindings` is a top-level parameter of `subagent` only. A `tasks` item accepts `agent`, `task`, `cwd` and `model` and nothing else, and rejects any other field; the same holds for a `chain` step and for `args.tasks` of a `workflow: "parallel"` script. There is no place in a parallel dispatch to declare a scope.
-- **It is forgotten.** A dispatch that carries neither bindings nor a profile is not constrained at all: the extension is loaded and inactive.
+- **It is forgotten.** A dispatch that carries neither bindings nor a role md with an `extend` block is not constrained at all: the extension is loaded and inactive.
 
-Declaring the role once in `.pi/subagent-bindings.json` removes both — see [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time).
-
+Declaring the default once in the role md removes both — see [Area roles](#area-roles-one-md-per-code-area-policy-inside-the-md).
 Reading or writing files, no commands needed:
 
 ```text
@@ -85,8 +83,7 @@ subagent(
 
 The namespace is fixed at `pi-subagents-extend/1`. Pass it on every delegation, and narrow the scope to the files and directories this task actually touches; do not default to the whole repository.
 
-A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
-
+A dispatch's `extensionBindings` and the role md's `extend` block use the same fields under different spellings: the dispatch nests them under `permissions` and spells the write scope `writeScope`, the deny budgets `maxDenies` / `maxWriteDenies`, plus the dispatch-only `maxReads`; the role md spells the write scope `write` and the budgets `budgets.deny` / `budgets.writeDeny`, and keeps `worktree` as its own block. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 The subagent runs in a worktree (`worktree: true`) and has to install dependencies or run verification:
 
 ```text
@@ -118,13 +115,13 @@ subagent(
 | --- | --- | --- |
 | `scope` | `string[]` | Required. Globs describing what the subagent may read; an empty array refuses all file access |
 | `writeScope` | `string[]` | Optional. Globs describing what `edit`/`write` may touch. Omitted means the same as `scope`; `[]` means no writes at all while reads keep working. Relative entries are bound to the task tree; an **absolute** entry grants that path wherever it is |
-| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused — the same as `writeScope: []` — which suits read-only research and review agents. An explicit `writeScope` beside it, in the same layer, wins, so a reviewer can be given exactly one file to write. In a **dispatch** it also beats the profile's `writeScope`: read-only means read-only unless this dispatch names a directory |
+| `readOnly` | `boolean` | Defaults to `false`; when `true`, `edit`/`write` are refused — the same as `writeScope: []` — which suits read-only research and review agents. An explicit `writeScope` beside it, in the same layer, wins, so a reviewer can be given exactly one file to write. In a **dispatch** it also beats the role md's `writeScope`: read-only means read-only unless this dispatch names a directory |
 | `maxReads` | `number` | Optional. Upper bound on successful `read` calls; once it is exceeded, every read is refused |
 | `maxWriteDenies` | `number` | Optional. Write refusals have their own budget: defaults to 2, `0` disables. Kept apart from `maxDenies` because repeatedly trying to write is a usage mistake, answered by delivering a report |
-| `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way. It cannot widen a path tool: file tools are judged by the scope first, so listing a write tool here does not free it from `writeScope`. Unioned with the profile's list; `reset: true` clears that list |
-| `reset` | `boolean` | Optional, and only in a layer that has one below it. "Only these entries this time": clears the inherited `bash.read` / `bash.write` / `bash.allow` **and** `allowTools` before this layer's own lists are applied. `bash.deny` is not cleared. See [Profiles](#profiles-per-role-defaults-no-need-to-pass-them-each-time) |
+| `allowTools` | `string[]` | Optional. Extra tool names to allow; executor-type tools such as `bash` cannot be allowed this way. It cannot widen a path tool: file tools are judged by the scope first, so listing a write tool here does not free it from `writeScope`. Unioned with the role md's list; `reset: true` clears that list |
+| `reset` | `boolean` | Optional, and only in a layer that has one below it. "Only these entries this time": clears the inherited `bash.read` / `bash.write` / `bash.allow` **and** `allowTools` before this layer's own lists are applied. `bash.deny` is not cleared. See [Area roles](#area-roles-one-md-per-code-area-policy-inside-the-md) |
 | `tools` | `object` | Optional. Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `path` names the argument that carries the target; `false` means the tool has no path argument, and a write tool declared that way is always refused. Omit `path` and the argument name is read from the tool's own schema. `access` is `read` or `write`; a tool that touches a **second** file (`copy`/`move`) takes `transferSource: "read"\|"write"` as well — `copy`'s source is only read, `move`'s is written to, and an undeclared transfer tool is judged as a write on both sides |
-| `worktree` | `boolean` | Optional, defaults to `false`. `true` in a role profile (or in a dispatch's own bindings) fills `worktree: true` on `subagent` and nested `subagent_launch` calls for that role when the caller did not supply it — `??=` semantics, so `null` / `undefined` are filled while an explicit `false` (or any other value) on the call wins. It only fills a value: no refusal, no deny-budget charge. An `agent` with no strategy is left alone (fail open). When the value comes from a profile file that git does not track, a one-time UI warning says to commit that file or move the configuration into the dispatch's own bindings: a worktree copy will not contain an untracked profile, so the child would be denied every call. |
+| `worktree` | `boolean` | Optional, defaults to `false`. `true` in the role md's `extend.worktree` block (or in a dispatch's own bindings) fills `worktree: true` on `subagent` and nested `subagent_launch` calls for that role when the caller did not supply it — `??=` semantics, so `null` / `undefined` are filled while an explicit `false` (or any other value) on the call wins. It only fills a value: no refusal, no deny-budget charge. An `agent` with no strategy is left alone (fail open). The role md is committed with the project, so a worktree copy carries it; a dispatch-only value does not survive a worktree by itself either way. |
 
 Glob rules: `**` matches any number of levels (including zero), `*` matches characters within a single level, `?` matches a single character.
 
@@ -160,7 +157,7 @@ Keep `.git` out of `writeScope` — the sandbox is given the parts of it git has
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are otherwise derived from the manifests the project has. `false` disables detection, an array appends explicit directories (created if missing) |
 | `bash.env` | `object` | Environment variables injected into the sandbox (written into the spec's `env`). `XDG_RUNTIME_DIR` (the sandbox's private /tmp, which pnpm's lock directory relies on) and, in the worktree case, `MISE_STATE_DIR` are injected by default. A `TMPDIR` set here is the directory the helper shadows with its private tmpfs |
 | `bash.gitExcludes` | `boolean` | Defaults to `true`. Injects global exclude rules into git inside the sandbox (`node_modules/`, `.pnpm-store/`), so that `git add -A` does not pull the dependency directories into the index |
-| `bash.deny` | `string[]` | Blacklist: a matched command is **always refused, and the caller's allowlist cannot widen it**. Usually written in an agent profile to enforce the project skeleton (`git stash`, `git reset`) |
+| `bash.deny` | `string[]` | Blacklist: a matched command is **always refused, and the caller's allowlist cannot widen it**. Usually written in the role md's `bash.deny` to enforce the project skeleton (`git stash`, `git reset`) |
 | `bash.dependencyGate` | `boolean \| string[]` | Defaults to `true`. Every directory in the tree (two levels down) that has a package-manager lockfile (pnpm, npm, yarn, bun) must also have `node_modules/.bin`. When one does not, build and package-manager commands are refused with the directory named; read-only commands and `git` run anyway, because `git` needs no dependencies and committing is what keeps a worktree from being discarded. Wrappers are seen through (`sh -c "pnpm test"`, `env pnpm test`), but a script file (`node build.mjs`) is opaque — the gate reduces a confusing failure, it does not make one impossible. It reports a missing install, not an install that has drifted from the lockfile. Not a permission the parent can widen: the install has to finish (`worktreeSetupHook`) or the store has to be writable. An array lists directory prefixes to skip, for a lockfile nobody installs (a `fixtures/` sample, a vendored example): a plain path covers that directory and everything below it, resolved against the working directory, and the match stops at a path boundary (`fixtures` does not cover `fixtures-old`); globs are not accepted. `[]` skips nothing, the same as `true`. `false` turns it off for a task that never builds |
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. Armed, the helper kills the command tree after that many seconds with **no** CPU use, prints the reason and exits `79`. It separates a deadlock from a slow build — a compiling tree gains CPU every sample, a tree waiting on a lock or an orphaned child gains none — which a wall-clock timeout cannot do. Costs: a command that deliberately waits (`sleep`, a backoff loop) is killed too, and the helper cannot see output (stdio is inherited, not piped), so a quiet-but-healthy gap longer than the number is a false positive. Choose a value well above the longest gap between CPU bursts; the result carries a `[sandbox]` note saying a retry stalls the same way. |
 
@@ -170,7 +167,7 @@ For a bash command outside the allowlist, the refusal text carries the detected 
 
 A directory that already exists is granted. A toolchain's main output (`target` for Rust, `__pycache__` for Python, `_build` for Elixir) is also created when missing, because the first `cargo test` in a fresh checkout would otherwise fail. The rest — `dist`, `.next`, `coverage` — are granted only if the project already has them; the extension does not invent directories. Build caches that live outside the repository (`go`'s, `mypy`'s) go to a persistent `~/.cache` directory through `XDG_CACHE_HOME`; the sandbox's private `/tmp` would make every run recompile.
 
-`bash.scratchPaths` adjusts the list: `false` turns detection off entirely, an array appends explicit directories (created if missing). Put it in the project profile when a role always runs the same build, so no dispatch has to repeat it.
+`bash.scratchPaths` adjusts the list: `false` turns detection off entirely, an array appends explicit directories (created if missing). Put it in the role md when a role always runs the same build, so no dispatch has to repeat it.
 
 Everything else is still refused. A plain `echo x > tmp.txt` in the working directory, or a tool writing into a directory the project does not have, fails with `Permission denied` — deliberately, because otherwise `lib/a > lib/b` would walk straight around a directory the subagent may read but not write. Fix it by naming the location:
 
@@ -185,69 +182,28 @@ Entries come in two forms:
 - Literal: split on whitespace and match token by token as a prefix. `"pnpm test"` allows `pnpm test -t foo`, but not `pnpm publish`.
 - `re:` prefix: a regex, anchored against the whole string. `"re: ^pnpm -r (test|build)$"`. Regexes are not guessed automatically — command arguments often contain `*` and `.`, and guessing wrong in that direction grants more than was intended.
 
-## Profiles (per-role defaults, no need to pass them each time)
-
-`extensionBindings` can only be hand-written on each dispatch; an agent definition has nowhere to declare defaults, and forgetting to pass them means **no restriction at all**. A profile keeps the defaults with the role, and a dispatch to that role then needs only `agent`, `model` and `task`.
-
-Adding a role takes three pieces. This repository has both of its roles wired up, and `coder` is the worked example:
-
-1. **The role's key in `.pi/subagent-bindings.json`**, beside `default`. The value is built from the same fields as the two tables above:
-
-```json
-// .pi/subagent-bindings.json (trimmed)
-{
-  "default": { "maxDenies": 8, "bash": { "deny": ["git commit"] } },
-  "coder": { "scope": ["."], "bash": { "read": ["cat"], "write": ["node"], "writable": true } },
-  "review": { "scope": ["."], "readOnly": true, "bash": { "read": ["git diff"] } }
-}
-```
-
-2. **A loader at `.pi/agent-profiles/<role>.ts`** — two lines, and the import path has to be absolute because Node does not expand `~` in an import specifier:
-
-```ts
-// .pi/agent-profiles/coder.ts
-import { profile } from "/home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/profile.ts";
-
-export default profile("coder");
-```
-
-3. **That loader's path in `subagentOnlyExtensions` of the agent definition** at `.pi/agents/<agent>.md`:
-
-```markdown
----
-name: coder
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/coder.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
----
-```
-
-Two things about the third piece:
-
-- **The loader is also the extension's entry point.** It imports `profile.ts`, which calls `activate()`, so the loader alone loads the extension and constrains the session — `.pi/agents/coder.md` declares nothing else for this extension. Declaring `…/src/index.ts` beside it, as `.pi/agents/ext-review.md` does, adds an entry point without a role; the profile is carried by the loader either way.
-- **Omitting the loader leaves the extension loaded but constraining nothing (fail open).** The role is learned from the module that is loaded, not from the agent's name: without the loader no profile name reaches `activate()`, the policy stays inactive, and every tool call passes. Listing the extension's entry point in `subagentOnlyExtensions` is not enough for exactly this reason — the session looks confined and is not.
-
-Rules:
-
-- **Three layers, one direction: `default` → role → dispatch.** `default` is the **floor** for every role, and each layer adds to the one below it — a role inherits `default` rather than restating it, and cannot be narrowed by writing a shorter list. Narrowing is `reset: true`.
-- **Merging is per field, never one layer replacing another.** Unioned with the profile: `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths` (base first, duplicates dropped) — a dispatch adds a grant instead of restating the list. An **explicitly empty array** (`"read": []`) is a different instruction: it empties that column, so `"bash": { "read": [], "write": [] }` turns bash off even when the role carries a long allowlist (`allowTools` has no such form — `reset: true` clears it). Note that `bash.write` and `bash.allow` are **merged as one column** — emptying either empties the whole column, though the spellings no longer mean the same thing: `write` grants write, `allow` leaves the read/write judgement to the extension — `"allow": []` beside `"write": ["git status"]` keeps only `git status` and drops whatever `write` the profile supplied. Replaced by the call: `scope` and `writeScope`, because a task range has to be able to be sharper than the role default and a union would widen file access. The call wins for the rest (`readOnly`, `maxReads`, `maxDenies`, `maxWriteDenies`, `bash.writable`, `bash.network`, `bash.dependencyGate`, `bash.cpuStallSeconds`, `bash.scratchPaths`, …).
-- **`readOnly: true` in a dispatch, with no `writeScope` in that same dispatch, beats the profile's `writeScope`.** Otherwise the role's report directory would re-grant what the dispatch just forbade. Name the `writeScope` in the dispatch to keep "read-only except this one directory".
-- `bash.deny` is a union and **cannot be relaxed by the caller** — "structurally forbidden" relies on it, not on the defaults. Neither `reset: true` nor `bash.reset` drops it.
-- **`reset: true` means "only these entries this time"**: it clears the inherited `bash.read` / `bash.write` / `bash.allow` **and** `allowTools` before this layer's own are applied. `{ "scope": ["src/auth/**"], "reset": true, "allowTools": ["read"], "bash": { "read": ["pnpm run typecheck"] } }` may run that one command and nothing else, and its `allowTools` is exactly `["read"]` rather than a union with the role's list, however long that profile is. A role uses the same key against `default`. `bash.reset` is the bash-only form, for callers that only mean the commands.
-- A `bash` written as anything but an object **closes** bash instead of inheriting the profile's allowlist.
-- A profile may omit `scope`: file access is then refused entirely while the command allowlist still applies (a forgotten binding is a loud failure).
-- When the profile cannot be read, everything is refused; it does not fall back to no restriction.
-- The main session does not load these loaders, so the main agent is not locked down by accident.
-- **`worktree: true` is a dispatch default, not a permission.** It applies to `subagent` and to the nested `subagent_launch` pi-subagents sends before workflow children, so `tasks[]`, `chain` and script workflows get the same treatment. A call that says `worktree: false` keeps its shared working tree: the fill is `??=`, so only a missing or `null` value becomes `true`. No call is refused and no deny budget is charged for this.
 ## Area roles: one md per code area, policy inside the md
 
-When the code is split into areas, give each area its own agent definition and keep the policy
-there — `.pi/agents/coder-<area>.md` — instead of adding a key per area to
-`.pi/subagent-bindings.json`. Dispatch then needs only `agent`, `model` and `task`, and one file
-holds the area's write grant, its allowlist, its budget and the one command that decides the work.
+Per-role defaults live in the role's own agent definition, `.pi/agents/<role>.md`, under an
+`extend:` block — not in a bindings file. The block carries:
+
+- `extend.permissions` — the same fields as the two tables above, in the role md's spellings:
+  `scope`, `write` (the write scope), `readOnly`, `allowTools`, `budgets` (`budgets.deny` /
+  `budgets.writeDeny`), and `bash` with `allow`, `deny`, `writable` and `network`;
+- `extend.setup.preExec` — commands run **unsandboxed** at session start;
+- `extend.output.deliverable` — what the role must hand back;
+- `extend.worktree` — the dispatch default for `worktree`.
+
+One file holds the area's write grant, its allowlist, its budget and the one command that decides
+the work, and a dispatch to that role needs only `agent`, `model` and `task`; a per-dispatch
+`extensionBindings` payload narrows one task further on top of that default.
 
 The mechanism: the extension is loaded by a loader that passes **no** profile name
-(`.pi/agent-profiles/md-role.ts`, which is just `export default activate`). The policy then comes
-from the role md's `extend.permissions`, because the reader recomputes the policy from the merged
-fields — a md that supplies `scope` produces an active policy with no bindings entry at all.
+(`.pi/agent-profiles/md-role.ts`, which is just `export default activate`), declared in the role
+md's `subagentOnlyExtensions`. Nothing reads a bindings file; the reader recomputes the policy
+from the merged fields, so a md that supplies `scope` produces an active policy with no other
+configuration at all. A dispatch that carries neither bindings nor a role md with an `extend`
+block leaves the extension loaded and inactive — fail open.
 
 What bites, in the order it bit here:
 

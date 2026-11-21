@@ -28,16 +28,16 @@ subagent(
 )
 ```
 
-The namespace key never holds policy fields directly: a dispatch wraps them in `permissions`. A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
+The namespace key never holds policy fields directly: a dispatch wraps them in `permissions`. The role md's `extend.permissions` block uses the same fields under different spellings: it spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 
 | Field | Level | Type | Meaning |
 | --- | --- | --- | --- |
 | `scope` | `permissions` | `string[]` | Globs describing what the subagent may read. Required; an empty array refuses all file access. |
 | `writeScope` | `permissions` | `string[]` | Globs describing what a write tool may touch (`edit`/`write`, or the host's anchored-editing family: `replace`, `replace_match`, `insert`, `copy`, `move`, `undo_last_change`). Defaults to `scope`; an empty array makes writing impossible while reads keep working. Relatives are bound to the task tree; an **absolute** entry is an absolute grant and may point outside it (a review writing one report file). A refused write is charged to `maxWriteDenies`, not `maxDenies`, and the refusal points at a report. |
-| `readOnly` | `permissions` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. A **dispatch** that sets this without its own `writeScope` is read-only even when the profile carries one (`review`'s report directory is the shape): the dispatch's intent wins. Name a `writeScope` in the same layer to keep "read-only except this one file". |
+| `readOnly` | `permissions` | `boolean` | Refuse `edit` and `write`. On its own it is the same as `writeScope: []`; an explicit `writeScope` alongside it wins, so "read-only except this one file" is expressible. Charged to `maxWriteDenies`, answered with a report rather than an escalation. A **dispatch** that sets this without its own `writeScope` is read-only even when the role md carries one (`review`'s report directory is the shape): the dispatch's intent wins. Name a `writeScope` in the same layer to keep "read-only except this one file". |
 | `maxReads` | `permissions` | `number` | Cap on successful reads. |
-| `allowTools` | `permissions` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. Unioned with the profile's list; `reset: true` (below) drops that list so a dispatch can be narrower than its role. |
-| `reset` | `permissions` | `boolean` | On a layer that has one below it (the role over `default`, the dispatch over the role): "only these entries this time". Clears the lower layer's `bash.read` / `bash.write` / `bash.allow` **and** its `allowTools` before this layer's own lists are applied, so both a command allowlist and a tool allowlist can be made tighter than the layer below. `bash.deny` is not cleared. `bash.reset` is the same thing for the bash columns alone. See [Profiles](#profiles). |
+| `allowTools` | `permissions` | `string[]` | Extra non-executor tool names to allow. It cannot widen a path tool: names this layer already judges are judged first, so adding `replace` here does not let it write outside the write scope. Unioned with the role md's list; `reset: true` (below) drops that list so a dispatch can be narrower than its role. |
+| `reset` | `permissions` | `boolean` | On a layer that has one below it (the dispatch over the role md): "only these entries this time". Clears the lower layer's `bash.read` / `bash.write` / `bash.allow` **and** its `allowTools` before this layer's own lists are applied, so both a command allowlist and a tool allowlist can be made tighter than the layer below. `bash.deny` is not cleared. `bash.reset` is the same thing for the bash columns alone. See [Role defaults](#role-defaults). |
 | `worktree` | dispatch (sibling of `permissions`) | `boolean` | Optional, defaults to `false`. When `true`, a `subagent` or nested `subagent_launch` call whose `agent` resolves to this strategy gets `worktree: true` filled in if the caller did not supply one (`??=`: `null` and `undefined` count as absent; an explicit `false` wins). This is a default, not a grant: no call is refused and neither deny budget changes. No resolvable strategy means no fill. |
 | `tools` | `permissions` | `object` | Per-tool overrides for tools the defaults do not cover: `{ "my_edit": { "access": "write", "path": "file" } }`. `access` is `read` or `write`; `path` names the argument holding the target path, or is `false` for a tool with no path argument (a write tool declared that way is always refused); `transferSource` (`read`/`write`) says how a two-file tool's **source** is judged — `copy` reads its source while `move` deletes from it, and the built-in defaults already say so. The path argument name is taken from the tool's own schema when omitted, so anchors-based tools usually need only `access`. A malformed entry refuses everything. |
 | `maxDenies` | `permissions` | `number` | Consecutive grant refusals before the run stops; an allowed working call resets the count. `0` disables. Defaults to 5. |
@@ -50,13 +50,13 @@ The namespace key never holds policy fields directly: a dispatch wraps them in `
 | --- | --- | --- |
 | `bash.allow` | `string[]` | The allowlist column. It answers only *may this command run here*; whether the command reads or writes is judged from the command itself (see below). Matching is per token as a prefix, or `re:` regexes (which see the command exactly as written). |
 | `bash.read` / `bash.write` | `string[]` | Legacy columns, kept with their exact old meaning: a `read` entry grants read-only, a `write` entry grants write. Matching is per token as a prefix, or `re:` regexes (which see the command exactly as written). A leading `NAME=value` assignment is stripped before matching — `HOME=/tmp/x node a.ts` matches an entry `node` — so an entry must start with the program name: `HOME=/tmp node` is a rule that can never fire. Names that change which program runs or load code into it (`LD_*`, `NODE_*`, `GIT_*`, `PYTHON*`, `PATH`, `IFS`, `PAGER`, `BASH_ENV`, …) are refused instead, because they would turn an allowlisted command into arbitrary code. A config that spells them gets one migration warning per source; in an agent-md `permissions.bash` block they are rejected — that block takes only `allow`, `deny`, `writable` and `network`. |
-| `bash.reset` | `boolean` | Only meaningful on a layer that has one below it: drop that layer's `bash.read`, `bash.write` and `bash.allow` before this layer's lists are applied — "only these entries this time", so a task can be tighter than its role. `bash.deny` is not dropped. The top-level `reset` does the same and also clears `allowTools`; see [Profiles](#profiles). |
+| `bash.reset` | `boolean` | Only meaningful on a layer that has one below it: drop that layer's `bash.read`, `bash.write` and `bash.allow` before this layer's lists are applied — "only these entries this time", so a task can be tighter than its role. `bash.deny` is not dropped. The top-level `reset` does the same and also clears `allowTools`; see [Role defaults](#role-defaults). |
 | `bash.writable` | `boolean` | Grant write access to the write scope, for tests and builds; git's own directories and `node_modules` are added, so `git add`/`commit` and an install work. Only scope entries that cover a whole subtree open a directory; file-level entries open just the files they match. In a linked worktree git's grant excludes `.git/hooks` and `.git/config`; in a plain checkout it cannot. This is the ceiling: `allow` never implies write, and with `writable: false` there is no write access at all — `writablePaths` entries are not granted, and the sandbox mounts nothing writable except `/tmp` and the device nodes. |
 | `bash.network` | `boolean` | Restore networking inside the sandbox. |
 | `bash.writablePaths` | `string[]` | Further writable paths, such as the pnpm store. |
 | `bash.scratchPaths` | `false \| string[]` | Adjusts the build/test artefact directories, which are derived from the toolchain manifests the project has; `false` disables detection, an array appends explicit directories. |
 | `bash.env` | `object` | Environment variables injected into the sandbox. |
-| `bash.deny` | `string[]` | Commands no caller can re-allow. A project profile's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one, and neither `reset` nor `bash.reset` lifts them. |
+| `bash.deny` | `string[]` | Commands no caller can re-allow. A role md's entries are unioned in from the caller's own, so a dispatch can add deny entries but never remove one, and neither `reset` nor `bash.reset` lifts them. |
 | `bash.dependencyGate` | `boolean \| string[]` | Defaults to `true`. Before a write-classified command or a package-manager invocation runs, every directory in the working tree (two levels down) that has a package-manager lockfile (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`/`bun.lock`) must also show an install — `node_modules/.bin`, or `.pnp.cjs` for a Yarn PnP project; if one does not, the command is refused and the directory is named. Read-only commands and `git` are exempt: `git` needs no dependencies, and committing work is what keeps a worktree alive. A wrapper does not hide the payload — `sh -c "pnpm test"`, `env pnpm test` and `exec pnpm test` are gated too. What a script file contains (`node build.mjs`) is not visible from the command line, so that form passes; the gate is a guard against a confusing install attempt, not a boundary. It catches a missing install, not an install that is stale against the lockfile — the latter is pnpm's own `verify-deps-before-run` territory. An array lists directory prefixes to skip, for a lockfile nobody installs — a `fixtures/` sample, a vendored example: a plain path covers that directory and everything below it (the same reading as a `scope` entry), resolved against the working directory, but the match stops at a path boundary, so `fixtures` does not cover `fixtures-old`. Entries are literal paths, not globs; a glob is named in the refusal rather than silently matching nothing. `[]` skips nothing, the same as `true`. `false` turns the check off. |
 | `bash.cpuStallSeconds` | `number \| false` | Off by default. When set, the helper samples the CPU time of the whole command tree — it is PID 1 of a private PID namespace, so the tree is what `/proc` shows — and kills it once the tree has used **no** CPU for that many seconds, printing why and exiting `79`. The point is to separate a deadlock from a slow build, which a wall-clock limit cannot: a compiling tree gains CPU in every sample, a tree waiting on a lock, a socket, or an orphaned child gains none. Two limits to know before turning it on: a command that deliberately waits (`sleep 300`, a backoff loop) also uses no CPU and will be killed, and the helper cannot see output because stdio is inherited rather than piped, so "no output" cannot corroborate the reading. That is why nothing is armed by default — pick a number well above your slowest quiet gap between CPU bursts. The kill is annotated with `[sandbox]` in the result, saying a retry will stall the same way. |
 
@@ -211,7 +211,7 @@ The whole tree readable and writable, with publishing reserved to the parent.
 ```
 
 `git commit` is in `deny` rather than simply left out of `write`, so no dispatch can re-allow it —
-that is what a deny list is for, and it is the one part of a profile a caller cannot override.
+that is what a deny list is for, and it is the one part of the role md a caller cannot override.
 
 ### A read-only researcher
 
@@ -246,56 +246,59 @@ applies, and the two differ:
 Neither counts usage errors — a missing path, a shell metacharacter, an empty command — so a
 malformed call never spends the budget.
 
-## Profiles
+## Role defaults
 
 Bindings written per dispatch are easy to forget, and forgetting them means no restriction at all.
-A project can declare per-role defaults once, in `.pi/subagent-bindings.json`:
+A project declares per-role defaults in the role's own agent definition, `.pi/agents/<role>.md`,
+under an `extend:` block:
 
-```json
-{
-  "coder": { "scope": ["."], "writeScope": ["."], "bash": { "deny": ["git push"] } },
-  "review": { "scope": ["."], "readOnly": true, "writeScope": ["/tmp/pi-review-reports"] }
-}
+```markdown
+---
+name: review
+subagentOnlyExtensions: /path/to/pi-subagents-extend/.pi/agent-profiles/md-role.ts
+extend:
+  permissions:
+    scope: ["."]
+    readOnly: true
+    write: ["/tmp/pi-review-reports"]
+    bash:
+      deny: ["git push"]
+---
 ```
 
-A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`).
+The `extend.permissions` block uses the same fields as the dispatch in the role md's spellings —
+the write scope is `write`, the deny budgets are `budgets.deny` / `budgets.writeDeny`; a dispatch
+spells them `writeScope`, `maxDenies` and `maxWriteDenies`. The extension is loaded by
+`.pi/agent-profiles/md-role.ts` (`export default activate`), which passes no profile name: the
+reader recomputes the policy from the md's merged fields, so a md that supplies `scope` produces an
+active policy with no other configuration at all.
 
-and load one from a two-line module the agent declares:
-
-```ts
-// .pi/agent-profiles/review.ts
-import { profile } from "/path/to/pi-subagents-extend/packages/pi-plugin/src/profile.ts"
-export default profile("review")
-```
-
-Three layers, one direction — `default` → role → dispatch:
+Two layers, one direction — role md → dispatch:
 
 | Layer | Where it is written | What it does |
 | --- | --- | --- |
-| `default` | the `"default"` key of `.pi/subagent-bindings.json` | the **floor** for every role in the project; it applies to all of them |
-| role | that role's own key in the same file | **adds to** `default`; it does not replace it |
-| dispatch | the `extensionBindings` of one call | **adds to** the role's result |
+| role md | the role's `extend` block in `.pi/agents/<role>.md` | the role's default: its write grant, its allowlist, its budget |
+| dispatch | the `extensionBindings` of one call | **adds to** the role's default |
 
-So a role inherits what `default` supplies instead of restating it, and a dispatch inherits the role's.
-Narrowing is the separate, explicit act described below (`reset: true`) — a role or a dispatch cannot
-be made tighter just by writing a shorter list.
+A dispatch inherits the role md's defaults. Narrowing is the separate, explicit act described below
+(`reset: true`) — a dispatch cannot be made tighter just by writing a shorter list.
 
 Merging is **per field** — never one layer replacing another — and the field list is the whole rule:
 
 | Category | Fields | Why |
 | --- | --- | --- |
-| **union** | `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths` | the profile's entries stay and the call's are appended (base first, duplicates dropped), so a dispatch can authorise one more command without restating the list it already has. An **empty array written in the upper layer** is not "add nothing" — it empties that column (see below), and `bash.write` / `bash.allow` are merged as one column, so emptying either empties both — the spellings no longer mean the same thing: a `write` entry grants write, an `allow` entry leaves the read/write judgement to the extension; `allowTools` has no empty-list form, `reset: true` is how that list is cleared |
+| **union** | `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths` | the role md's entries stay and the call's are appended (base first, duplicates dropped), so a dispatch can authorise one more command without restating the list it already has. An **empty array written in the dispatch** is not "add nothing" — it empties that column (see below), and `bash.write` / `bash.allow` are merged as one column, so emptying either empties both — the spellings no longer mean the same thing: a `write` entry grants write, an `allow` entry leaves the read/write judgement to the extension; `allowTools` has no empty-list form, `reset: true` is how that list is cleared |
 | **union, hard floor** | `bash.deny` | a deny entry is a restriction, not a grant, and no layer can lift one: "structurally forbidden" has to survive a dispatch that rewrites the allowlist |
 | **replaced** | `scope`, `writeScope` | a task's range has to be able to be **narrower** than the role default. A union would grow file access on every dispatch — the wrong direction for the one field that decides what may be read, and it would make "narrower than the role" inexpressible |
 | **the call wins** | `readOnly`, `maxReads`, `maxDenies`, `maxWriteDenies`, `probe`, `tools`, `worktree`, `bash.writable`, `bash.network`, `bash.dependencyGate`, `bash.cpuStallSeconds`, `bash.scratchPaths` | these describe *this* task, so the dispatch's value is the value. `probe` and `tools` are replaced whole, not deep-merged. `bash.env` merges per variable name, the call winning on a collision |
 
-Why `deny` can never be anything but a union: a profile's deny list is where a project writes what must
+Why `deny` can never be anything but a union: the role md's deny list is where a project writes what must
 not happen at all (`git push`, `git reset`). If a call could replace it, every dispatch would have to
 restate the whole list, and the one that forgets silently opens the command.
 
 `reset: true` is how a layer says "only these entries this time" — the one way to be **narrower** than
-the layer below. It clears the lower layer's `bash.read` / `bash.write` / `bash.allow` **and** its
-`allowTools` before the layer's own lists are applied:
+the layer below. It clears the role md's `bash.read` / `bash.write` / `bash.allow` **and** its
+`allowTools` before the dispatch's own lists are applied:
 
 ```json
 {
@@ -311,19 +314,7 @@ the layer below. It clears the lower layer's `bash.read` / `bash.write` / `bash.
 ```
 
 That dispatch may run `pnpm run typecheck` and nothing else, and its `allowTools` is exactly `["read"]`
-rather than a union with the role's list, however many commands and tools that profile carries. A role
-uses the same key against `default`:
-
-```json
-{
-  "default": { "bash": { "read": ["git push"] } },
-  "review": { "reset": true, "bash": { "read": ["git diff"] } }
-}
-```
-
-`review` may run `git diff` and not `git push`. Without `reset` it would inherit both, because
-`default` is a floor rather than a peer.
-
+rather than a union with the role's list, however many commands and tools that role md carries.
 `bash.reset: true` is the same thing for the bash columns alone — it does not touch `allowTools`. It
 predates the top-level key and still reads well beside `bash.read`.
 
@@ -340,24 +331,22 @@ for a dispatch even when its role carries a long allowlist — writing the empty
 them empties the column, even when the other spelling is written in the same object. The two spellings
 answer different questions now: a `write` entry authorises the command as a write, an `allow` entry
 authorises it to run and the extension judges read or write from the command itself. `"allow": []` with
-`"write": ["git status"]` therefore drops a `write` the profile supplied and keeps only `git status`, and
+`"write": ["git status"]` therefore drops a `write` the role md supplied and keeps only `git status`, and
 the mirror image behaves identically. Key-wise merging got this wrong: the same intent ("keep only this
-one") produced two different columns depending on which spelling the *profile* had used, which is the same
+one") produced two different columns depending on which spelling the role md had used, which is the same
 silent retention the empty list exists to prevent, only harder to see.
 
-A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the profile carries
+A dispatch that sets `readOnly: true` without a `writeScope` is read-only even when the role md carries
 one (`review`'s report directory is that shape): the read-only intent would otherwise be cancelled by
 a grant the dispatch never asked for. Add `"writeScope": ["/tmp/pi-review-reports"]` in the same
 dispatch to keep "read-only except this one directory".
 
 When both layers are in play the refusal's `source:` names both —
-`profile impl (.pi/subagent-bindings.json) + extensionBindings` — because the entry that answered may
-have come from either file.
+the role md plus `extensionBindings` — because the entry that answered may have come from either.
 
-A dispatch to a role that has a profile passes only `agent`, `model` and `task` —
-the three pieces a new role needs are in the usage skill
-[`pi-subagents-extend`](../packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#call-template).
-
+A dispatch to a role whose md carries the defaults passes only `agent`, `model` and `task` —
+how a new role is wired up is in the usage skill
+[`pi-subagents-extend`](../packages/pi-plugin/skills/pi-subagents-extend/SKILL.md#area-roles-one-md-per-code-area-policy-inside-the-md).
 A role's `worktree: true` fills the dispatch input instead of asking every caller to write it. The fill is `??=`: a missing or `null` `worktree` becomes `true`, and an explicit `false` keeps the call in the parent's working tree. The nested `subagent_launch` that pi-subagents sends before workflow children is treated the same way, keyed by that call's `agent` — so `tasks[]`, `chain` and script workflows are covered too. An agent with no resolvable strategy is left alone, and filling a value never refuses a call or moves a deny counter.
 ### Do not pin the edit tool in an agent definition
 

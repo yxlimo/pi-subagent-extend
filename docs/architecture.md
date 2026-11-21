@@ -38,7 +38,7 @@ before it — no module imports `index.ts`, which is what keeps the layers one-w
 | `bash/network.ts` | which commands need a round trip, with the local-query carve-out |
 | `bash/rules.ts` | rule parsing and merge, `classifyCommand`, the entry listing |
 | `bash/unreachable.ts` | the manifest walk that reports an entry no invocation can reach |
-| `policy.ts` | payload parsing, the merge semantics of profile and dispatch, globs |
+| `policy.ts` | payload parsing, the merge semantics of role md and dispatch, globs |
 | `paths.ts` | real paths, working-tree versus scope comparison, hidden-grant reporting |
 | `dependencies.ts` | lockfile discovery, the dependency gate, scratch-directory probing |
 | `budgets.ts` | the two refusal counters and their defaults |
@@ -48,7 +48,7 @@ before it — no module imports `index.ts`, which is what keeps the layers one-w
 | `role-config.ts` | role-md resolution, the `extend` block, identity from the prompt |
 | `deliverable.ts` | the main-checkout anchor and the deliverable link |
 | `context-scope.ts` | marker stripping and `.pi/main-only.md` injection |
-| `wiring/session-start.ts` | the profile read, the merge, the startup warnings, probe arming |
+| `wiring/session-start.ts` | the role md read, the merge, the startup warnings, probe arming |
 | `wiring/agent-start.ts` | the child's prompt sections, deliverable wiring, `preExec`, the worktree decision |
 | `wiring/tool-call/paths.ts` | whether a path argument may be touched |
 | `wiring/tool-call/anchor.ts` | which file an anchor belongs to, from the sidecar |
@@ -69,11 +69,10 @@ Two, and either can stand alone:
   `extensionBindings: { "pi-subagents-extend/1": { "permissions": { … } } }`. pi-subagents encodes them into
   `PI_SUBAGENT_EXTENSION_BINDINGS`; the extension reads that variable once at activation, because
   it exists only until a foreground subagent's session starts and is then restored.
-- **A profile**, a per-role default declared in the project and loaded through a two-line module
-  the agent declares. See [agent profiles](#agent-profiles).
+- **The role md**, the per-role default declared in the role's own agent definition
+  (`.pi/agents/<role>.md`, `extend:` block) and loaded through the md-role loader. See [Role defaults](#role-defaults).
 
-A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
-
+A dispatch's `extensionBindings` and the role md's `extend.permissions` block use the same fields under different spellings: the dispatch nests them under `permissions` and spells the write scope `writeScope`, the deny budgets `maxDenies` / `maxWriteDenies`, plus the dispatch-only `maxReads`; the role md spells the write scope `write` and the budgets `budgets.deny` / `budgets.writeDeny`. `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 Without either, the extension does nothing: no scope, no refusals, no side effects.
 
 Wildcards: `**` matches any number of directory levels, `*` any characters within one level, `?`
@@ -233,7 +232,7 @@ review is given exactly one file to write: `readOnly: true` together with
 The repeating-command criterion means "the same thing repeated **without progress**", so write
 activity also clears its counts and cancels a warning already issued: a subagent that edits a file and
 re-runs the same test command is working, not spinning. The cost is that write-class commands are not
-covered by this criterion at all — a profile that lists an interpreter as a write — the legacy `write`
+covered by this criterion at all — a config that lists an interpreter as a write — the legacy `write`
 column, or `allow`, since interpreters are classified as writes — exempts that interpreter's commands, and no amount of repetition trips the check. Read-class
 commands, the real spinning case, are unaffected. This was measured the hard way: two coding subagents
 were stopped mid-task by the criterion before the reset existed.
@@ -306,7 +305,7 @@ refusal towards a stop, and the refusal says so — it names the write scope (or
 and points at the report.
 
 Usage errors and hard rules never count: a missing path, shell metacharacters, an empty command,
-`powershell`/`codemode`, or a command matched by a profile's `bash.deny`. Those cannot be fixed by
+`powershell`/`codemode`, or a command matched by the role md's `bash.deny`. Those cannot be fixed by
 granting more, so charging them against the budget would stop a task for the wrong reason.
 
 The dependency gate is in this class too. Before a build or a package-manager command runs, every
@@ -454,46 +453,38 @@ isolation therefore requires avoiding fork context. This does not overlap pi-sub
 for a repository whose rules are irrelevant to subagents, wrong for one whose rules a subagent must
 follow.
 
-## Agent profiles
+## Role defaults
 
 Bindings have a practical gap: they can only be written by the parent **on each dispatch**, and an
-agent definition has nowhere to declare a default. Omitting them does not remove three
+agent definition has nowhere else to declare a default. Omitting them does not remove three
 prohibitions — it returns at the top of `tool_call`, so every restriction disappears.
 
-A profile attaches defaults to whichever entry point an agent declares, since the audience has to
-come from the loading path:
+A role md keeps the default with the role. The policy is declared in the role's own agent
+definition, `.pi/agents/<role>.md`, under an `extend:` block:
 
-```ts
-// .pi/agent-profiles/writer.ts — the path must be absolute: Node does not expand `~`
-import { profile } from "/path/to/pi-subagents-extend/packages/pi-plugin/src/profile.ts";
-export default profile("writer");
+```markdown
+---
+name: writer
+subagentOnlyExtensions: /path/to/pi-subagents-extend/.pi/agent-profiles/md-role.ts
+extend:
+  permissions:
+    scope: ["."]
+    bash:
+      allow: ["git status", "git diff", "pnpm test"]
+      writable: true
+      deny: ["git stash", "git checkout", "git reset"]
+---
 ```
 
-```json
-// <project>/.pi/subagent-bindings.json
-{
-  "default": { "maxDenies": 5 },
-  "writer": {
-    "bash": {
-      "read": ["git status", "git diff"],
-      "write": ["pnpm test"],
-      "writable": true,
-      "deny": ["git stash", "git checkout", "git reset"]
-    }
-  },
-  "review": { "readOnly": true, "bash": { "read": ["git diff", "rg"] } }
-}
-```
+The extension is loaded by `.pi/agent-profiles/md-role.ts` (`export default activate`), which
+passes no profile name; the reader recomputes the policy from the md's merged fields, so a md that
+supplies `scope` produces an active policy with no other configuration at all.
 
-Merging runs over three layers, and the direction is one way: `default` → role → dispatch. `default` is
-the **floor** of every role in that file, the role's layer is appended to it, and the call's
-`extensionBindings` are appended to the result. A role therefore inherits `default` rather than
-restating it, and cannot be narrowed by writing a shorter list — narrowing is `reset: true`.
+Merging runs over two layers, and the direction is one way: role md → dispatch.
 
 | Layer | Source | Relation to the layer below |
 | --- | --- | --- |
-| `default` | the `"default"` key of `.pi/subagent-bindings.json` | the floor for every role |
-| role | that role's own key in the same file | appends to `default` |
+| role md | the role's `extend` block in `.pi/agents/<role>.md` | the role's default |
 | dispatch | `extensionBindings` of one call | appends to the role |
 
 Rules per field — never one layer over another:
@@ -501,9 +492,9 @@ Rules per field — never one layer over another:
 - **union** — `bash.read`, `bash.write`, `bash.allow`, `allowTools`, `bash.writablePaths`. The base
   entries come first and the call's are appended, so a dispatch adds an authorisation instead of
   restating the list, and cannot drop one it did not name. For `bash.read` / `bash.write` /
-  `bash.allow`, an **explicitly empty array in the upper layer** is a different instruction: it
+  `bash.allow`, an **explicitly empty array in the dispatch** is a different instruction: it
   empties that column rather than adding nothing. Reading `"read": []` as "add zero entries" left
-  the lower layer's whole allowlist in place, so a dispatch that meant to close bash kept the grant.
+  the role md's whole allowlist in place, so a dispatch that meant to close bash kept the grant.
   `bash.write` and `bash.allow` merge as one column (emptying either empties both) while meaning
   different things: `write` grants write, `allow` leaves the read/write judgement to the extension.
   `allowTools` and `bash.writablePaths` have no empty-list form; `reset: true` clears the former.
@@ -516,29 +507,28 @@ Rules per field — never one layer over another:
   `maxWriteDenies`, `tools`, `probe`, `bash.writable`, `bash.network`, `bash.dependencyGate`,
   `bash.cpuStallSeconds`, `bash.scratchPaths`); `bash.env` merges per variable name.
 - **`readOnly: true` with no `writeScope` in the same layer** empties the merged `writeScope`. Without
-  that, a profile's `writeScope` (the `review` role's report directory is the shape) cancelled a
+  that, a role md's `writeScope` (the `review` role's report directory is the shape) cancelled a
   dispatch's read-only intent, because the merged config then had an "explicit" write scope and
   explicit scope wins. Naming a `writeScope` in the same layer still expresses "read-only plus this
   one directory".
 - `reset: true` on a layer drops what it inherited — `bash.read` / `bash.write` / `bash.allow` **and**
   `allowTools` — before the layer's own lists are applied: "only these entries this time". A dispatch
-  uses it to be tighter than its role, and the role layer uses it to be tighter than `default`, which
-  would otherwise be a floor the role could never leave. `bash.deny` is still unioned, so narrowing an
+  uses it to be tighter than its role md. `bash.deny` is still unioned, so narrowing an
   allowlist never lifts a prohibition. `bash.reset: true` is the same for the bash columns alone (no
   `allowTools`) and stays for callers that only mean the commands.
 - A `bash` written as anything but an object is not ignored: the merged `bash` is empty, so bash is
-  refused. Field-by-field merging made a broken layer fall through to the lower layer's whole
+  refused. Field-by-field merging made a broken layer fall through to the role md's whole
   allowlist — a typo kept every grant, the opposite of what a broken grant should do.
-- The merged policy reports both layers in `source:` (`profile impl
-  (.pi/subagent-bindings.json) + extensionBindings`); a refusal is the one place the model reads that
-  string, and the entry that answered may live in either file.
-- A profile may omit `scope`, since a role does not know a task's paths. File access is then
+- The merged policy reports both layers in `source:` (the role md plus `extensionBindings`); a
+  refusal is the one place the model reads that string, and the entry that answered may live in
+  either.
+- A role md may omit `scope`, since a role does not know a task's paths. File access is then
   refused entirely while the bash allowlist still applies, so a forgotten binding fails loudly on
   the first read instead of silently permitting everything.
-- A profile that cannot be read — missing file, malformed JSON, neither `default` nor the role name
-  present — results in deny-all rather than no restriction.
+- A role md that cannot be read — missing file, malformed `extend` block — results in deny-all
+  rather than no restriction.
 
-The main session never loads these modules, so project defaults cannot lock it down by accident.
+The main session never loads the role md, so project defaults cannot lock it down by accident.
 
 ## Skills
 
@@ -548,7 +538,7 @@ reach the system prompt of whichever session loads the extension and nothing has
 
 | Skill | Contents |
 | --- | --- |
-| `pi-subagents-extend` | file scope, the bash columns and `re:` patterns, the sandbox, worktree setup, profiles, a call template |
+| `pi-subagents-extend` | file scope, the bash columns and `re:` patterns, the sandbox, worktree setup, role defaults, a call template |
 | `pi-subagents-extend-probes` | the probe criteria, the denial budget, warn and stop semantics, how to read a report after a stop |
 | `pi-subagents-extend-context` | the markers, `.pi/main-only.md`, the three entry points |
 

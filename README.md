@@ -59,7 +59,7 @@ subagent(
 )
 ```
 
-The namespace key never holds policy fields directly: a dispatch wraps them in `permissions`. A dispatch and `.pi/subagent-bindings.json` use the same field names but different wrapping: the dispatch nests them under `permissions`, while the project profile stays flat per role (`{"coder": {"scope": [...]}}`). `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. The role md's `extend.permissions` block spells the write scope `write` and the deny budgets `budgets.deny` / `budgets.writeDeny`; a dispatch uses `writeScope`, `maxDenies` and `maxWriteDenies`, plus the dispatch-only `maxReads`. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
+The namespace key never holds policy fields directly: a dispatch wraps them in `permissions`. A dispatch's `extensionBindings` and the role md's `extend.permissions` block use the same fields under different spellings: the dispatch spells the write scope `writeScope`, the deny budgets `maxDenies` / `maxWriteDenies`, plus the dispatch-only `maxReads`; the role md spells the write scope `write` and the budgets `budgets.deny` / `budgets.writeDeny`. `worktree` is a sibling of `permissions` in a dispatch, never a field inside it; the role md also keeps `worktree` as a separate block. Those spellings are not interchangeable. `setup` and `output` in a dispatch are ignored with a warning; put `setup.preExec` and `output.deliverable` in the role md.
 
 That is the whole idea: `scope` is what the subagent may read, and everything else — writes, shell,
 network — is off until named. A reviewer, for example, reads the repository and writes exactly one
@@ -90,7 +90,7 @@ The extension ships three skills, offered to the agent that loads it:
 
 | Document | Contents |
 | --- | --- |
-| [docs/usage.md](docs/usage.md) | the field reference, recommended scenarios, profiles, and running without a parent agent |
+| [docs/usage.md](docs/usage.md) | the field reference, recommended scenarios, role defaults, and running without a parent agent |
 | [docs/architecture.md](docs/architecture.md) | the three entry points, the refusal model, probes, the denial budget, the hard stop |
 | [docs/sandbox.md](docs/sandbox.md) | what the helper does: Landlock, the namespaces, capabilities, and why offline means "no route out" |
 | [docs/worktrees.md](docs/worktrees.md) | the worktree setup hook, the `node_modules` link, and what a worktree run delivers |

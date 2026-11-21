@@ -1,6 +1,6 @@
 ---
 name: pi-subagents-extend-context
-description: When delegating a subagent, use it to keep main-agent-only content out of the subagent's prompt — the sections fenced by <!-- main-agent-only:start --> in AGENTS.md are invisible to the subagent, and main-agent-only rules go in .pi/main-only.md, which is injected into the main session only. Use it when AGENTS.md mixes in delegation discipline, waiting policy, reporting conventions or main-agent-only write-permission boundaries that a subagent would read as wasted context and mistake for its own duties. Covers the division of labour of the three entry points, how to write the markers, the fallback when a marker is left unclosed, and the trade-off against the all-or-nothing inheritProjectContext switch.
+description: When AGENTS.md mixes in main-agent-only content — delegation discipline, waiting policy, reporting conventions, main-agent-only write-permission boundaries — that a subagent would read as wasted context and mistake for its own duties. Strips the sections fenced by <!-- main-agent-only:start --> from the subagent's copy of AGENTS.md, and holds rules that are wholly the main agent's in .pi/main-only.md, injected into the main session only. Covers the division of labour of the three entry points, how to write the markers, the fallback when a marker is left unclosed, and the trade-off against the all-or-nothing inheritProjectContext switch.
 ---
 
 # Context isolation: let AGENTS.md feed only what should be fed
