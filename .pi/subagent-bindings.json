@@ -51,7 +51,12 @@
         "pnpm --dir packages/pi-plugin run typecheck",
         "pnpm --dir packages/helper test",
         "cargo test",
-        "packages/helper/target/release/pi-subagents-extend-helper"
+        "packages/helper/target/release/pi-subagents-extend-helper",
+        "mise tasks",
+        "mise run typecheck",
+        "mise run lint",
+        "mise run test:fast",
+        "re:^mise run test:(unit|docs|policy|paths|role|mock|handler|e2e|hashline)$"
       ],
       "write": [
         "mkdir",
@@ -63,6 +68,7 @@
         "node",
         "python3",
         "cargo",
+        "mise run setup:helper",
         "npx",
         "git init",
         "git add",
