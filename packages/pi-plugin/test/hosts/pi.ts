@@ -9,16 +9,17 @@ import type { HostDriver, HostRun } from "./types.ts";
 
 const PKG_DIR = fileURLToPath(new URL("../..", import.meta.url));
 const EXT = join(PKG_DIR, "src", "index.ts");
-const SUBAGENTS_BUNDLE = join(
-	homedir(),
-	".pi",
-	"agent",
-	"npm",
-	"node_modules",
-	"pi-subagents",
-	"bundle",
-	"index.js",
-);
+// Resolve pi-subagents as a package first: it is a devDependency, so CI and any fresh
+// clone have it. The global pi install is only a fallback for a machine that has the
+// extension but not the dependency installed.
+function subagentsBundle(): string {
+	try {
+		return fileURLToPath(import.meta.resolve("pi-subagents"));
+	} catch {
+		return join(homedir(), ".pi", "agent", "npm", "node_modules", "pi-subagents", "bundle", "index.js");
+	}
+}
+const SUBAGENTS_BUNDLE = subagentsBundle();
 const SDK_ENTRY = import.meta.resolve("@earendil-works/pi-coding-agent");
 const { RpcClient } = await import(SDK_ENTRY);
 const PI_CLI = join(dirname(fileURLToPath(SDK_ENTRY)), "cli.js");
